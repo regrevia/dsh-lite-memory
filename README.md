@@ -16,7 +16,7 @@ Lightweight memory for the DeepSeek Harness. Nothing in the system prompt, nothi
 | 场景 | 行为 |
 | --- | --- |
 | **L0** 你明确要求「记住这个」 | 立即写盘，一条确认行 |
-| **L1** 它发现有跨会话价值的经验 | 一行灰字 `可记「X」` + 一个 `保留` 按钮；不写问句、不用你打字，不点就永远不写，48 小时内不重复 |
+| **L1** 它发现有跨会话价值的经验 | 一行灰字 `memory · keep "X"?` + 一个 `keep` 按钮；不写问句、不用你打字，不点就永远不写，48 小时内不重复 |
 | **L2** 常识、一次性参数、凭据的值 | 永不写入 |
 
 触发词：`记住`、`记一下`、`上次`、`规范`、`约定`、`路径`、`凭据怎么取`。
@@ -24,14 +24,14 @@ Lightweight memory for the DeepSeek Harness. Nothing in the system prompt, nothi
 | Case | Behaviour |
 | --- | --- |
 | **L0** you ask it to remember | written immediately, one confirmation line |
-| **L1** it spots something worth keeping | one muted line `可记「X」` with a single `保留` button — never a question, no typing, nothing written unless you click, at most once per two days |
+| **L1** it spots something worth keeping | one muted line `memory · keep "X"?` with a single `keep` button — never a question, no typing, nothing written unless you click, at most once per two days |
 | **L2** common sense, one-off parameters, credential values | never written |
 
 ## 点一下就存 / One click, no turn
 
-「保留」是同源直写：不产生消息、不动输入框、不打断当前回复。按钮变 `已保存` 就结束了。
+`keep` 是同源直写：不产生消息、不动输入框、不打断当前回复。按钮变 `kept` 就结束了。自动写入的行尾有个 `✕`，点它就把刚才那条移入归档。
 
-`保留` writes straight to disk from the page: no message, no extra model turn, the input box untouched. The button turns into `已保存` and that is the whole interaction.
+`keep` writes straight to disk from the page: no message, no extra model turn, the input box untouched. The button turns into `kept` and that is the whole interaction. An auto-saved line ends with `✕`: click it and that entry moves to the archive.
 
 ## 为什么轻 / Why it stays light
 

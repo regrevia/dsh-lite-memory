@@ -66,7 +66,7 @@ function readJsonBody(req, limit = 8192) {
   });
 }
 
-/** 「保留」按钮的唯一入口：只认已经建议过的那条，不接收任意正文。 */
+/** 「保留」和「✕」的唯一入口：保留只认已经建议过的那条，删除只按标题找已有条目。 */
 function keepHandler(webServer) {
   return async (req, res) => {
     if (req.method !== 'POST') return sendJson(res, 405, { ok: false, reason: '只接受 POST' });
@@ -75,7 +75,8 @@ function keepHandler(webServer) {
       return sendJson(res, 403, { ok: false, reason: '来源不符' });
     }
     const pathname = String(req.url || '').split('?')[0];
-    if (pathname !== REMOTE_PATH + '/keep') return sendJson(res, 404, { ok: false, reason: '未知操作' });
+    const known = pathname === REMOTE_PATH + '/keep' || pathname === REMOTE_PATH + '/undo';
+    if (!known) return sendJson(res, 404, { ok: false, reason: '未知操作' });
     let body;
     try {
       body = await readJsonBody(req);
@@ -86,6 +87,16 @@ function keepHandler(webServer) {
     const title = typeof body.title === 'string' ? body.title : '';
     if (cwd.length === 0 || title.length === 0) return sendJson(res, 400, { ok: false, reason: '请求不完整' });
     const scope = scopeOf(cwd);
+    if (body.op === 'undo' || pathname === REMOTE_PATH + '/undo') {
+      const record = loadIndex(scope).entries.find((item) => item.title === title);
+      if (!record) return sendJson(res, 404, { ok: false, reason: '没有这条记忆' });
+      try {
+        forget(scope, record.id);
+        return sendJson(res, 200, { ok: true, title: record.title, id: record.id });
+      } catch (error) {
+        return sendJson(res, 400, { ok: false, reason: error instanceof Error ? error.message : '删除失败' });
+      }
+    }
     const draft = findSuggestion(scope, title);
     if (!draft) return sendJson(res, 404, { ok: false, reason: '没有待保留的建议' });
     try {
@@ -160,7 +171,7 @@ export function apply(ctx) {
       },
       render: (value) => [{
         type: 'text',
-        text: `记忆 · 已存「${value.title}」${value.merged ? '（并入了同主题条目）' : ''}`,
+        text: value.merged ? `memory · merged "${value.title}"` : `memory · saved "${value.title}"`,
       }],
     },
     execute: async (args, execution) => {
@@ -187,7 +198,7 @@ export function apply(ctx) {
       },
       render: (value) => [{
         type: 'text',
-        text: value.asked ? `可记「${value.title}」` : `记忆 · 未建议：${value.reason ?? ''}`,
+        text: value.asked ? `memory · keep "${value.title}"?` : 'memory · skipped',
       }],
     },
     execute: async (args, execution) => {
@@ -216,7 +227,7 @@ export function apply(ctx) {
       },
       render: (value) => [{
         type: 'text',
-        text: value.count === 0 ? '记忆 · 无匹配' : `记忆 · 命中 ${value.count} 条 · 引用 ${value.chars} 字\n${value.index}`,
+        text: value.count === 0 ? 'memory · no hits' : `memory · ${value.count} hits · ${value.chars} chars\n${value.index}`,
       }],
     },
     execute: async (args, execution) => {
@@ -264,7 +275,7 @@ export function apply(ctx) {
       },
       render: (value) => [{
         type: 'text',
-        text: `记忆 · 已归档「${value.title}」`,
+        text: `memory · dropped "${value.title}"`,
       }],
     },
     execute: async (args, execution) => {
