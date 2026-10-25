@@ -29,7 +29,12 @@ const fresh = (label) => {
   return scopeOf(dir);
 };
 
-const bodyOf = (scope, id) => fs.readFileSync(path.join(scope.dir, 'entries', `${id}.md`), 'utf8');
+const stateOf = (scope) => JSON.parse(fs.readFileSync(path.join(scope.dir, 'state.json'), 'utf8')).payload;
+const bodyOf = (scope, id) => {
+  const entry = stateOf(scope).entries.find((row) => row.id === id);
+  return entry ? entry.current.body : undefined;
+};
+const rawState = (scope) => fs.readFileSync(path.join(scope.dir, 'state.json'), 'utf8');
 const countOf = (scope) => loadIndex(scope).entries.length;
 const suggestionsOf = (scope) => loadIndex(scope).suggestions;
 
@@ -83,14 +88,14 @@ test('similar title without id returns resolution and writes nothing', () => {
   const scope = fresh('similar');
   const base = upsert(scope, { title: 'npm 与 GitHub 发布凭据位置', summary: '两处凭据各在哪取', body: 'keychain 与 gh auth' });
   const before = countOf(scope);
-  const entriesBefore = fs.readdirSync(path.join(scope.dir, 'entries')).sort();
+  const entriesBefore = rawState(scope);
   const conflict = upsert(scope, { title: 'npm 与 GitHub 发布凭据在哪', summary: '两处凭据各在哪取', body: '另一条' });
   assert.equal(conflict.needsResolution, true);
   assert.equal(conflict.record, null);
   assert.ok(conflict.similarList.length >= 1 && conflict.similarList.length <= 2);
   assert.equal(conflict.similarList[0].id, base.record.id);
   assert.equal(countOf(scope), before);
-  assert.deepEqual(fs.readdirSync(path.join(scope.dir, 'entries')).sort(), entriesBefore);
+  assert.equal(rawState(scope), entriesBefore);
   const distinct = upsert(scope, { title: 'npm 与 GitHub 发布凭据在哪', summary: '两处凭据各在哪取', body: '另一条', resolution: 'distinct' });
   assert.equal(distinct.needsResolution, false);
   assert.equal(distinct.merged, false);
@@ -112,7 +117,7 @@ test('oversized body is rejected, old data untouched', () => {
   const scope = fresh('oversize');
   const big = 'x'.repeat(LIMITS.entryBytes + 1);
   assert.throws(() => upsert(scope, { title: '太大', summary: '一条超大正文', body: big }), /超过/);
-  assert.equal(fs.existsSync(path.join(scope.dir, 'index.json')), false);
+  assert.equal(fs.existsSync(path.join(scope.dir, 'state.json')), false);
   const first = upsert(scope, { title: '正常', summary: '一条正常正文', body: '保留我' });
   assert.throws(() => upsert(scope, { id: first.record.id, title: '正常', summary: '一条正常正文', body: big }), /超过/);
   assert.equal(bodyOf(scope, first.record.id), '保留我');
@@ -123,7 +128,7 @@ test('over-long title and summary are errors, not silent slices', () => {
   const scope = fresh('length');
   assert.throws(() => upsert(scope, { title: 't'.repeat(LIMITS.titleChars + 1), summary: '写得短一点' }), /标题超过/);
   assert.throws(() => upsert(scope, { title: '长摘要', summary: 's'.repeat(LIMITS.summaryChars + 1) }), /摘要超过/);
-  assert.equal(fs.existsSync(path.join(scope.dir, 'index.json')), false);
+  assert.equal(fs.existsSync(path.join(scope.dir, 'state.json')), false);
 });
 
 test('imperative summary and credentials are rejected', () => {
@@ -160,7 +165,7 @@ test('lock file from a dead writer is not stolen: busy instead of a guessed writ
   assert.throws(() => upsert(scope, { title: '拿不到锁', summary: '锁被别人拿着' }), /正忙/);
   const waited = Date.now() - started;
   assert.ok(waited >= 400 && waited < 3000, `锁等待 ${waited}ms`);
-  assert.equal(fs.existsSync(path.join(scope.dir, 'index.json')), false);
+  assert.equal(fs.existsSync(path.join(scope.dir, 'state.json')), false);
   fs.rmSync(lock, { force: true });
   const ok = upsert(scope, { title: '拿得到锁', summary: '锁被清掉之后' });
   assert.equal(ok.merged, false);
@@ -204,17 +209,18 @@ test('search bumps hits and lastUsed', () => {
   assert.equal(record.hits, 1);
   assert.ok(Date.parse(record.lastUsed) >= Date.parse(item.record.created));
   assert.ok(record.lastUsed.endsWith('Z'));
+  const generation = loadIndex(scope).generation;
+  store.saveIndex(scope, loadIndex(scope));
+  assert.equal(loadIndex(scope).generation, generation);
 });
 
-test('readEntry returns the body, and a missing body is an error', () => {
+test('readEntry returns the body from state, unknown ids are null', () => {
   const scope = fresh('read');
   const item = upsert(scope, { title: '读正文', summary: '正文要读得出来', body: '正文内容' });
   const record = readEntry(scope, item.record.id);
   assert.equal(record.body, '正文内容');
-  assert.notEqual(readEntry(scope, 'mem_000000000000'), {});
   assert.equal(readEntry(scope, 'mem_deadbeef0000'), null);
-  fs.rmSync(path.join(scope.dir, 'entries', `${item.record.id}.md`));
-  assert.throws(() => readEntry(scope, item.record.id), /正文缺失/);
+  assert.equal(store.readCitationBody('session-read', 'mem_deadbeef0000'), null);
 });
 
 test('forget archives both body and record; undo restores the previous version', () => {
@@ -228,10 +234,9 @@ test('forget archives both body and record; undo restores the previous version',
   const again = undoChange(scope, first.record.id);
   assert.equal(again.mode, 'archived');
   assert.equal(countOf(scope), 0);
-  const files = fs.readdirSync(path.join(scope.dir, 'archive'));
-  assert.ok(files.includes(`${first.record.id}.md`));
-  assert.ok(files.includes(`${first.record.id}.json`));
-  assert.equal(fs.existsSync(path.join(scope.dir, 'entries', `${first.record.id}.md`)), false);
+  const archived = loadIndex(scope).archived.find((item) => item.id === first.record.id);
+  assert.equal(archived.status, 'archived');
+  assert.equal(archived.body, '第一版正文');
   assert.equal(forget(scope, first.record.id), null);
 });
 
@@ -300,7 +305,7 @@ test('expired candidates are invisible and unusable', () => {
   store.saveIndex(scope, index);
   assert.equal(findSuggestion(scope, noted.id), null);
   assert.equal(acceptCandidate(scope, noted.id, '').ok, false);
-  assert.equal(fs.existsSync(path.join(scope.dir, 'entries')), false);
+  assert.equal(countOf(scope), 0);
 });
 
 test('candidate draft is validated like a real entry', () => {
@@ -366,15 +371,17 @@ test('到硬上限时归档最久没读的一条，不拒绝新记忆', () => {
   }));
   fs.mkdirSync(path.join(scope.dir, 'entries'), { recursive: true });
   for (const entry of entries) {
-    fs.writeFileSync(path.join(scope.dir, 'entries', `${entry.id}.md`), `正文 ${entry.title}`);
+    fs.writeFileSync(path.join(scope.dir, 'entries', `${entry.id}.md`), 'x'.repeat(chunk));
   }
   const saved = upsert(scope, { title: '新的一条', summary: '满了也要能存', body: '新正文' });
   assert.equal(saved.record.title, '新的一条');
   assert.equal(saved.archived.length, 1);
   assert.equal(saved.archived[0].title, '旧条目 0');
   assert.equal(countOf(scope), 20);
-  const archived = JSON.parse(fs.readFileSync(path.join(scope.dir, 'archive', `${saved.archived[0].id}.json`), 'utf8'));
-  assert.equal(archived.title, '旧条目 0');
+  const archived = stateOf(scope).entries.find((row) => row.id === saved.archived[0].id);
+  assert.equal(archived.status, 'archived');
+  assert.equal(archived.current.title, '旧条目 0');
+  assert.equal(archived.current.body.length, chunk);
 });
 
 test('the global layer reports both lines', () => {
