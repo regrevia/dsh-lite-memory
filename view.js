@@ -449,6 +449,48 @@ export function errorView(code, message) {
   };
 }
 
+/** 宿主合成的「用户消息」不是用户说的话：提示查询只认 source.kind === 'user'。 */
+const SYNTHETIC_PREFIXES = [
+  'Current runtime context',
+  'This is an automatically generated checkpoint',
+  'Fast mode reminder',
+  '<system-reminder>',
+  '<goal_round>',
+  'Auto schedule:',
+  'Time sampled while preparing',
+  'background job ',
+];
+
+export function textOfMessage(message) {
+  const content = message?.content;
+  if (typeof content === 'string') return content.trim();
+  if (!Array.isArray(content)) return '';
+  let text = '';
+  for (const part of content) {
+    if (!part || typeof part !== 'object') continue;
+    if (part.type === 'tool-result' || part.type === 'tool-call') return '';
+    if (part.type !== 'text' || typeof part.text !== 'string') continue;
+    text += `${part.text}\n`;
+  }
+  return text.trim();
+}
+
+/** 最后一句真人说的话；goal 轮次、压缩摘要、时间快照、后台任务回执都不算。 */
+export function newestUserQuery(messages) {
+  if (!Array.isArray(messages)) return '';
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (!message || message.role !== 'user') continue;
+    const kind = message?.source?.kind;
+    if (kind && kind !== 'user') continue;
+    const text = textOfMessage(message);
+    if (!text) continue;
+    if (SYNTHETIC_PREFIXES.some((prefix) => text.startsWith(prefix))) continue;
+    return text;
+  }
+  return '';
+}
+
 export function projectionText(view) {
   if (!view) return '';
   const rows = [];

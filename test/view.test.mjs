@@ -31,6 +31,18 @@ const fresh = (label) => {
 };
 const ctxOf = (scope, extra = {}) => view.trustedContext(scope, extra);
 
+test('提示只认用户自己说的话，宿主合成的消息不算', () => {
+  const human = { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '以后视频都给本地链接' }] };
+  const goal = { role: 'user', source: { kind: 'goal' }, content: [{ type: 'text', text: '<goal_round>\nObjective: 把插件做稳定' }] };
+  const snapshot = { role: 'user', source: { kind: 'time-context' }, content: [{ type: 'text', text: 'Time sampled while preparing turn 1' }] };
+  const runtime = { role: 'user', content: [{ type: 'text', text: 'Current runtime context. 已有记忆可能相关：\n- 「插件热重载」' }] };
+  const job = { role: 'user', content: [{ type: 'text', text: 'background job bash-1 finished' }] };
+  assert.equal(view.newestUserQuery([human]), '以后视频都给本地链接');
+  assert.equal(view.newestUserQuery([human, goal, snapshot, runtime, job]), '以后视频都给本地链接');
+  assert.equal(view.newestUserQuery([goal, runtime, job]), '');
+  assert.equal(view.newestUserQuery([]), '');
+});
+
 test('条件与清单只收能核验的写法', () => {
   assert.deepEqual(view.normalizeConditions([{ key: 'targetOs', value: 'macOS' }]), [{ key: 'targetOs', value: 'macOS' }]);
   assert.deepEqual(view.normalizeConditions([]), []);
