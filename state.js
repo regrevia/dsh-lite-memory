@@ -4,17 +4,50 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 
-export const STATE_VERSION = 3;
-export const STATE_FORMAT = 'dsh-lite-memory/state@3';
-/** 2 版状态照常读，下一次写入升到 3 版；旧程序看到 3 版会拒绝写，不会丢掉实验标记。 */
-export const LEGACY_STATE_FORMAT = 'dsh-lite-memory/state@2';
-export const LEGACY_STATE_VERSION = 2;
+export const STATE_VERSION = 4;
+export const STATE_FORMAT = 'dsh-lite-memory/state@4';
+/** 3 版与 2 版照常读，下一次写入升到 4 版；旧程序看到 4 版会拒绝写，不会丢掉实验标记。 */
+export const LEGACY_STATE_FORMATS = ['dsh-lite-memory/state@3', 'dsh-lite-memory/state@2'];
+export const LEGACY_STATE_VERSIONS = [3, 2];
 
 /** 一期只有一个实验开关，策略版本不认时停止实验而不是猜测兼容。 */
 export const EVOLUTION_POLICY_VERSION = 1;
 
 function emptyTasks() {
   return { revision: 0, defaults: null, sessions: {}, episodes: {} };
+}
+
+/** 学习账本只留有限次数、近期用量与回执；不是事件日志，也不无限增长。 */
+export function emptyLearning() {
+  return { attempts: {}, recent: [], receipts: [] };
+}
+
+/** 坏数据按空账本处理；学习账本坏了只停整理，不挡住读取已学规则。 */
+export function normalizeLearning(raw) {
+  const out = emptyLearning();
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  if (raw.attempts && typeof raw.attempts === 'object' && !Array.isArray(raw.attempts)) {
+    const rows = Object.entries(raw.attempts)
+      .filter(([id, row]) => id && row && typeof row === 'object' && Number.isInteger(row.count) && row.count > 0)
+      .sort((a, b) => Date.parse(b[1].lastAt || 0) - Date.parse(a[1].lastAt || 0))
+      .slice(0, 32);
+    for (const [id, row] of rows) {
+      out.attempts[id] = {
+        count: Math.min(2, row.count),
+        lastAt: typeof row.lastAt === 'string' ? row.lastAt : '',
+      };
+    }
+  }
+  if (Array.isArray(raw.recent)) {
+    out.recent = raw.recent.filter((value) => typeof value === 'string' && value).slice(-32);
+  }
+  if (Array.isArray(raw.receipts)) {
+    out.receipts = raw.receipts
+      .filter((row) => row && typeof row === 'object' && typeof row.operationId === 'string')
+      .slice(-64)
+      .map((row) => JSON.parse(JSON.stringify(row)));
+  }
+  return out;
 }
 
 function newEvolution() {
@@ -24,6 +57,7 @@ function newEvolution() {
     policyVersion: EVOLUTION_POLICY_VERSION,
     feedbackGeneration: 0,
     tasks: emptyTasks(),
+    learning: emptyLearning(),
   };
 }
 
@@ -50,7 +84,7 @@ export function evolutionOf(state) {
     return { enabled: false, epoch: '', policyVersion: EVOLUTION_POLICY_VERSION, feedbackGeneration: 0, tasks: emptyTasks(), compatible: true };
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    return { enabled: false, epoch: '', policyVersion: 0, feedbackGeneration: 0, tasks: emptyTasks(), compatible: false };
+    return { enabled: false, epoch: '', policyVersion: 0, feedbackGeneration: 0, tasks: emptyTasks(), learning: emptyLearning(), compatible: false };
   }
   const policyVersion = Number.isInteger(raw.policyVersion) ? raw.policyVersion : 0;
   const compatible = policyVersion === EVOLUTION_POLICY_VERSION;
@@ -60,6 +94,7 @@ export function evolutionOf(state) {
     policyVersion,
     feedbackGeneration: Number.isInteger(raw.feedbackGeneration) ? raw.feedbackGeneration : 0,
     tasks: normalizeTasks(raw.tasks),
+    learning: normalizeLearning(raw.learning),
     compatible,
   };
 }
@@ -79,6 +114,8 @@ export function applyEvolution(draft, enabled) {
     changedAt: now,
     /** 开与关都让上一轮锚点失效；已经确认的项目默认保留，它不属于临时作品状态。 */
     tasks: { ...emptyTasks(), ...(current.tasks && current.tasks.defaults ? { defaults: current.tasks.defaults } : {}) },
+    /** 关开不继承在途整理与旧提案；已学规则的来源与版本仍留在条目里。 */
+    learning: emptyLearning(),
   };
   draft.experimental = { ...(draft.experimental || {}), projectEvolution: config };
   if (!next) {
@@ -91,6 +128,8 @@ export function applyEvolution(draft, enabled) {
         learning.pausedBy = 'experiment_off';
       }
     }
+    /** 未提交的候选随关闭清掉，不保留一份看不见却还能被旧提案命中的正文。 */
+    draft.entries = draft.entries.filter((entry) => !(entry && entry.maintenance && entry.maintenance.learning && entry.maintenance.learning.state === 'pending'));
     draft.candidates = draft.candidates.filter((row) => !row || row.origin !== 'project_evolution');
   }
   return { changed: true, enabled: next, epoch: config.epoch };
@@ -401,6 +440,16 @@ export function validateState(data) {
         && (!Number.isInteger(evolution.feedbackGeneration) || evolution.feedbackGeneration < 0)) {
         throw new StateError('invalid', '记忆状态反馈代次不对');
       }
+      if (evolution.learning !== undefined) {
+        const learning = evolution.learning;
+        if (!learning || typeof learning !== 'object' || Array.isArray(learning)) throw new StateError('invalid', '记忆状态学习账本不是对象');
+        if (learning.attempts !== undefined && (!learning.attempts || typeof learning.attempts !== 'object' || Array.isArray(learning.attempts))) {
+          throw new StateError('invalid', '记忆状态学习账本 attempts 不是对象');
+        }
+        for (const list of ['recent', 'receipts']) {
+          if (learning[list] !== undefined && !Array.isArray(learning[list])) throw new StateError('invalid', `记忆状态学习账本 ${list} 不是数组`);
+        }
+      }
       if (evolution.tasks !== undefined) {
         const tasks = evolution.tasks;
         if (!tasks || typeof tasks !== 'object' || Array.isArray(tasks)) throw new StateError('invalid', '记忆状态任务锚点不是对象');
@@ -436,16 +485,16 @@ function readEnvelope(file) {
   } catch {
     throw fail(file, '已损坏');
   }
-  if (!data || (data.format !== STATE_FORMAT && data.format !== LEGACY_STATE_FORMAT)
+  if (!data || (data.format !== STATE_FORMAT && !LEGACY_STATE_FORMATS.includes(data.format))
     || !data.payload || typeof data.payload !== 'object') {
     throw fail(file, '格式不认');
   }
   if (data.checksum !== checksumOf(data.payload)) throw fail(file, '校验和不一致');
-  if (data.format === LEGACY_STATE_FORMAT) {
-    if (data.payload.schemaVersion !== LEGACY_STATE_VERSION) throw fail(file, '版本对不上');
+  if (data.format !== STATE_FORMAT) {
+    if (!LEGACY_STATE_VERSIONS.includes(data.payload.schemaVersion)) throw fail(file, '版本对不上');
     const upgraded = { ...data.payload, schemaVersion: STATE_VERSION };
     if (upgraded.experimental === undefined) {
-      upgraded.experimental = { projectEvolution: { enabled: false, epoch: '', policyVersion: EVOLUTION_POLICY_VERSION, feedbackGeneration: 0 } };
+      upgraded.experimental = { projectEvolution: { enabled: false, epoch: '', policyVersion: EVOLUTION_POLICY_VERSION, feedbackGeneration: 0, learning: emptyLearning() } };
     }
     validateState(upgraded);
     return upgraded;

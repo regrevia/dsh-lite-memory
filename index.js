@@ -26,6 +26,17 @@ import {
   setEvolution,
   taskState,
   saveTaskState,
+  learningSnapshot,
+  learningRulesForOrganizer,
+  beginLearningAttempt,
+  commitLearning,
+  recordLearningFailure,
+  pauseLearningRules,
+  removeLearningRule,
+  undoLearningChange,
+  pinLearningRule,
+  resumeLearningRule,
+  expireLearning,
   LIMITS,
 } from './store.js';
 import path from 'node:path';
@@ -33,6 +44,12 @@ import crypto from 'node:crypto';
 import * as view from './view.js';
 import * as state from './state.js';
 import * as anchor from './anchor.js';
+import * as learning from './learning.js';
+
+/** 开关路由在 apply 外，也要能中止在途整理。 */
+const learningAborts = new Map();
+/** 上次成功准备的记忆载荷字节数；只按会话记，重启后显示未知。 */
+const payloadBytes = new Map();
 
 /** Only the tool registry is required; everything else is optional. */
 export const inject = ['tools'];
@@ -193,10 +210,66 @@ function keepHandler(webServer, cwdForSession) {
         return sendJson(res, 409, { ok: false, confirmed: false, reason: '项目根还没确认，先重新打开这个项目' });
       }
       const operationId = typeof body.operationId === 'string' ? body.operationId : '';
+      const learningAction = typeof body.learningAction === 'string' ? body.learningAction : '';
+      if (learningAction) {
+        try {
+          if (learningAction === 'snapshot') {
+            try { expireLearning(scope, { operationId: `expire_${Date.now()}` }); } catch { /* 清理失败不影响查看 */ }
+            const request = typeof body.sessionId === 'string' ? body.sessionId : '';
+            return sendJson(res, 200, {
+              ok: true,
+              ...learningSnapshot(scope),
+              payload: { bytes: request && payloadBytes.has(request) ? payloadBytes.get(request) : null },
+            });
+          }
+          const id = typeof body.id === 'string' ? body.id : '';
+          if (learningAction === 'undo') {
+            const result = undoLearningChange(scope, id, {
+              expectedRevision: Number(body.expectedRevision || 0),
+              operationId: operationId || `undo_learn_${id}_${Date.now()}`,
+            });
+            return sendJson(res, result && result.ok !== false ? 200 : 409, { ...result });
+          }
+          if (learningAction === 'pin') {
+            const result = pinLearningRule(scope, id, {
+              pinned: body.pinned === true,
+              expectedRevision: Number(body.expectedRevision || 0),
+              operationId: operationId || `pin_learn_${id}_${Date.now()}`,
+            });
+            return sendJson(res, result && result.ok !== false ? 200 : 409, { ...result });
+          }
+          if (learningAction === 'pause') {
+            const ids = Array.isArray(body.ids) ? body.ids.filter((value) => typeof value === 'string').slice(0, 12) : [];
+            const result = pauseLearningRules(scope, ids, { operationId: operationId || `pause_learn_${Date.now()}`, by: 'management', reason: 'paused_by_user' });
+            return sendJson(res, result && result.ok !== false ? 200 : 409, { ...result });
+          }
+          if (learningAction === 'delete') {
+            const result = removeLearningRule(scope, id, {
+              expectedRevision: Number(body.expectedRevision || 0),
+              operationId: operationId || `delete_learn_${id}_${Date.now()}`,
+            });
+            return sendJson(res, result && result.ok !== false ? 200 : 409, { ...result });
+          }
+          if (learningAction === 'resume') {
+            const result = resumeLearningRule(scope, id, { operationId: operationId || `resume_learn_${id}_${Date.now()}` });
+            return sendJson(res, result && result.ok !== false ? 200 : 409, { ...result });
+          }
+          return sendJson(res, 400, { ok: false, reason: '不认识这个操作' });
+        } catch (error) {
+          return sendJson(res, 409, { ok: false, reason: error instanceof Error ? error.message : '这次没有改动' });
+        }
+      }
       try {
         const result = typeof body.enabled === 'boolean'
           ? setEvolution(scope, body.enabled, { operationId })
           : { ok: true, ...evolutionStatus(scope) };
+        if (typeof body.enabled === 'boolean' && result && result.ok !== false) {
+          const controller = learningAborts.get(scope.key);
+          if (controller) {
+            try { controller.abort(); } catch { /* already gone */ }
+            learningAborts.delete(scope.key);
+          }
+        }
         return sendJson(res, result.ok === false ? 409 : 200, {
           ...result,
           project: path.basename(scope.cwd || '') || scope.key,
@@ -468,6 +541,10 @@ export function apply(ctx, config) {
   const abortCleanups = new Map();
   /** 哪些用户消息已经建立过窗口；工具续步不重复开窗。 */
   const seenHumans = new Map();
+  /** 本轮真人反馈先记在这里，等 turn/end 再决定要不要整理；不跨会话。 */
+  const feedbackCandidates = new Map();
+  /** 一个项目同一时间只整理一次；控制器放在模块级供开关路由中止。 */
+  const learningJobs = new Map();
 
   const agentKey = (agent) => String(agent?.id ?? '');
 
@@ -698,6 +775,7 @@ export function apply(ctx, config) {
       return chargeExperiment(win, '这些实验规则互相冲突，先按用户这次说的做，别叠加对立的规则。');
     }
     const lines = [];
+    const shown = [];
     let used = Buffer.byteLength(EXPERIMENT_RULES_HEADER) + 1;
     for (const record of matched.slice(0, 3)) {
       const body = String(record.body || '');
@@ -710,7 +788,9 @@ export function apply(ctx, config) {
       if (used + size > EXPERIMENT_BYTES) break;
       used += size;
       lines.push(line);
+      shown.push(record.id);
     }
+    if (held) held.injectedIds = shown;
     if (!lines.length && unknown.length) {
       const nameLine = unknown.slice(0, 3).map((record) => `- 「${record.title}」 · ${record.id}`).join('\n');
       return chargeExperiment(win, `有些实验规则的适用条件还没确认，先别当成本轮依据：\n${nameLine}`);
@@ -756,9 +836,12 @@ export function apply(ctx, config) {
       boundForRequest: false,
     });
     const contextId = anchor.contextIdFor(scope.key, batchKey, crypto.randomUUID().slice(0, 8));
+    const episode = routed.tasks && routed.tasks.episodes ? routed.tasks.episodes[routed.anchor.episodeId] : null;
     const held = {
       contextId, projectKey: scope.key, sessionId, batchKey, messageIds,
-      context, anchor: routed.anchor, ranges, decision, at: Date.now(),
+      context, anchor: routed.anchor, ranges, decision,
+      episodeUpdatedAt: episode ? episode.updatedAt : '', injectedIds: [],
+      at: Date.now(),
     };
     win.experiment = held;
     win.contexts.set(contextId, held);
@@ -1452,6 +1535,13 @@ export function apply(ctx, config) {
       const context = view.trustedContext(scope, {});
       const fingerprint = fingerprintOf(scope);
       const experiment = experimentFor(scope, { sessionId, query, batchKey: anchor.requestBatchKey(ids), messageIds: ids, win });
+      const remembered = experiment && experiment.held
+        ? rememberFeedback(scope, sessionId, fresh, experiment.held)
+        : null;
+      if (remembered && remembered.paused) {
+        clearPrepared(agent);
+        return decision;
+      }
       const snapshot = projectRecall(scope, query, context, win);
       if (generation !== generations.get(agent)) return decision;
       /** 超时或被取消：这一步不留半旧卡片，下一真人请求重新投影。 */
@@ -1475,6 +1565,8 @@ export function apply(ctx, config) {
         at: Date.now(),
       };
       prepared.set(agent, state);
+      payloadBytes.set(sessionId, win.bytes);
+      while (payloadBytes.size > 64) payloadBytes.delete(payloadBytes.keys().next().value);
       if (signal) signalAgents.set(signal, agent);
       const key = agentKey(agent);
       if (key && signal && typeof signal.addEventListener === 'function') {
@@ -1487,6 +1579,176 @@ export function apply(ctx, config) {
     }
     return decision;
   });
+
+
+  /* ---------------- 项目自进化：一次短整理，先扣频次，再走提交门禁 ---------------- */
+
+  /** 反馈只来自本轮真人消息；初始任务、工具成功、沉默都不算。 */
+  function rememberFeedback(scope, sessionId, messages, held) {
+    let candidate;
+    try {
+      candidate = learning.candidateFrom({
+        messages, anchor: held.anchor, sessionId, projectId: scope.key, now: Date.now(),
+      });
+    } catch { return null; }
+    if (!candidate) return null;
+    candidate.cwd = scope.cwd;
+    candidate.episodeUpdatedAt = held.episodeUpdatedAt || '';
+    let paused = false;
+    const injected = Array.isArray(held.injectedIds) ? held.injectedIds.filter(Boolean).slice(0, 8) : [];
+    if (candidate.cue.negative && injected.length) {
+      try {
+        const result = pauseLearningRules(scope, injected, {
+          by: 'feedback',
+          reason: 'feedback_pending',
+          operationId: `pause_${candidate.episodeId}_${candidate.messageIds.join('_')}`.slice(0, 120),
+        });
+        paused = Boolean(result && result.ok && result.changed);
+      } catch { paused = false; }
+    }
+    feedbackCandidates.set(sessionId, { scope, candidate, held, paused, at: Date.now() });
+    while (feedbackCandidates.size > 8) feedbackCandidates.delete(feedbackCandidates.keys().next().value);
+    return { candidate, paused };
+  }
+
+  /** 只认前台最近一次真实请求的路线；拿不到就宁可这次不整理。 */
+  function routeForSession(session) {
+    let config;
+    try { config = session && typeof session.requestHeader === 'function' ? session.requestHeader()?.config : null; } catch { config = null; }
+    const provider = config && typeof config.provider === 'string' ? config.provider : '';
+    const model = config && typeof config.model === 'string' ? config.model : '';
+    return provider && model ? { provider, model } : null;
+  }
+
+  function sessionIdOfSession(session) {
+    try { return String(session?.header?.id ?? session?.id ?? ''); } catch { return ''; }
+  }
+
+  function scopeOfSession(session) {
+    let cwd = '';
+    try { cwd = String(session?.header?.cwd ?? ''); } catch { cwd = ''; }
+    if (!cwd) return null;
+    const scope = scopeOf(cwd);
+    return scope && scope.confirmed ? scope : null;
+  }
+
+  /** 有配额才调用；输出整批校验，提交门禁再复核开关、版本、来源与目标。 */
+  async function organize(scope, session, pending) {
+    const status = evolutionStatus(scope);
+    if (!status || status.enabled !== true || status.compatible === false) return;
+    if (status.policyVersion !== learning.POLICY_VERSION) return;
+    const route = routeForSession(session);
+    if (!route) return;
+    const candidate = pending.candidate;
+    const operationId = `learn_${crypto.createHash('sha256')
+      .update(`${scope.key}|${candidate.episodeId}|${candidate.messageIds.join(',')}`)
+      .digest('hex').slice(0, 16)}`;
+    const begin = beginLearningAttempt(scope, { episodeId: candidate.episodeId, operationId: `${operationId}_start`, now: Date.now() });
+    if (!begin || begin.ok !== true || begin.replayed) return;
+    const ranges = rangesOf(scope);
+    const input = learning.buildCallInput({
+      projectId: scope.key,
+      episodeId: candidate.episodeId,
+      taskKind: candidate.taskKind,
+      seriesId: candidate.seriesId,
+      phase: candidate.phase,
+      feedback: candidate,
+      rules: begin.rules,
+      ranges,
+    });
+    const preparedTargets = (begin.rules || []).map((record) => ({
+      id: record.id,
+      revision: record.revision || 1,
+      specDigest: learning.specDigestOf(record),
+    }));
+    const llm = getService('llm');
+    if (!llm || typeof llm.prepareCall !== 'function') {
+      recordLearningFailure(scope, { operationId: `${operationId}_fail`, episodeId: candidate.episodeId, reason: '宿主没有可用模型', epoch: begin.epoch });
+      return;
+    }
+    const controller = new AbortController();
+    learningAborts.set(scope.key, controller);
+    const deadline = setTimeout(() => { try { controller.abort(); } catch { /* already aborted */ } }, learning.LIMITS.timeoutMs);
+    const chunks = [];
+    let text = '';
+    let sawTool = false;
+    let finish = { kind: 'stop' };
+    try {
+      const call = await llm.prepareCall({ ...route, maxTokens: learning.LIMITS.maxTokens }, controller.signal);
+      const options = {
+        ...call.config,
+        messages: [{ role: 'user', content: [{ type: 'text', text: input.prompt }] }],
+        system: input.system,
+        sessionId: sessionIdOfSession(session),
+        purpose: 'project-evolution',
+        signal: controller.signal,
+      };
+      for await (const chunk of call.stream(options)) {
+        if (controller.signal.aborted) throw new Error('整理已取消');
+        chunks.push(chunk);
+        if (chunk && chunk.type === 'text-delta') text += String(chunk.text || '');
+        else if (chunk && chunk.type === 'tool-call-delta') sawTool = true;
+        else if (chunk && chunk.type === 'block-start' && chunk.blockType === 'tool-call') sawTool = true;
+        else if (chunk && chunk.type === 'finish' && chunk.reason) finish = chunk.reason;
+      }
+      if (sawTool) throw new Error('整理返回了工具调用');
+      const parsed = learning.parseOutput(text, { finish, refs: input.refs, rules: input.rules, ranges });
+      if (!parsed.ok) throw new Error(parsed.reason);
+      const commit = commitLearning(scope, {
+        operationId,
+        epoch: begin.epoch,
+        episodeId: candidate.episodeId,
+        episodeUpdatedAt: candidate.episodeUpdatedAt,
+        projectId: scope.key,
+        sessionId: candidate.sessionId,
+        messageIds: candidate.messageIds,
+        changes: parsed.changes,
+        preparedTargets,
+        usage: learning.usageOf(chunks),
+        explicitLongTerm: Boolean(candidate.cue.explicitLongTerm),
+        now: Date.now(),
+      });
+      if (commit && commit.ok === false) {
+        recordLearningFailure(scope, {
+          operationId: `${operationId}_fail`,
+          episodeId: candidate.episodeId,
+          reason: commit.reason,
+          usage: learning.usageOf(chunks),
+          epoch: begin.epoch,
+        });
+      }
+    } catch (error) {
+      const reason = controller.signal.aborted ? '整理已取消' : (error instanceof Error ? error.message : '整理没有完成');
+      recordLearningFailure(scope, {
+        operationId: `${operationId}_fail`,
+        episodeId: candidate.episodeId,
+        reason,
+        usage: learning.usageOf(chunks),
+        epoch: begin.epoch,
+      });
+    } finally {
+      clearTimeout(deadline);
+      if (learningAborts.get(scope.key) === controller) learningAborts.delete(scope.key);
+    }
+  }
+
+  /** 只在正常完成的人类回合后调度，一次一个项目；永不阻塞事件派发。 */
+  function scheduleOrganizer(session, event) {
+    const reason = event && event.data ? event.data.reason : null;
+    if (!reason || reason.kind !== 'completed') return;
+    const sessionId = sessionIdOfSession(session);
+    if (!sessionId) return;
+    const pending = feedbackCandidates.get(sessionId);
+    if (!pending) return;
+    feedbackCandidates.delete(sessionId);
+    const scope = pending.scope;
+    if (learningJobs.has(scope.key)) return;
+    const job = { controller: learningAborts.get(scope.key) || null };
+    learningJobs.set(scope.key, job);
+    void organize(scope, session, pending)
+      .catch(() => { /* 整理失败不影响会话 */ })
+      .finally(() => { if (learningJobs.get(scope.key) === job) learningJobs.delete(scope.key); });
+  }
 
   if (typeof ctx.on === 'function') ctx.on('agent/disposed', (payload) => {
     const agent = payload?.agent;
@@ -1508,6 +1770,22 @@ export function apply(ctx, config) {
     if (agent) clearPrepared(agent);
     signalAgents.delete(signal);
   });
+
+  /** 正常完成的人类回合才整理；失败、取消、被打断都不改写规则。 */
+  if (typeof ctx.on === 'function') ctx.on('session/event', (session, event) => {
+    if (!event || event.type !== 'turn/end') return;
+    scheduleOrganizer(session, event);
+  });
+
+  /** 插件卸载时中止在途整理；提交门禁仍会拒绝过期结果。 */
+  ctx.effect(() => () => {
+    for (const controller of learningAborts.values()) {
+      try { controller.abort(); } catch { /* already gone */ }
+    }
+    learningAborts.clear();
+    feedbackCandidates.clear();
+    learningJobs.clear();
+  }, 'lite-memory: learning jobs');
 
   /** 测试与排查用：只暴露只读查询，不提供改状态入口。 */
   ctx.effect(() => {

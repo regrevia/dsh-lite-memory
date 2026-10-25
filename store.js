@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import * as state from './state.js';
 import * as view from './view.js';
 import * as anchor from './anchor.js';
+import * as learning from './learning.js';
 import { LIMITS, memoryRoot, scopeOf, globalScope } from './state.js';
 
 /**
@@ -2239,4 +2240,538 @@ export function resumeMove(projectScope, options = {}) {
 
 export function movePending() {
   return state.readMoveIntent();
+}
+
+
+// ── 项目实验：少量规则、候选与整理回执 ────────────────────────────────
+
+const EXPERIMENT_RULE_STATES = new Set(['pending', 'trial', 'active', 'paused']);
+
+function learningRulesOf(index) {
+  return index.entries.filter((record) => isExperimentalRecord(record) && record.status !== 'archived');
+}
+
+function visibleLearningRule(record) {
+  const state = record.learning?.state;
+  return EXPERIMENT_RULE_STATES.has(state) && state !== 'paused';
+}
+
+function learningRuleView(record) {
+  return {
+    id: record.id,
+    revision: Number(record.revision) || 1,
+    title: record.title,
+    summary: record.summary || '',
+    body: record.body || '',
+    applicability: record.applicability || 'unresolved',
+    conditions: Array.isArray(record.conditions) ? record.conditions : [],
+    topicKey: record.topicKey || '',
+    origin: record.origin,
+    state: record.learning?.state || 'pending',
+    learning: JSON.parse(JSON.stringify(record.learning || {})),
+    updated: record.updated || '',
+    created: record.created || '',
+  };
+}
+
+/**
+ * 管理面读取：候选、试用、已生效与暂停都在同一处，正文与来源只给管理面；
+ * 普通记忆读取面不会调用这个入口。
+ */
+export function learningSnapshot(scope, options = {}) {
+  const index = loadIndex(scope);
+  const evolution = index.__evolution;
+  const rules = learningRulesOf(index).map(learningRuleView);
+  return {
+    evolution,
+    enabled: evolution.enabled === true,
+    compatible: evolution.compatible !== false,
+    rules,
+    counts: {
+      pending: rules.filter((row) => row.state === 'pending').length,
+      trial: rules.filter((row) => row.state === 'trial').length,
+      active: rules.filter((row) => row.state === 'active').length,
+      paused: rules.filter((row) => row.state === 'paused').length,
+    },
+    economy: economyOf(evolution.learning),
+  };
+}
+
+/** 用量只报真实已知；缺字段时标未知，不补零。 */
+function economyOf(ledger) {
+  const rows = Array.isArray(ledger?.receipts) ? ledger.receipts : [];
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let calls = 0;
+  let knownCalls = 0;
+  for (const row of rows) {
+    if (row.status !== 'applied' && row.status !== 'no_change' && row.status !== 'failed') continue;
+    calls += 1;
+    if (row.usage && row.usage.known === true) {
+      knownCalls += 1;
+      inputTokens += Number(row.usage.inputTokens) || 0;
+      outputTokens += Number(row.usage.outputTokens) || 0;
+    }
+  }
+  return { calls, knownCalls, inputTokens: knownCalls ? inputTokens : null, outputTokens: knownCalls ? outputTokens : null, recent: rows.slice(-8).reverse() };
+}
+
+/** 给整理器的候选规则：只读、有限，不跨项目。 */
+export function learningRulesForOrganizer(scope) {
+  const index = loadIndex(scope);
+  return learningRulesOf(index).filter(visibleLearningRule).slice(0, 8).map(learningRuleView);
+}
+
+/**
+ * 整理前扣一次尝试：开关、身份与限额都在项目锁内再确认。
+ * 失败也计数，所以模型超时/调用失败不能靠重试绕开限额。
+ */
+export function beginLearningAttempt(scope, options = {}) {
+  const episodeId = String(options.episodeId || '');
+  if (!episodeId) return { ok: false, reason: '缺少作品标识' };
+  const now = options.now || Date.now();
+  return withLock(scope, () => {
+    const index = loadIndex(scope);
+    const evolution = index.__evolution;
+    if (!evolution.enabled || evolution.compatible === false) return { ok: false, reason: '实验没有开启' };
+    if (evolution.policyVersion !== learning.POLICY_VERSION) return { ok: false, reason: '实验策略版本不认' };
+    const check = learning.quota(evolution.learning, { episodeId, now });
+    if (!check.ok) return { ...check, learning: evolution.learning };
+    const next = learning.recordAttempt(evolution.learning, { episodeId, now });
+    try {
+      const result = state.transact(scope, {
+        operationId: options.operationId || '',
+        expected: { generation: index.generation, epoch: index.epoch },
+      }, (draft) => {
+        const evo = draft.experimental && draft.experimental.projectEvolution;
+        if (!evo || evo.enabled !== true) return { changed: false };
+        evo.learning = next;
+        return { changed: true };
+      });
+      return {
+        ok: true,
+        epoch: evolution.epoch,
+        generation: index.generation,
+        episodeId,
+        learning: next,
+        rules: learningRulesOf(index).filter(visibleLearningRule).slice(0, 8).map(learningRuleView),
+        replayed: result.replayed === true,
+      };
+    } catch (error) {
+      if (error && error.code === 'conflict') return { ok: false, reason: '项目状态刚被改过，重试一次', retry: true };
+      return { ok: false, reason: error instanceof Error ? error.message : '整理没有开始' };
+    }
+  });
+}
+
+function episodeOfEvolution(evolution, episodeId) {
+  return evolution?.tasks?.episodes && typeof evolution.tasks.episodes === 'object'
+    ? evolution.tasks.episodes[episodeId] || null
+    : null;
+}
+
+function addLearningReceipt(evolution, row) {
+  evolution.learning = evolution.learning && typeof evolution.learning === 'object'
+    ? evolution.learning
+    : state.emptyLearning();
+  evolution.learning.receipts = [...(Array.isArray(evolution.learning.receipts) ? evolution.learning.receipts : []), row]
+    .slice(-learning.LIMITS.receipts);
+}
+
+/**
+ * 提交门：锁内重查开关、epoch、作品版本、目标版本与来源；任何一项变了整批不写。
+ * 旧提案可以留下一次调用用量，但不能靠重放把旧正文写进新状态。
+ */
+export function commitLearning(scope, batch = {}) {
+  const changes = Array.isArray(batch.changes) ? batch.changes : [];
+  const episodeId = String(batch.episodeId || '');
+  const operationId = String(batch.operationId || '');
+  const now = batch.now || Date.now();
+  const at = new Date(now).toISOString();
+  if (!episodeId) return { ok: false, reason: '缺少作品标识' };
+  if (!operationId) return { ok: false, reason: '缺少提交标识' };
+  if (changes.length > learning.LIMITS.maxChanges) return { ok: false, reason: '一次改动太多' };
+  return withLock(scope, () => {
+    let receipt = null;
+    try {
+      const result = state.transact(scope, {
+        operationId,
+        payloadDigest: crypto.createHash('sha256').update(JSON.stringify(changes)).digest('hex'),
+      }, (draft) => {
+        const evolution = draft.experimental && draft.experimental.projectEvolution;
+        if (!evolution || evolution.enabled !== true) throw new Error('实验没有开启，这次整理作废');
+        if (evolution.policyVersion !== learning.POLICY_VERSION) throw new Error('实验策略版本不认');
+        if (batch.epoch && evolution.epoch !== batch.epoch) throw new Error('实验已经重新开启过，这次整理作废');
+        const episode = episodeOfEvolution(evolution, episodeId);
+        if (!episode) throw new Error('作品已经失效，这次整理作废');
+        if (batch.sessionId) {
+          const focus = evolution.tasks?.sessions?.[batch.sessionId];
+          if (!focus || focus.episodeId !== episodeId) throw new Error('这期已经换到别的作品，这次整理作废');
+        }
+        if (batch.episodeUpdatedAt && episode.updatedAt !== batch.episodeUpdatedAt) throw new Error('用户又改过这期，这次整理作废');
+        const prepared = new Map((Array.isArray(batch.preparedTargets) ? batch.preparedTargets : []).map((row) => [row.id, row]));
+        let touched = 0;
+        const currentRules = draft.entries.filter((entry) => entry.status === 'active' && isExperimentalRecord(toFlat(entry)));
+        for (const change of changes) {
+          if (change.target !== 'new') {
+            const entry = draft.entries.find((row) => row.id === change.id && row.status === 'active');
+            if (!entry || !isExperimentalRecord(toFlat(entry))) throw new Error('目标规则已经不存在，这次整理作废');
+            const expected = prepared.get(change.id);
+            if (!expected) throw new Error('目标规则没有在整理前固定版本');
+            if (Number(entry.revision) !== Number(expected.revision)) throw new Error('目标规则刚被改过，这次整理作废');
+            const flat = toFlat(entry);
+            if (expected.specDigest && learning.specDigestOf(flat) !== expected.specDigest) throw new Error('目标规则已经变过，这次整理作废');
+            const merged = learning.mergeChange(flat, change, { now });
+            const evidence = {
+              sourceType: 'human_feedback',
+              feedbackType: change.feedbackType,
+              sessionId: String(batch.sessionId || ''),
+              episodeId,
+              messageIds: (batch.messageIds || []).slice(-3),
+              at,
+            };
+            merged.learning = {
+              ...learning.nextLearningState({
+                existing: flat,
+                change,
+                evidence: { ...evidence, explicitLongTerm: Boolean(batch.explicitLongTerm) },
+                now,
+              }),
+              specDigest: merged.digest,
+              versions: merged.learning.versions,
+            };
+            entry.current = {
+              ...entry.current,
+              title: merged.current.title,
+              summary: merged.current.summary,
+              body: merged.current.body,
+              when: merged.current.when,
+              applicability: merged.current.applicability,
+              conditions: merged.current.conditions,
+              topicKey: merged.current.topicKey,
+            };
+            entry.revision = Number(entry.revision) + 1;
+            entry.updatedAt = at;
+            entry.maintenance = { ...(entry.maintenance || {}), learning: merged.learning };
+          } else {
+            if (currentRules.length + (touched + 1) > learning.LIMITS.rules) throw new Error('项目实验规则已经到上限');
+            const pending = currentRules.filter((entry) => toFlat(entry).learning?.state === 'pending').length;
+            if (pending >= learning.LIMITS.pending) throw new Error('待确认候选已经到上限');
+            const merged = learning.mergeChange(null, change, { now });
+            const evidence = {
+              sourceType: 'human_feedback',
+              feedbackType: change.feedbackType,
+              sessionId: String(batch.sessionId || ''),
+              episodeId,
+              messageIds: (batch.messageIds || []).slice(-3),
+              at,
+            };
+            merged.learning = {
+              ...learning.nextLearningState({
+                existing: { learning: merged.learning },
+                change,
+                evidence: { ...evidence, explicitLongTerm: Boolean(batch.explicitLongTerm) },
+                now,
+              }),
+              specDigest: merged.digest,
+              versions: merged.learning.versions,
+            };
+            const id = `mem_${crypto.createHash('sha256').update(`${operationId}:${touched}:${merged.current.topicKey}:${at}`).digest('hex').slice(0, 12)}`;
+            const flat = {
+              id,
+              title: merged.current.title,
+              summary: merged.current.summary,
+              body: merged.current.body,
+              kind: 'convention',
+              tags: [],
+              topicKey: merged.current.topicKey,
+              triggers: [],
+              applicability: merged.current.applicability,
+              conditions: merged.current.conditions,
+              selection: null,
+              links: [],
+              origin: EXPERIMENTAL_ORIGIN,
+              reviewState: 'active',
+              created: at,
+              updated: at,
+              lastUsed: at,
+              revision: 1,
+              status: 'active',
+              hits: 0,
+              merges: 0,
+              versions: [],
+              sourceRefs: [evidence],
+              checks: [],
+              learning: merged.learning,
+            };
+            draft.entries.push(fromFlat(flat));
+            currentRules.push(flat);
+            touched += 1;
+            continue;
+          }
+          touched += 1;
+        }
+        receipt = learning.receiptOf({
+          operationId,
+          episodeId,
+          status: touched > 0 ? 'applied' : 'no_change',
+          changes: touched,
+          usage: batch.usage,
+          at,
+        });
+        addLearningReceipt(evolution, receipt);
+        return {
+          changed: true,
+          kind: 'learning',
+          receipt: { learning: receipt },
+          result: { receipt, touched },
+        };
+      });
+      if (result.replayed === true) {
+        const prior = result.receipt && result.receipt.learning ? result.receipt.learning : null;
+        return { ok: true, replayed: true, receipt: prior, touched: prior ? prior.changes : null };
+      }
+      const out = result.result || { receipt, touched: changes.length };
+      return { ok: true, ...out, replayed: false };
+    } catch (error) {
+      if (error && error.code === 'conflict') return { ok: false, reason: '项目状态刚被改过，重试一次', retry: true };
+      return { ok: false, reason: error instanceof Error ? error.message : '整理结果没有写入' };
+    }
+  });
+}
+
+/** 用一次未通过校验或失败的调用留回执：不写正文，但保留真实用量。 */
+export function recordLearningFailure(scope, options = {}) {
+  const now = options.now || Date.now();
+  const at = new Date(now).toISOString();
+  const receipt = learning.receiptOf({
+    operationId: options.operationId,
+    episodeId: options.episodeId,
+    status: 'failed',
+    changes: 0,
+    reason: options.reason,
+    usage: options.usage,
+    at,
+  });
+  return withLock(scope, () => {
+    try {
+      const result = state.transact(scope, {
+        operationId: options.operationId || '',
+      }, (draft) => {
+        const evolution = draft.experimental && draft.experimental.projectEvolution;
+        if (!evolution || evolution.enabled !== true) return { changed: false };
+        if (options.epoch && evolution.epoch !== options.epoch) throw new Error('实验已经重新开启过，这次回执作废');
+        addLearningReceipt(evolution, receipt);
+        return { changed: true, kind: 'learning_failed' };
+      });
+      return { ok: true, receipt, replayed: result.replayed === true };
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : '回执没有写入' };
+    }
+  });
+}
+
+/** 删除：仍按管理面看到的版本比对，删掉正文与旧版本，只留审计回执。 */
+export function removeLearningRule(scope, id, options = {}) {
+  const expectedRevision = Number(options.expectedRevision);
+  const operationId = String(options.operationId || '');
+  const at = new Date(options.now || Date.now()).toISOString();
+  return withLock(scope, () => {
+    try {
+      const result = state.transact(scope, { operationId }, (draft) => {
+        const evolution = draft.experimental && draft.experimental.projectEvolution;
+        if (!evolution) throw new Error('没有实验记录');
+        if (options.epoch && evolution.epoch !== options.epoch) throw new Error('实验已经重新开启过，先刷新');
+        const entry = draft.entries.find((row) => row.id === id && row.status === 'active');
+        if (!entry || !isExperimentalRecord(toFlat(entry))) throw new Error('没有这条实验规则');
+        if (!Number.isInteger(expectedRevision) || Number(entry.revision) !== expectedRevision) throw new Error('这条规则刚被改过，先刷新再删除');
+        const flat = toFlat(entry);
+        entry.status = 'archived';
+        entry.updatedAt = at;
+        entry.current = { ...entry.current, body: '', summary: '' };
+        entry.maintenance = {
+          ...(entry.maintenance || {}),
+          learning: {
+            ...(flat.learning || {}),
+            state: 'paused',
+            blockedReason: 'deleted',
+            pausedBy: 'management',
+            pausedAt: at,
+            versions: [],
+            specDigest: '',
+          },
+        };
+        addLearningReceipt(evolution, learning.receiptOf({ operationId, episodeId: flat.learning?.evidence?.[0]?.episodeId || '', status: 'deleted', changes: 1, at }));
+        return { changed: true, kind: 'learning_delete' };
+      });
+      return { ok: true, replayed: result.replayed === true };
+    } catch (error) {
+      if (error && error.code === 'conflict') return { ok: false, reason: '项目状态刚被改过，重试一次', retry: true };
+      return { ok: false, reason: error instanceof Error ? error.message : '没有删除' };
+    }
+  });
+}
+
+/** 撤回：目标版本对不上就拒绝，不能把更新的版本退回旧正文。 */
+export function undoLearningChange(scope, id, options = {}) {
+  const expectedRevision = Number(options.expectedRevision);
+  const operationId = String(options.operationId || '');
+  const now = options.now || Date.now();
+  const at = new Date(now).toISOString();
+  return withLock(scope, () => {
+    try {
+      const result = state.transact(scope, { operationId }, (draft) => {
+        const evolution = draft.experimental && draft.experimental.projectEvolution;
+        if (!evolution) throw new Error('没有实验记录');
+        if (options.epoch && evolution.epoch !== options.epoch) throw new Error('实验已经重新开启过，先刷新');
+        const entry = draft.entries.find((row) => row.id === id && row.status === 'active');
+        if (!entry || !isExperimentalRecord(toFlat(entry))) throw new Error('没有这条实验规则');
+        if (!Number.isInteger(expectedRevision) || Number(entry.revision) !== expectedRevision) throw new Error('这条规则刚被改过，先刷新再撤回');
+        const flat = toFlat(entry);
+        const versions = Array.isArray(flat.learning?.versions) ? flat.learning.versions : [];
+        const previous = versions[versions.length - 1];
+        if (!previous) throw new Error('没有可撤回的上一版');
+        entry.current = { ...entry.current, body: previous.body || entry.current.body };
+        entry.revision = Number(entry.revision) + 1;
+        entry.updatedAt = at;
+        entry.maintenance = {
+          ...(entry.maintenance || {}),
+          learning: {
+            ...(flat.learning || {}),
+            state: 'paused',
+            blockedReason: 'undone',
+            pausedBy: 'management',
+            pausedAt: at,
+            versions: versions.slice(0, -1),
+            specDigest: learning.specDigestOf({ ...flat, body: previous.body || flat.body }),
+          },
+        };
+        addLearningReceipt(evolution, learning.receiptOf({ operationId, episodeId: flat.learning?.evidence?.[0]?.episodeId || '', status: 'undone', changes: 1, at }));
+        return { changed: true, kind: 'learning_undo' };
+      });
+      return { ok: true, replayed: result.replayed === true };
+    } catch (error) {
+      if (error && error.code === 'conflict') return { ok: false, reason: '项目状态刚被改过，重试一次', retry: true };
+      return { ok: false, reason: error instanceof Error ? error.message : '没有撤回' };
+    }
+  });
+}
+
+/** 固定/取消固定只改管理状态；取消固定不会自动恢复生效。 */
+export function pinLearningRule(scope, id, options = {}) {
+  const pinned = options.pinned === true;
+  const expectedRevision = Number(options.expectedRevision);
+  const operationId = String(options.operationId || '');
+  const at = new Date(options.now || Date.now()).toISOString();
+  return withLock(scope, () => {
+    try {
+      const result = state.transact(scope, { operationId }, (draft) => {
+        const evolution = draft.experimental && draft.experimental.projectEvolution;
+        if (options.epoch && evolution && evolution.epoch !== options.epoch) throw new Error('实验已经重新开启过，先刷新');
+        const entry = draft.entries.find((row) => row.id === id && row.status === 'active');
+        if (!entry || !isExperimentalRecord(toFlat(entry))) throw new Error('没有这条实验规则');
+        if (Number(entry.revision) !== expectedRevision) throw new Error('这条规则刚被改过，先刷新');
+        const learningState = toFlat(entry).learning || {};
+        entry.maintenance = {
+          ...(entry.maintenance || {}),
+          learning: { ...learningState, pinned, updatedAt: at },
+        };
+        entry.revision = Number(entry.revision) + 1;
+        entry.updatedAt = at;
+        return { changed: true, kind: 'learning_pin' };
+      });
+      return { ok: true, replayed: result.replayed === true };
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : '没有改动' };
+    }
+  });
+}
+
+/** 结构化负反馈先在本地暂停命中的试用规则，再决定是否调用整理器。 */
+export function pauseLearningRules(scope, ids, options = {}) {
+  const targets = Array.isArray(ids) ? ids.filter(Boolean).slice(0, 12) : [];
+  if (!targets.length) return { ok: true, changed: 0 };
+  const at = new Date(options.now || Date.now()).toISOString();
+  return withLock(scope, () => {
+    try {
+      const result = state.transact(scope, { operationId: options.operationId || '' }, (draft) => {
+        let changed = 0;
+        for (const entry of draft.entries) {
+          if (!targets.includes(entry.id) || entry.status !== 'active' || !isExperimentalRecord(toFlat(entry))) continue;
+          const flat = toFlat(entry);
+          if (flat.learning?.state === 'paused') continue;
+          entry.maintenance = {
+            ...(entry.maintenance || {}),
+            learning: learning.pauseLearning(flat.learning, { by: options.by || 'feedback', reason: options.reason || 'feedback_pending', now: options.now }),
+          };
+          entry.revision = Number(entry.revision) + 1;
+          entry.updatedAt = at;
+          changed += 1;
+        }
+        return changed ? { changed: true, kind: 'learning_pause' } : { changed: false };
+      });
+      return { ok: true, changed: result.changed === true, replayed: result.replayed === true };
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : '没有暂停' };
+    }
+  });
+}
+
+/** 管理面恢复试用：用户明确复核后从暂停回到试用，不会直接升为已生效。 */
+export function resumeLearningRule(scope, id, options = {}) {
+  const operationId = String(options.operationId || '');
+  const at = new Date(options.now || Date.now()).toISOString();
+  return withLock(scope, () => {
+    try {
+      const result = state.transact(scope, { operationId }, (draft) => {
+        const entry = draft.entries.find((row) => row.id === id && row.status === 'active');
+        if (!entry || !isExperimentalRecord(toFlat(entry))) throw new Error('没有这条实验规则');
+        const flat = toFlat(entry);
+        if (flat.learning?.state !== 'paused') throw new Error('这条规则没有暂停');
+        entry.maintenance = {
+          ...(entry.maintenance || {}),
+          learning: learning.resumeLearning(flat.learning, { by: 'management', now: options.now }),
+        };
+        entry.revision = Number(entry.revision) + 1;
+        entry.updatedAt = at;
+        return { changed: true, kind: 'learning_resume' };
+      });
+      return { ok: true, replayed: result.replayed === true };
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : '没有恢复' };
+    }
+  });
+}
+
+/** 到期的试用转暂停、过期候选清掉；只在已有管理边界的写事务里调用。 */
+export function expireLearning(scope, options = {}) {
+  const now = options.now || Date.now();
+  const at = new Date(now).toISOString();
+  return withLock(scope, () => {
+    try {
+      const result = state.transact(scope, { operationId: options.operationId || '' }, (draft) => {
+        const evolution = draft.experimental && draft.experimental.projectEvolution;
+        if (!evolution || evolution.enabled !== true) return { changed: false };
+        const flat = draft.entries.filter((entry) => entry.status === 'active').map(toFlat);
+        const plan = learning.lifecycle(flat, now);
+        let changed = 0;
+        draft.entries = draft.entries.filter((entry) => !(entry.status === 'active' && plan.purge.includes(entry.id)));
+        changed += plan.purge.length;
+        for (const entry of draft.entries) {
+          if (entry.status !== 'active' || !plan.paused.includes(entry.id)) continue;
+          const current = toFlat(entry);
+          entry.maintenance = {
+            ...(entry.maintenance || {}),
+            learning: learning.pauseLearning(current.learning, { by: 'ttl', reason: 'trial_expired', now }),
+          };
+          entry.updatedAt = at;
+          changed += 1;
+        }
+        return changed ? { changed: true, kind: 'learning_expire' } : { changed: false };
+      });
+      return { ok: true, changed: result.changed === true, replayed: result.replayed === true };
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : '没有清理' };
+    }
+  });
 }

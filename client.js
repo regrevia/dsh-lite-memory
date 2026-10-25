@@ -453,7 +453,7 @@ window.__ModuleLoader__.load({
     const EVO_BUTTON = { flex: '0 0 auto', border: '1px solid currentColor', background: 'transparent', color: 'inherit', borderRadius: '999px', padding: '0 8px', fontSize: '12px', lineHeight: '18px', opacity: 0.7, cursor: 'pointer', whiteSpace: 'nowrap' };
     const EVO_WRAP = { position: 'relative', display: 'flex', alignItems: 'center' };
     const EVO_PANEL = {
-      position: 'absolute', right: 0, top: 'calc(100% + 6px)', zIndex: 30, width: '220px',
+      position: 'absolute', right: 0, top: 'calc(100% + 6px)', zIndex: 30, width: '280px', maxHeight: '420px', overflowY: 'auto',
       padding: '8px', border: '1px solid currentColor', borderRadius: '8px',
       background: 'Canvas', color: 'CanvasText', boxShadow: '0 4px 18px rgba(0, 0, 0, 0.22)',
       display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '12px', lineHeight: '1.6',
@@ -461,20 +461,28 @@ window.__ModuleLoader__.load({
     const EVO_MUTED = { opacity: 0.65 };
     const EVO_ACTION = { ...KEEP_ON, alignSelf: 'flex-start' };
 
-    /** 会话头的项目开关，状态都问服务端。 */
+    const EVO_STATE = { pending: '候选', trial: '试用', active: '生效', paused: '暂停' };
+    const EVO_DATE = (value) => (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : '');
+    const EVO_SIZE = (bytes) => (typeof bytes === 'number' && bytes >= 0 ? (bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`) : '未知');
+    const EVO_DETAIL = { borderTop: '1px solid currentColor', paddingTop: '6px', display: 'flex', flexDirection: 'column', gap: '4px' };
+    const EVO_ACTIONS = { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' };
+    const EVO_LINK = { border: 'none', background: 'transparent', color: 'inherit', padding: 0, fontSize: '12px', lineHeight: '18px', opacity: 0.8, cursor: 'pointer' };
+
+    /** 会话头项目开关。 */
     const ProjectEvolution = (props) => {
       const sessionId = sessionKeyOf(props);
       const [open, setOpen] = React.useState(false);
       const [status, setStatus] = React.useState(null);
       const [busy, setBusy] = React.useState(false);
       const [note, setNote] = React.useState('');
+      const [selected, setSelected] = React.useState('');
       const alive = React.useRef(true);
       React.useEffect(() => () => { alive.current = false; }, []);
       const load = () => {
         if (!sessionId) return;
         setBusy(true);
         setNote('');
-        post('/lite-memory/evolution', { sessionId }).then((result) => {
+        post('/lite-memory/evolution', { sessionId, learningAction: 'snapshot' }).then((result) => {
           if (!alive.current) return;
           setBusy(false);
           if (result.ok && result.body) setStatus(result.body);
@@ -484,7 +492,32 @@ window.__ModuleLoader__.load({
       React.useEffect(() => { load(); }, [sessionId]);
       if (!sessionId) return null;
       const enabled = status ? status.enabled === true : false;
-      const active = status && status.counts && Number.isInteger(status.counts.active) ? status.counts.active : 0;
+      const rules = status && Array.isArray(status.rules) ? status.rules : EMPTY;
+      const counts = status && status.counts ? status.counts : {};
+      const economy = status && status.economy ? status.economy : null;
+      const payload = status && status.payload ? status.payload : null;
+      const current = selected ? rules.find((rule) => rule.id === selected) : null;
+      /** 管理动作都要带上面上看到的版本，服务端才敢动。 */
+      const manage = (learningAction, extra) => {
+        if (busy || !current) return;
+        setBusy(true);
+        setNote('');
+        post('/lite-memory/evolution', {
+          sessionId,
+          learningAction,
+          id: current.id,
+          expectedRevision: current.revision,
+          operationId: newOperationId(),
+          ...extra,
+        }).then((result) => {
+          if (!alive.current) return;
+          setBusy(false);
+          if (result.ok) {
+            setNote(learningAction === 'delete' ? '已删除' : learningAction === 'undo' ? '已撤回' : '已更新');
+            load();
+          } else setNote(failure(result, '这次没有改动'));
+        });
+      };
       const toggle = () => {
         if (busy || !status) return;
         setBusy(true);
@@ -492,14 +525,36 @@ window.__ModuleLoader__.load({
         post('/lite-memory/evolution', { sessionId, enabled: !enabled, operationId: newOperationId() }).then((result) => {
           if (!alive.current) return;
           setBusy(false);
-          if (result.ok && result.body) setStatus(result.body);
+          if (result.ok && result.body) { setStatus(result.body); load(); }
           else setNote(failure(result, '开关没有改动'));
         });
       };
+      const usageLine = economy && economy.calls > 0
+        ? (economy.knownCalls > 0 ? `整理 ${economy.calls} 次 · 输入 ${economy.inputTokens} / 输出 ${economy.outputTokens}` : `整理 ${economy.calls} 次 · 用量未知`)
+        : '还没整理过';
+      const detail = current ? h('div', { style: EVO_DETAIL },
+        h('div', null, current.title),
+        h('div', { style: EVO_MUTED }, `第 ${current.revision} 版 · ${EVO_STATE[current.state] || current.state}`),
+        h('div', { style: EVO_MUTED }, Array.isArray(current.conditions) && current.conditions.length
+          ? `适用 ${current.conditions.map((item) => `${item.key}=${item.value}`).join('、')}`
+          : '适用范围待确认'),
+        h('div', { style: BODY }, current.body || '没有正文'),
+        h('div', { style: EVO_MUTED }, `来源 ${Array.isArray(current.learning?.evidence) ? current.learning.evidence.length : 0} 条${EVO_DATE(current.learning?.updatedAt) ? ` · 最近 ${EVO_DATE(current.learning.updatedAt)}` : ''}`),
+        h('div', { style: EVO_ACTIONS },
+          Array.isArray(current.learning?.versions) && current.learning.versions.length > 0
+            ? h('button', { type: 'button', onClick: () => manage('undo'), style: EVO_LINK }, '撤回')
+            : null,
+          h('button', { type: 'button', onClick: () => manage('pin', { pinned: current.learning?.pinned !== true }), style: EVO_LINK }, current.learning?.pinned === true ? '取消固定' : '固定'),
+          current.state === 'paused'
+            ? h('button', { type: 'button', onClick: () => manage('resume'), style: EVO_LINK }, '恢复')
+            : h('button', { type: 'button', onClick: () => manage('pause', { ids: [current.id] }), style: EVO_LINK }, '暂停'),
+          h('button', { type: 'button', onClick: () => manage('delete'), style: EVO_LINK }, '删除'),
+        ),
+      ) : null;
       return h('div', { style: EVO_WRAP },
         h('button', {
           type: 'button',
-          onClick: () => { setOpen(!open); },
+          onClick: () => { setOpen(!open); if (!open) load(); },
           'aria-expanded': open,
           'aria-pressed': enabled,
           title: '项目自进化',
@@ -511,8 +566,19 @@ window.__ModuleLoader__.load({
             h('span', { style: EVO_MUTED }, '实验'),
           ),
           h('div', null, status ? (enabled ? '已开启' : '未开启') : (busy ? '读取中…' : '未读取')),
-          enabled ? h('div', { style: EVO_MUTED }, active > 0 ? `${active} 条规则` : '还没有生效的规则') : null,
+          enabled ? h('div', { style: EVO_MUTED }, `候选 ${counts.pending || 0} · 试用 ${counts.trial || 0} · 生效 ${counts.active || 0}`) : null,
           h('div', { style: EVO_MUTED }, enabled ? '关闭后停止学习，结果保留。' : '开启后整理修正、增加用量。'),
+          rules.length > 0 ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px', maxHeight: '140px', overflowY: 'auto' } },
+            rules.map((rule) => h('button', {
+              key: rule.id,
+              type: 'button',
+              onClick: () => setSelected(selected === rule.id ? '' : rule.id),
+              style: { ...ITEM, opacity: selected === rule.id ? 1 : 0.75 },
+            }, `${rule.title} · ${EVO_STATE[rule.state] || rule.state}`)),
+          ) : h('div', { style: EVO_MUTED }, enabled ? '还没有整理出规则' : null),
+          detail,
+          h('div', { style: EVO_MUTED }, usageLine),
+          h('div', { style: EVO_MUTED }, `上次记忆 ${EVO_SIZE(payload ? payload.bytes : null)}`),
           h('button', { type: 'button', onClick: toggle, disabled: busy || !status, style: busy || !status ? KEEP_OFF : EVO_ACTION }, busy ? '处理中…' : (enabled ? '关闭' : '开启')),
           note ? h('div', { style: EVO_MUTED }, note) : null,
         ) : null,

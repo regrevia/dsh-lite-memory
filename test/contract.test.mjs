@@ -16,6 +16,7 @@ let route = null;
 const webServer = { getOrigin: () => ORIGIN, register: (entry) => { route = entry; return () => {}; } };
 const effect = (fn) => { const dispose = fn(); return typeof dispose === 'function' ? dispose : () => {}; };
 let currentAgent = null;
+let llmImpl = null;
 const sessionCwds = new Map();
 const subscriptions = new Map();
 const promptContexts = [];
@@ -27,6 +28,7 @@ const ctx = {
     if (name === 'systemPrompt') return { context: (entry) => { promptContexts.push(entry); return () => {}; } };
     if (name === 'agents') return { currentInitiator: () => currentAgent };
     if (name === 'sessions') return { get: (id) => (sessionCwds.has(id) ? { header: { cwd: sessionCwds.get(id) } } : undefined) };
+    if (name === 'llm') return llmImpl || undefined;
     return undefined;
   },
   on: (event, handler) => { subscriptions.set(event, handler); return () => {}; },
@@ -285,11 +287,17 @@ assert.equal(evoOn.body.changed, true);
 assert.notEqual(evoOn.body.epoch, evoOff.body.epoch);
 const evoStatus = await call('/lite-memory/evolution', { sessionId: 'session-evo' });
 assert.equal(evoStatus.body.enabled, true);
+const evoSnapshot = await call('/lite-memory/evolution', { sessionId: 'session-evo', learningAction: 'snapshot' });
+assert.equal(evoSnapshot.status, 200);
+assert.equal(Array.isArray(evoSnapshot.body.rules), true);
+assert.equal(typeof evoSnapshot.body.counts.active, 'number');
+assert.equal(evoSnapshot.body.payload.bytes, null);
+assert.equal(evoSnapshot.body.economy.inputTokens, null);
 const evoOtherStatus = await call('/lite-memory/evolution', { sessionId: 'session-evo-other' });
 assert.equal(evoOtherStatus.body.enabled, false);
 const evoStateFile = path.join(store.scopeOf(evoCwd).dir, 'state.json');
 const evoDisk = JSON.parse(fs.readFileSync(evoStateFile, 'utf8'));
-assert.equal(evoDisk.format, 'dsh-lite-memory/state@3');
+assert.equal(evoDisk.format, 'dsh-lite-memory/state@4');
 assert.equal(evoDisk.payload.experimental.projectEvolution.enabled, true);
 const evoOffAgain = await call('/lite-memory/evolution', { sessionId: 'session-evo', enabled: false });
 assert.equal(evoOffAgain.body.enabled, false);
@@ -390,6 +398,22 @@ const stopping = subscriptions.get('agent/turn-stopping');
 assert.equal(typeof stopping, 'function');
 stopping({ turn: '21', signal: evoSig });
 assert.equal(evoRecall.text({ agent: evoAgent, signal: evoSig }), '');
+
+// 管理面：读当前项目的成果和上次载荷，删除按看到的版本
+const evoManage = await call('/lite-memory/evolution', { sessionId: 'session-evo-read', learningAction: 'snapshot' });
+assert.equal(evoManage.status, 200);
+assert.equal(evoManage.body.rules.length, 1);
+assert.equal(evoManage.body.rules[0].id, evoRule.id);
+assert.ok(evoManage.body.payload.bytes > 0);
+const evoDeleteStale = await call('/lite-memory/evolution', {
+  sessionId: 'session-evo-read', learningAction: 'delete', id: evoRule.id, expectedRevision: evoManage.body.rules[0].revision - 1,
+});
+assert.equal(evoDeleteStale.status, 409);
+const evoDelete = await call('/lite-memory/evolution', {
+  sessionId: 'session-evo-read', learningAction: 'delete', id: evoRule.id, expectedRevision: evoManage.body.rules[0].revision,
+});
+assert.equal(evoDelete.status, 200);
+assert.equal(evoDelete.body.ok, true);
 
 // ── 界面只吃持久元数据，不猜文案 ─────────────────────────────────────────────
 const metaOf = (name, args, value) => defs.get(name).output.presentationMeta(args, value);
@@ -539,5 +563,61 @@ const linkedRecord = projectEntries().find((item) => item.id === linkedB.id);
 assert.equal(linkedRecord.links.length, 1);
 assert.equal(linkedRecord.links[0].id, linkedA.id);
 assert.equal(linkedRecord.links[0].type, 'related');
+
+
+// ── 项目实验：正常回合结束后走一次短整理，只写后台结果 ─────────────────────────
+const orgCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-organize-'));
+sessionCwds.set('session-organize', orgCwd);
+const orgOn = await call('/lite-memory/evolution', { sessionId: 'session-organize', enabled: true });
+assert.equal(orgOn.status, 200);
+const orgScope = store.scopeOf(orgCwd);
+await store.setTaskDefault(orgScope, { taskKind: 'video', seriesId: '口播' });
+let orgOptions = null;
+let orgPrepare = null;
+llmImpl = {
+  prepareCall: async (config, signal) => {
+    orgPrepare = { config, signal };
+    return {
+      config: { provider: 'deepseek', model: 'chat' },
+      stream: async function* (options) {
+        orgOptions = options;
+        yield { type: 'text-delta', text: JSON.stringify({ changes: [{
+          target: 'new', feedbackType: 'spec_change', topicKey: '开头', currentText: '开头先给结论。',
+          applicability: 'all_in_scope', conditions: [], evidence: ['u0'], persistence: 'project_candidate',
+        }] }) };
+        yield { type: 'usage', usage: { inputTokens: 12, outputTokens: 6 } };
+        yield { type: 'finish', reason: { kind: 'stop' } };
+      },
+    };
+  },
+};
+const orgAgent = { id: 'session-organize', cwd: orgCwd, session: { id: 'session-organize', header: { id: 'session-organize', cwd: orgCwd }, requestHeader: () => ({ config: { provider: 'deepseek', model: 'chat' } }) } };
+currentAgent = orgAgent;
+const orgSig = new AbortController().signal;
+await preStep({ agent: orgAgent, signal: orgSig, turn: '31' }, async () => ({
+  kind: 'enter',
+  messages: [{ role: 'user', id: 'org-m1', source: { kind: 'user' }, content: [{ type: 'text', text: '以后开头先给结论，别再铺垫。' }] }],
+}));
+assert.equal(store.learningSnapshot(orgScope).rules.length, 0);
+const orgTurnEnd = subscriptions.get('session/event');
+assert.equal(typeof orgTurnEnd, 'function');
+orgTurnEnd(orgAgent.session, { type: 'turn/end', data: { reason: { kind: 'completed' } } });
+for (let i = 0; i < 100 && store.learningSnapshot(orgScope).rules.length === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const orgRules = store.learningSnapshot(orgScope).rules;
+assert.equal(orgRules.length, 1);
+assert.equal(orgRules[0].body, '开头先给结论。');
+assert.equal(orgRules[0].state, 'active');
+assert.equal(orgPrepare.config.maxTokens, 768);
+assert.equal(orgOptions.purpose, 'project-evolution');
+assert.equal('tools' in orgOptions, false);
+assert.equal(orgOptions.sessionId, 'session-organize');
+assert.equal(orgRules[0].origin, 'project_evolution');
+const orgEconomy = store.learningSnapshot(orgScope).economy;
+assert.equal(orgEconomy.calls, 1);
+assert.equal(orgEconomy.knownCalls, 1);
+assert.equal(orgEconomy.inputTokens, 12);
+llmImpl = null;
 
 console.log('contract.test.mjs: all passed');
