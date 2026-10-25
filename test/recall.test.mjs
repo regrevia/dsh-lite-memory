@@ -351,4 +351,87 @@ assert.notEqual(bootA.provider.text({ agent: agentB, signal: signalB }), prepare
   assert.equal(bootA.provider.text({ agent, signal: sig }), '');
 }
 
+// A16：全局层被彻底删除后，工具续步立刻重投影；冻结的旧卡片不复活，新真人任务重算。
+{
+  const globalNote = save(global, { title: '全局发布前文案核对', tags: ['发布', '核对'], summary: '全局规则：发布前先核对文案' });
+  const agent = makeAgent('agent-global-purge', cwdA);
+  const sig = signal();
+  await bootA.preStep({ agent, signal: sig, turn: 't1' }, enter(human('发布前跑文案检查')));
+  assert.match(bootA.provider.text({ agent, signal: sig }), new RegExp(globalNote.id));
+  const purged = store.forget(global, globalNote.id, { mode: 'purge' });
+  assert.equal(purged.mode, 'purged');
+  /** 同一 turn 的续步没有新真人消息：不重新问人，但盘上变了必须换掉快照。 */
+  await bootA.preStep({ agent, signal: sig, turn: 't1' }, enter());
+  const after = bootA.provider.text({ agent, signal: sig });
+  assert.doesNotMatch(after, /全局发布前文案核对/);
+  assert.match(after, /发布前跑文案检查/, '项目层卡片仍在');
+  const sigNext = signal();
+  await bootA.preStep({ agent, signal: sigNext, turn: 't2' }, enter(human('大正文样本怎么用')));
+  assert.match(bootA.debug.preparedOf(agent).query, /大正文样本/);
+  assert.doesNotMatch(bootA.provider.text({ agent, signal: sigNext }), /全局发布前文案核对/);
+}
+
+// A17：工具模式不自动注入，但工具调用同样共享每请求额度。
+{
+  const toolOnly = boot('tool_only');
+  const agent = makeAgent('agent-tool-budget', cwdA);
+  await prepare(toolOnly, agent, '大正文样本怎么用');
+  assert.equal(toolOnly.debug.preparedOf(agent), null);
+  const win = toolOnly.debug.windowOf(agent);
+  assert.ok(win, '工具模式也开额度窗口');
+  let exhausted = null;
+  for (let i = 0; i < 9 && !exhausted; i += 1) {
+    const row = await toolOnly.exec('memory_read', { id: bigBodies[i].id }, agent);
+    if (row.status === 'budget_exhausted') exhausted = row;
+  }
+  assert.ok(exhausted, '超过额度后拒绝读正文');
+  assert.equal(exhausted.id, '');
+  assert.ok(win.bytes <= 8192);
+  assert.ok(win.bodies <= 3);
+  assert.ok(win.reads <= 8);
+}
+
+// A18：归档/旧正文不进正常检索；只有明确查历史才列归档。
+{
+  const cwdE = mkdir('e');
+  const scopeE = store.scopeOf(cwdE);
+  const archivedEntry = save(scopeE, { title: '旧端口修正', tags: ['端口'], summary: '端口改到 49661', body: '旧正文：端口是 49661' });
+  const agent = makeAgent('agent-history', cwdE);
+  const fresh = await bootA.exec('memory_search', { query: '旧端口修正' }, agent);
+  assert.equal(fresh.count, 1);
+  await bootA.exec('memory_forget', { id: archivedEntry.id, mode: 'archive' }, agent);
+  const hidden = await bootA.exec('memory_search', { query: '旧端口修正' }, agent);
+  assert.equal(hidden.count, 0, '归档后默认检索不到');
+  const history = await bootA.exec('memory_search', { query: '旧端口修正', history: true }, agent);
+  assert.equal(history.count, 1);
+  assert.equal(history.refs[0].status, 'archived');
+  const oldBody = save(scopeE, { title: '口端口令', tags: ['端口'], summary: '端口以最新为准', body: '第一版：端口是 5000' });
+  store.upsert(scopeE, { id: oldBody.id, title: '口端口令', summary: '端口以最新为准', body: '第二版：端口是 49661' });
+  const current = await bootA.exec('memory_search', { query: '口端口令', history: true }, agent);
+  assert.ok(current.refs.some((ref) => ref.id === oldBody.id && ref.revision === 2), '检索只给当前版本');
+  const latest = await bootA.exec('memory_read', { id: oldBody.id }, agent);
+  assert.match(latest.body, /第二版/);
+  assert.doesNotMatch(latest.body, /第一版/);
+}
+
+// A19：预算按规范化 JSON 字节算，中文、换行、引号、反斜杠都算进去。
+{
+  const cwdF = mkdir('f');
+  const scopeF = store.scopeOf(cwdF);
+  const tricky = store.upsert(scopeF, {
+    title: '转义预算样本',
+    summary: '换行与引号',
+    applicability: 'all_in_scope',
+    body: '第一行\n第二行 "双引号" \\反斜杠\t制表',
+  });
+  const agent = makeAgent('agent-json-budget', cwdF);
+  await bootA.preStep({ agent, signal: signal(), turn: 't1' }, enter(human('转义预算样本怎么读')));
+  const win = bootA.debug.windowOf(agent);
+  const before = win.bytes;
+  const value = await bootA.exec('memory_read', { id: tricky.record.id }, agent);
+  assert.equal(value.status, 'ok');
+  assert.equal(win.bytes - before, Buffer.byteLength(JSON.stringify(value)));
+  assert.ok(win.bytes <= 8192);
+}
+
 console.log('recall.test.mjs: ok');

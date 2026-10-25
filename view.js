@@ -515,7 +515,9 @@ export function conditionsKey(conditions) {
   return JSON.stringify([...list].map((item) => [String(item.key), String(item.value)]).sort((a, b) => a[0].localeCompare(b[0])));
 }
 
+/** 两条规则是否算同一条：正文、selection、关联和目标也不同就是冲突，不能悄悄挑一条。 */
 function ruleFingerprint(record) {
+  const selection = record.selection || null;
   return JSON.stringify([
     record.title || '',
     record.summary || '',
@@ -524,6 +526,11 @@ function ruleFingerprint(record) {
     conditionsKey(record.conditions),
     record.applicability || '',
     record.kind || '',
+    Array.isArray(record.tags) ? [...record.tags].map(String).sort() : [],
+    Array.isArray(record.triggers) ? [...record.triggers].map(String).sort() : [],
+    selection ? [selection.mode || '', selection.artifactKey || '', Array.isArray(selection.items) ? [...selection.items].map(String).sort() : []] : null,
+    Array.isArray(record.links) ? record.links.map((link) => [String(link.type || 'related'), String(link.id)]).sort((a, b) => a[1].localeCompare(b[1])) : [],
+    record.body || '',
   ]);
 }
 

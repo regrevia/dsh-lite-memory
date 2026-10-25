@@ -271,6 +271,42 @@ test('S10 旧的子目录库并进仓库根，同 id 只留一条', () => {
   assert.equal(fs.existsSync(path.join(scope.dir, 'legacy', `scope-${childKey}`)), true);
 });
 
+test('S10 迁移预检扫到所有被吸收的旧库：子目录缺正文/同 id 不同正文都不发布', () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-state-adopt-bad-'));
+  dirs.push(repo);
+  execFileSync('git', ['init', '-q'], { cwd: repo });
+  const sub = path.join(repo, 'packages', 'bad');
+  fs.mkdirSync(sub, { recursive: true });
+  const scope = scopeOf(repo);
+  const childKey = `legacy-bad-${Math.random().toString(16).slice(2, 8)}`;
+  const childDir = path.join(memoryRoot(), childKey);
+  fs.mkdirSync(path.join(childDir, 'entries'), { recursive: true });
+  fs.writeFileSync(path.join(childDir, 'index.json'), JSON.stringify({
+    version: 1, scope: childKey, cwd: sub,
+    entries: [
+      { id: 'mem_666666666666', title: '子目录缺正文', summary: '正文文件被删了', when: '', kind: 'note', tags: [], revision: 1, status: 'active', source: 'user_explicit', created: '2026-01-01T00:00:00.000Z', updated: '2026-01-01T00:00:00.000Z' },
+      { id: 'mem_777777777777', title: '同 id 不同正文', summary: '和主库撞 id', when: '', kind: 'note', tags: [], revision: 1, status: 'active', source: 'user_explicit', created: '2026-01-01T00:00:00.000Z', updated: '2026-01-01T00:00:00.000Z' },
+    ],
+    suggestions: [], receipts: [],
+  }));
+  fs.writeFileSync(path.join(childDir, 'entries', 'mem_777777777777.md'), '子目录版本');
+  /** 主库有同 id 但正文不同：合并会静默丢数据，必须在预检就拦下。 */
+  fs.mkdirSync(path.join(scope.dir, 'entries'), { recursive: true });
+  fs.writeFileSync(path.join(scope.dir, 'index.json'), JSON.stringify({
+    version: 1, scope: scope.key, cwd: repo,
+    entries: [{ id: 'mem_777777777777', title: '同 id 不同正文', summary: '主库版本', when: '', kind: 'note', tags: [], revision: 1, status: 'active', source: 'user_explicit', created: '2026-01-01T00:00:00.000Z', updated: '2026-01-01T00:00:00.000Z' }],
+    suggestions: [], receipts: [],
+  }));
+  fs.writeFileSync(path.join(scope.dir, 'entries', 'mem_777777777777.md'), '主库版本');
+  const report = migrationReport(scope);
+  assert.equal(report.sources, 2);
+  assert.ok(report.missingBodies.includes('mem_666666666666'));
+  assert.ok(report.conflicts.some((row) => row.id === 'mem_777777777777' && /不同正文/.test(row.reason)));
+  assert.throws(() => migrateLegacy(scope), (error) => error instanceof StateError && error.code === 'legacy_conflict');
+  assert.equal(fs.existsSync(stateFile(scope)), false);
+  assert.equal(fs.existsSync(path.join(childDir, 'index.json')), true);
+});
+
 test('exact noop 不涨 generation，也不改 updatedAt', () => {
   const scope = fresh('noop');
   transact(scope, { expectCreate: true }, addNote('一条', '正文'));
@@ -352,6 +388,20 @@ test('purge 之后再碰同一个 id 返回 missing，不复活', () => {
   assert.equal(again.ok, true);
   assert.equal(again.missing, true);
   assert.equal(load(scope).state.entries.length, 0);
+});
+
+test('写入重试不堆临时副本：固定临时名写前清理，成功后只留状态文件', () => {
+  const scope = fresh('retry-temp');
+  transact(scope, { expectCreate: true }, addNote('第一次', 'x'));
+  const before = load(scope);
+  /** 模拟上次写到一半：固定名和旧版随机名的残留都应在下一次写入前清掉。 */
+  fs.writeFileSync(path.join(scope.dir, '.state.json.tmp'), '{"half":true}');
+  fs.writeFileSync(path.join(scope.dir, '.state.prev.json.tmp'), '{"half":true}');
+  fs.writeFileSync(path.join(scope.dir, '.state.abandoned.tmp'), '{"half":true}');
+  const next = transact(scope, { expected: { generation: before.state.generation, epoch: before.state.epoch } }, addNote('第二次', 'y'));
+  assert.equal(next.state.generation, before.state.generation + 1);
+  assert.deepEqual(fs.readdirSync(scope.dir).filter((name) => name.endsWith('.tmp')), []);
+  assert.equal(JSON.parse(raw(scope)).payload.generation, next.state.generation);
 });
 
 for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });

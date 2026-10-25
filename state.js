@@ -153,6 +153,11 @@ const purgeIntentFile = (scope) => path.join(scope.dir, 'purge.intent.json');
 export const MOVE_FORMAT = 'dsh-lite-memory/move@1';
 const moveIntentFile = () => path.join(memoryRoot(), 'move.intent.json');
 
+/** 恢复流程要直接比对 current/prev：只暴露这两个固定文件名。 */
+export function stateFiles(scope) {
+  return { current: stateFile(scope), prev: prevFile(scope) };
+}
+
 function sleepSync(ms) {
   try {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -332,18 +337,59 @@ function fsyncDir(dir) {
   }
 }
 
+/** 固定临时名：失败重试不会在目录里堆一串随机副本；恢复路径只认这几个已知名字。 */
+function tempOf(file) {
+  return path.join(path.dirname(file), `.${path.basename(file)}.tmp`);
+}
+
+function discardTemp(file) {
+  try {
+    fs.rmSync(tempOf(file), { force: true });
+  } catch {
+    /* 临时文件不权威，删不掉也不能挡住真正的写入 */
+  }
+}
+
+/** 清理上次中断留下的临时副本：只碰已知的 .state*.tmp，不碰状态文件本身。 */
+export function cleanStateResidue(scope) {
+  let names;
+  try {
+    names = fs.readdirSync(scope.dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith('.state') || !name.endsWith('.tmp')) continue;
+    try {
+      fs.rmSync(path.join(scope.dir, name), { force: true });
+    } catch {
+      /* 同一目录的临时副本，删不掉下次写前还会再清一次 */
+    }
+  }
+}
+
 function writeDurable(file, text) {
   const dir = path.dirname(file);
   fs.mkdirSync(dir, { recursive: true });
-  const tmp = path.join(dir, `.${path.basename(file)}.${process.pid}.${crypto.randomBytes(3).toString('hex')}.tmp`);
-  const fd = fs.openSync(tmp, 'wx');
+  const tmp = tempOf(file);
+  discardTemp(file);
+  let fd = null;
   try {
+    fd = fs.openSync(tmp, 'wx');
     fs.writeFileSync(fd, text);
     fs.fsyncSync(fd);
-  } finally {
     fs.closeSync(fd);
+    fd = null;
+    fs.renameSync(tmp, file);
+  } catch (error) {
+    try {
+      if (fd !== null) fs.closeSync(fd);
+    } catch {
+      /* already closed */
+    }
+    discardTemp(file);
+    throw new StateError('unavailable', `${path.basename(file)} 写不进去（${error.code || 'IO'}）`);
   }
-  fs.renameSync(tmp, file);
   fsyncDir(dir);
 }
 
@@ -364,33 +410,7 @@ function publish(scope, next, hadCurrent) {
   if (Buffer.byteLength(text) > LIMITS.stateBytes) {
     throw new StateError('budget_exhausted', `记忆状态超过 ${LIMITS.stateBytes} 字节，先归档旧的再写`);
   }
-  const tmp = path.join(dir, `.state.tmp.${process.pid}.${crypto.randomBytes(3).toString('hex')}`);
-  fs.mkdirSync(dir, { recursive: true });
-  const fd = fs.openSync(tmp, 'wx');
-  try {
-    fs.writeFileSync(fd, text);
-    fs.fsyncSync(fd);
-  } catch (error) {
-    try {
-      fs.closeSync(fd);
-    } catch {
-      /* already closed */
-    }
-    fs.rmSync(tmp, { force: true });
-    throw new StateError('unavailable', `记忆状态写不进去（${error.code || 'IO'}）`);
-  }
-  fs.closeSync(fd);
-  try {
-    fs.renameSync(tmp, current);
-  } catch (error) {
-    fs.rmSync(tmp, { force: true });
-    throw new StateError('unavailable', `记忆状态换不上去（${error.code || 'IO'}）`);
-  }
-  try {
-    fsyncDir(dir);
-  } catch {
-    durability = 'unconfirmed';
-  }
+  writeDurable(current, text);
   return { durability };
 }
 
@@ -537,36 +557,6 @@ function toStateEntry(legacy, body, status) {
   };
 }
 
-/** 旧库只读预检：缺正文、同 id 冲突、坏索引都在这里显形，绝不猜着补。 */
-export function migrationReport(scope) {
-  const legacy = legacyEntries(scope);
-  const report = { required: false, entries: 0, archived: 0, missingBodies: [], conflicts: [], adoptable: [] };
-  if (legacy) {
-    report.required = true;
-    const ids = new Set();
-    for (const row of legacy.entries) {
-      if (!row || typeof row.id !== 'string' || !/^mem_[a-z0-9]{6,}$/.test(row.id)) {
-        report.conflicts.push({ id: String(row && row.id), reason: 'id 不合法' });
-        continue;
-      }
-      if (ids.has(row.id)) report.conflicts.push({ id: row.id, reason: 'id 重复' });
-      ids.add(row.id);
-      report.entries += 1;
-      if (legacyBody(scope, row.id) === null) report.missingBodies.push(row.id);
-    }
-    const archiveDir = path.join(scope.dir, 'archive');
-    let archived = [];
-    try {
-      archived = fs.readdirSync(archiveDir).filter((name) => name.endsWith('.json'));
-    } catch {
-      archived = [];
-    }
-    report.archived = archived.length;
-  }
-  if (scope.cwd) report.adoptable = adoptableLegacy(scope);
-  return report;
-}
-
 /** 旧版按 cwd 建库，根目录改到仓库根后，子目录的旧库必须收编到同一层。 */
 function adoptableLegacy(scope) {
   let names;
@@ -597,6 +587,105 @@ function adoptableLegacy(scope) {
   return found;
 }
 
+/** 被吸收的旧库：当前根目录的旧索引 + 同一仓库下更早按子目录建的那些。 */
+function legacySources(scope) {
+  const sources = [];
+  const own = legacyEntries(scope);
+  if (own) sources.push({ scope, legacy: own });
+  let adoptable = [];
+  if (scope.cwd) adoptable = adoptableLegacy(scope);
+  for (const item of adoptable) {
+    const child = { ...scope, key: item.key, dir: item.dir, cwd: item.cwd };
+    const legacy = legacyEntries(child);
+    if (legacy) sources.push({ scope: child, legacy });
+  }
+  return { sources, adoptable };
+}
+
+/** 归档文件单独放：预检阶段只读，不写盘。 */
+function legacyArchiveRows(scope) {
+  const dir = path.join(scope.dir, 'archive');
+  let names = [];
+  try {
+    names = fs.readdirSync(dir).filter((name) => name.endsWith('.json'));
+  } catch {
+    return [];
+  }
+  const rows = [];
+  for (const name of names) {
+    try {
+      const row = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+      if (row && typeof row.id === 'string') rows.push(row);
+    } catch {
+      /* 坏归档文件不参与迁移，也不阻断当前条目 */
+    }
+  }
+  return rows;
+}
+
+/**
+ * 旧库只读预检：缺正文、同 id 冲突、同 id 不同正文、索引与正文不一致都在这里显形，
+ * 一次扫完所有会被吸收的旧库；有任何未解决项就一条都不发布。
+ */
+export function migrationReport(scope) {
+  const { sources, adoptable } = legacySources(scope);
+  const report = {
+    required: sources.some((source) => source.scope.dir === scope.dir),
+    entries: 0,
+    archived: 0,
+    missingBodies: [],
+    conflicts: [],
+    adoptable,
+    sources: sources.length,
+  };
+  const bodies = new Map();
+  for (const source of sources) {
+    const local = new Set();
+    const storeKey = source.scope.key || 'root';
+    const noteBody = (id, body, where) => {
+      const seen = bodies.get(id);
+      if (!seen) {
+        bodies.set(id, { body, store: storeKey });
+        return;
+      }
+      if (seen.body !== body) report.conflicts.push({ id, store: storeKey, reason: `同 id 不同正文：${seen.store} 与 ${storeKey}` });
+      if (where === 'archive' && !body && seen.body) report.conflicts.push({ id, store: storeKey, reason: '归档缺少正文' });
+    };
+    for (const row of source.legacy.entries) {
+      if (!row || typeof row.id !== 'string' || !/^mem_[a-z0-9]{6,}$/.test(row.id)) {
+        report.conflicts.push({ id: String(row && row.id), store: storeKey, reason: 'id 不合法' });
+        continue;
+      }
+      if (local.has(row.id)) report.conflicts.push({ id: row.id, store: storeKey, reason: 'id 重复' });
+      local.add(row.id);
+      report.entries += 1;
+      const fileBody = legacyBody(source.scope, row.id);
+      if (fileBody === null) report.missingBodies.push(row.id);
+      /** 旧索引若自带正文，和正文文件必须一致，否则不知道该信哪份。 */
+      if (typeof row.body === 'string' && fileBody !== null && row.body !== fileBody) {
+        report.conflicts.push({ id: row.id, store: storeKey, reason: '索引与正文不一致' });
+      }
+      noteBody(row.id, fileBody === null ? '' : fileBody, 'active');
+    }
+    const archiveRows = legacyArchiveRows(source.scope);
+    report.archived += archiveRows.length;
+    for (const row of archiveRows) {
+      if (local.has(row.id)) {
+        report.conflicts.push({ id: row.id, store: storeKey, reason: '归档与索引 id 重复' });
+        continue;
+      }
+      local.add(row.id);
+      const fileBody = legacyBody(source.scope, row.id);
+      const text = typeof row.body === 'string' ? row.body : (fileBody === null ? '' : fileBody);
+      if (fileBody !== null && typeof row.body === 'string' && row.body !== fileBody) {
+        report.conflicts.push({ id: row.id, store: storeKey, reason: '归档索引与正文不一致' });
+      }
+      noteBody(row.id, text, 'archive');
+    }
+  }
+  return report;
+}
+
 /**
  * 迁移是显式事务：先写 migration.intent.json，再发布 state，最后收走旧文件。
  * 缺正文/同 id 冲突默认不动盘，把报告抛给调用方决定。
@@ -616,9 +705,7 @@ export function migrateLegacy(scope, options = {}) {
       error.report = report;
       throw error;
     }
-    const sources = [];
-    if (report.required) sources.push({ scope, legacy: legacyEntries(scope) });
-    for (const item of report.adoptable) sources.push({ scope: { ...scope, key: item.key, dir: item.dir, cwd: item.cwd }, legacy: legacyEntries({ key: item.key, dir: item.dir }) });
+    const sources = legacySources(scope).sources;
     const state = emptyState(scope);
     const seen = new Set();
     let missing = 0;
@@ -702,6 +789,7 @@ export function migrateLegacy(scope, options = {}) {
  */
 export function load(scope, options = {}) {
   moveBarrier(scope, options);
+  if (options.cleanup) cleanStateResidue(scope);
   const intent = purgeIntent(scope);
   if (intent && !options.allowPurge) {
     throw new StateError('purge_pending', `这个记忆库正在彻底删除（${intent.operationId}），先调用 resumePurge 收尾；期间不提供内容读取`);
@@ -738,8 +826,12 @@ export function load(scope, options = {}) {
  */
 export function transact(scope, options, work) {
   return withScopeLock(scope, () => {
-    const loaded = load(scope, { allowMove: Boolean(options && options.allowMove), allowPurge: Boolean(options && options.allowPurge) });
-    const { operationId = '', payloadDigest = '', expected = null, expectCreate = false } = options || {};
+    const loaded = load(scope, {
+      allowMove: Boolean(options && options.allowMove),
+      allowPurge: Boolean(options && options.allowPurge),
+      cleanup: true,
+    });
+    const { operationId = '', payloadDigest = '', expected = null, expectCreate = false, nextEpoch = '' } = options || {};
     if (operationId) {
       const replay = loaded.state.receipts.find((row) => row.operationId === operationId);
       if (replay) {
@@ -766,6 +858,7 @@ export function transact(scope, options, work) {
       return { changed: false, state: loaded.state, result: outcome.result, archived: [] };
     }
     const evicted = enforceBudget(draft, scope);
+    if (nextEpoch) draft.epoch = nextEpoch;
     draft.generation = loaded.state.generation + 1;
     draft.updatedAt = new Date().toISOString();
     if (!draft.storeId) draft.storeId = loaded.state.storeId;
@@ -817,10 +910,15 @@ export function readMoveIntent() {
   } catch {
     throw new StateError('conflict', `移动中断，协调文件已损坏：${file}；先人工确认两层状态再删除它`);
   }
+  const stringField = (value) => value === undefined || typeof value === 'string';
   const ok = intent && intent.format === MOVE_FORMAT
     && typeof intent.operationId === 'string' && intent.operationId
     && intent.source && typeof intent.source.scopeKey === 'string' && typeof intent.source.id === 'string'
-    && intent.target && typeof intent.target.scopeKey === 'string' && typeof intent.target.newId === 'string';
+    && stringField(intent.source.cwd) && stringField(intent.source.storeId)
+    && stringField(intent.source.epoch) && stringField(intent.source.toEpoch)
+    && intent.target && typeof intent.target.scopeKey === 'string' && typeof intent.target.newId === 'string'
+    && stringField(intent.target.cwd) && stringField(intent.target.storeId)
+    && stringField(intent.target.epoch) && stringField(intent.target.toEpoch);
   if (!ok) throw new StateError('conflict', `移动中断，协调文件内容不认：${file}`);
   return intent;
 }

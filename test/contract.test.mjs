@@ -200,7 +200,9 @@ assert.equal(rejected.status, 200);
 assert.equal(rejected.body.ok, true);
 
 // ── undo by id; old title-based payloads are refused ─────────────────────────
-const undone = await call('/lite-memory/undo', { op: 'undo', id: kept.body.id, cwd });
+const undoRevision = store.readEntry(store.scopeOf(cwd), kept.body.id).revision;
+assert.equal((await call('/lite-memory/undo', { op: 'undo', id: kept.body.id, cwd })).status, 400);
+const undone = await call('/lite-memory/undo', { op: 'undo', id: kept.body.id, revision: undoRevision, cwd });
 assert.equal(undone.status, 200);
 assert.equal(undone.body.mode, 'archived');
 assert.equal(store.loadIndex(store.scopeOf(cwd)).entries.some((entry) => entry.id === kept.body.id), false);
@@ -243,6 +245,17 @@ const gone = await call('/lite-memory/body', { sessionId: 'session-contract', id
 assert.equal(gone.status, 200);
 assert.equal(gone.body.status, 'gone');
 assert.equal('title' in gone.body, false);
+/** 别的会话、别的工作目录都不能拿 id 探正文；本会话引用过或本目录这一层才行。 */
+const foreignSession = await call('/lite-memory/body', { sessionId: 'session-contract-2', id: cited.id });
+assert.equal(foreignSession.status, 200);
+assert.equal(foreignSession.body.status, 'gone');
+assert.equal('body' in foreignSession.body, false);
+const viaCwd = await call('/lite-memory/body', { cwd, id: cited.id });
+assert.equal(viaCwd.status, 200);
+assert.match(viaCwd.body.body, /引用正文第一行/);
+const foreignCwd = await call('/lite-memory/body', { cwd: path.join(os.tmpdir(), 'lite-memory-contract-foreign'), id: cited.id });
+assert.equal(foreignCwd.body.status, 'gone');
+assert.equal((await call('/lite-memory/body', { id: cited.id })).status, 400);
 assert.equal((await call('/lite-memory/citations', {})).status, 400);
 assert.equal((await call('/lite-memory/citations', {}, { origin: 'http://evil.example' })).status, 403);
 assert.notEqual((await call('/lite-memory/citations', { sessionId: 'session-contract' }, { origin: 'dsh-app://app' })).status, 403);
@@ -317,5 +330,121 @@ assert.equal(stale.status, 409);
 const fresh = store.loadIndex(store.scopeOf(cwd)).entries.find((item) => item.id === guarded.id);
 const accepted = await call('/lite-memory/undo', { op: 'undo', id: guarded.id, revision: fresh.revision, cwd });
 assert.equal(accepted.status, 200);
+
+// ── 第二组：确认前后语义一致、比较口径统一 ──────────────────────────────────
+const cwd2 = path.join(os.tmpdir(), 'lite-memory-contract-project-2');
+fs.mkdirSync(cwd2, { recursive: true });
+const exec2 = (name, args) => defs.get(name).execute(args, { agent: { cwd: cwd2, session: { id: 'session-contract-2', header: { cwd: cwd2 } } } });
+const projectScope = store.scopeOf(cwd2);
+const projectEntries = () => store.loadIndex(projectScope).entries;
+
+/** 建议时给的适用范围与条件，确认后必须原样落盘，不能因为过了一道待确认区就变成普遍适用。 */
+const condSuggest = await exec2('memory_suggest', {
+  title: '只在发布机跑冒烟',
+  summary: '发布机上的冒烟检查命令',
+  body: 'bash smoke.sh',
+  when: '发布机上',
+  scope: 'project',
+  applicability: 'conditional',
+  conditions: [{ key: 'machine', value: 'release-box' }],
+  triggers: ['冒烟'],
+});
+assert.equal(condSuggest.asked, true, JSON.stringify(condSuggest));
+const condKept = await call('/lite-memory/keep', { op: 'keep', candidateId: condSuggest.id, operationId: 'op_cond_keep', cwd: cwd2 });
+assert.equal(condKept.status, 200);
+const condRecord = projectEntries().find((item) => item.title === '只在发布机跑冒烟');
+assert.ok(condRecord, '确认后应写入项目层');
+assert.equal(condRecord.applicability, 'conditional');
+assert.deepEqual(condRecord.conditions, [{ key: 'machine', value: 'release-box' }]);
+assert.deepEqual(condRecord.triggers, ['冒烟']);
+
+/** 只改摘要不该把原来有条件的规则放宽成普遍适用。 */
+const narrow = await exec2('memory_save', {
+  title: 'windows 上跑构建',
+  summary: 'windows 构建命令',
+  body: 'pnpm build',
+  when: 'windows 上',
+  scope: 'project',
+  applicability: 'conditional',
+  conditions: [{ key: 'targetOs', value: 'windows' }],
+});
+assert.equal(narrow.changed, true);
+const narrowed = await exec2('memory_save', { id: narrow.id, title: 'windows 上跑构建', summary: 'windows 构建用这条命令' });
+assert.equal(narrowed.changed, true);
+const narrowRecord = projectEntries().find((item) => item.id === narrow.id);
+assert.equal(narrowRecord.applicability, 'conditional');
+assert.deepEqual(narrowRecord.conditions, [{ key: 'targetOs', value: 'windows' }]);
+
+/** 同名但机器条件不同是两条规则：新的一条不能覆盖旧的一条。 */
+const boxA = await exec2('memory_save', {
+  title: '冒烟顺序',
+  summary: '冒烟按这个顺序跑',
+  body: '先登录再下单',
+  when: '冒烟时',
+  scope: 'project',
+  applicability: 'conditional',
+  conditions: [{ key: 'machine', value: 'box-a' }],
+});
+assert.equal(boxA.changed, true);
+const boxB = await exec2('memory_save', {
+  title: '冒烟顺序',
+  summary: '冒烟按这个顺序跑',
+  body: '先建号再登录',
+  when: '冒烟时',
+  scope: 'project',
+  applicability: 'conditional',
+  conditions: [{ key: 'machine', value: 'box-b' }],
+});
+assert.equal(boxB.changed, true);
+assert.notEqual(boxB.id, boxA.id);
+const bothBoxes = projectEntries().filter((item) => item.title === '冒烟顺序' && item.status === 'active');
+assert.equal(bothBoxes.length, 2);
+assert.deepEqual(bothBoxes.map((item) => item.conditions[0].value).sort(), ['box-a', 'box-b']);
+assert.equal(bothBoxes.find((item) => item.id === boxA.id).body, '先登录再下单');
+
+/** 同一主题、条件一致但正文不同：读取要报冲突，不能悄悄挑一条当现行规范。 */
+const slotA = await exec2('memory_save', {
+  title: '发版检查项',
+  summary: '发版前检查的固定清单',
+  body: '第一步：跑 lint',
+  scope: 'project',
+  applicability: 'all_in_scope',
+  topicKey: '发版检查',
+  resolution: 'distinct',
+});
+const slotB = await exec2('memory_save', {
+  title: '发版检查项',
+  summary: '发版前检查的固定清单',
+  body: '第一步：跑单测',
+  scope: 'project',
+  applicability: 'all_in_scope',
+  topicKey: '发版检查',
+  resolution: 'distinct',
+});
+assert.notEqual(slotA.id, slotB.id);
+const resolvedSlots = store.visibleRules(projectScope, {}).resolved;
+const slotRow = [...resolvedSlots.values()].find((row) => row.key === '发版检查');
+assert.ok(slotRow);
+assert.equal(slotRow.status, 'conflict');
+
+/** 工具参数里的 links / selection.items / topicKey:null 是合法输入，不能被 schema 挡掉或被校验器拒绝。 */
+assert.equal(saveParams.links.items.type, 'object');
+assert.deepEqual(saveParams.links.items.required, ['id']);
+assert.equal(saveParams.selection.properties.items.type, 'array');
+assert.deepEqual(saveParams.topicKey.type, ['string', 'null']);
+const linkedA = await exec2('memory_save', { title: '关联目标甲', summary: '用来当关联目标', body: '甲', scope: 'project' });
+const linkedB = await exec2('memory_save', {
+  title: '关联目标乙',
+  summary: '带关联的那条',
+  body: '乙',
+  scope: 'project',
+  resolution: 'distinct',
+  links: [{ type: 'related', id: linkedA.id }],
+});
+assert.equal(linkedB.changed, true, JSON.stringify(linkedB));
+const linkedRecord = projectEntries().find((item) => item.id === linkedB.id);
+assert.equal(linkedRecord.links.length, 1);
+assert.equal(linkedRecord.links[0].id, linkedA.id);
+assert.equal(linkedRecord.links[0].type, 'related');
 
 console.log('contract.test.mjs: all passed');

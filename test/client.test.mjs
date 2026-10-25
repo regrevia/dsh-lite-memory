@@ -7,7 +7,7 @@ globalThis.__LITE_MEMORY_TEST__ = (helpers) => { seen = helpers; };
 await import('../client.js');
 assert.ok(seen, 'client test seam missing');
 
-const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe } = seen;
+const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf } = seen;
 const settled = (meta, extra = {}) => ({ kind: 'tool-result', meta, isError: false, content: [], ...extra });
 
 // 元数据只从落定结果里取，错误块和旧块一律不认。
@@ -23,6 +23,12 @@ assert.equal(save, null);
 const changed = citationOf({ kind: 'memory-save', id: 'mem_aaaaaaaa', title: 'A', scope: 'global', revision: 2, changed: true, mode: 'updated' }, 'memory-save');
 assert.equal(changed.exposure, 'update');
 assert.equal(changed.scope, 'global');
+
+// 没有真改动、缺版本、缺工作目录的写入行不产生撤销入口。
+assert.equal(undoRefOf({ kind: 'memory-save', id: 'mem_aaaaaaaa', revision: 3, changed: false }, '/tmp/p'), null);
+assert.equal(undoRefOf({ kind: 'memory-save', id: 'mem_aaaaaaaa', revision: 3 }, '/tmp/p'), null);
+assert.equal(undoRefOf({ kind: 'memory-save', id: 'mem_aaaaaaaa', revision: 3, changed: true }, ''), null);
+assert.equal(undoRefOf({ kind: 'memory-save', id: 'mem_aaaaaaaa', revision: 2, changed: true }, '/tmp/p').revision, 2);
 
 // 搜索的多条引用按 refs 展开；删除/归档状态原样保留。
 const refs = citationsOfMeta({ kind: 'memory-search', refs: [
@@ -50,4 +56,4 @@ assert.equal(turn[1].title, 'A2');
 // 旧行没有元数据：什么也不产出，绝不从文案猜 id。
 assert.deepEqual(citationsOfTurn([{ root: null }, { root: { kind: 'tool-result', content: [{ type: 'text', text: 'memory · saved "A" mem_aaaaaaaa' }] } }]), []);
 
-console.log('client.test.mjs: 8 passed');
+console.log('client.test.mjs: 9 passed');

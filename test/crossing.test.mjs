@@ -199,6 +199,66 @@ await test('S09 项目搬到全局：新 id、旧 id 失效、prev 不留旧条�
   assert.equal(readEntry(globalScope(), done.id).body, 'type: subject');
 });
 
+await test('S09 续跑只认发起项目的身份，换项目被拒绝', () => {
+  const a = fresh('resume-a');
+  const b = fresh('resume-b');
+  const saved = saveEntry(a, {
+    title: '续跑归属', summary: '搬移中断后只能回原项目续跑', body: 'x', scope: 'project', resolution: 'distinct',
+  });
+  const pending = move(a, saved.record.id, { target: 'global', stopAfter: 'source' });
+  assert.equal(pending.status, 'move_pending');
+  assert.throws(() => resumeMove(b), (error) => error.code === 'conflict' && /另一个项目/.test(error.message));
+  assert.ok(movePending());
+  const done = resumeMove(a);
+  assert.equal(done.status, 'moved');
+  assert.equal(movePending(), null);
+  assert.equal(idsOf(a).includes(saved.record.id), false);
+  assert.equal(stateOf(globalScope()).entries.some((row) => row.id === done.id), true);
+});
+
+await test('S09 续跑前源 current 丢失时从 prev 恢复，但不会复活旧条目', () => {
+  const scope = fresh('resume-prev');
+  const saved = saveEntry(scope, {
+    title: '恢复不复活', summary: 'prev 里有旧条目也不能带回来', body: 'x', scope: 'project', resolution: 'distinct',
+  });
+  const stale = fs.readFileSync(path.join(scope.dir, 'state.json'), 'utf8');
+  const pending = move(scope, saved.record.id, { target: 'global', stopAfter: 'source' });
+  assert.equal(pending.stage, 'source_cleaned');
+  fs.rmSync(path.join(scope.dir, 'state.json'));
+  fs.writeFileSync(path.join(scope.dir, 'state.prev.json'), stale);
+  const done = resumeMove(scope);
+  assert.equal(done.status, 'moved');
+  assert.equal(idsOf(scope).includes(saved.record.id), false);
+  assert.equal(idsOfPrev(scope).includes(saved.record.id), false);
+  assert.equal(movePending(), null);
+});
+
+await test('S09 收尾会重建 prev；两侧状态对不上就保留协调文件', () => {
+  const scope = fresh('resume-verify');
+  const saved = saveEntry(scope, {
+    title: '收尾校验', summary: 'prev 可重建，状态对不上不结案', body: 'x', scope: 'project', resolution: 'distinct',
+  });
+  const pending = move(scope, saved.record.id, { target: 'global', stopAfter: 'source' });
+  assert.equal(pending.status, 'move_pending');
+  fs.rmSync(path.join(globalScope().dir, 'state.prev.json'), { force: true });
+  const repaired = resumeMove(scope);
+  assert.equal(repaired.status, 'moved');
+  assert.equal(idsOfPrev(globalScope()).includes(repaired.id), true);
+  assert.equal(movePending(), null);
+
+  const other = fresh('resume-verify-2');
+  const record = saveEntry(other, {
+    title: '两侧对不上', summary: '源层状态丢了就不假装搬完', body: 'x', scope: 'project', resolution: 'distinct',
+  });
+  const pending2 = move(other, record.record.id, { target: 'global', stopAfter: 'source' });
+  assert.equal(pending2.status, 'move_pending');
+  fs.rmSync(path.join(other.dir, 'state.json'));
+  fs.rmSync(path.join(other.dir, 'state.prev.json'), { force: true });
+  assert.throws(() => resumeMove(other), (error) => error.code === 'recover_failed' || error.code === 'unavailable');
+  assert.ok(movePending());
+  state.clearMoveIntent();
+});
+
 await test('S09 全局搬回项目走同一套协议', () => {
   const scope = fresh('move-down');
   const saved = saveEntry(globalScope(), { title: '回滚命令', summary: '回滚用 rollback', body: 'rollback', scope: 'global', resolution: 'distinct' });
