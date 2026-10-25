@@ -48,12 +48,11 @@ window.__ModuleLoader__.load({
 
     const newOperationId = () => `op_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
-    /** 只在产生这行的那一轮显示。 */
-    const useLive = (phase) => {
-      const live = React.useRef(phase !== 'result');
-      if (phase !== 'result') live.current = true;
-      return live.current;
-    };
+    /** 会话 id 可能落在不同字段上。 */
+    const sessionKeyOf = (props) =>
+      (typeof props.sessionId === 'string' && props.sessionId) ||
+      (props.session && typeof props.session.id === 'string' && props.session.id) ||
+      '';
 
     const post = (path, payload) => {
       if (typeof fetch !== 'function') return Promise.resolve({ ok: false, status: 0, body: null });
@@ -101,16 +100,14 @@ window.__ModuleLoader__.load({
     };
 
     const Row = (props) => {
-      useCitationBump(props.phase, props.sessionId);
-      if (!useLive(props.phase)) return null;
+      useCitationBump(props.phase, sessionKeyOf(props));
       const line = props.phase === 'preparing' ? null : firstLine(settledText(props.block));
       return h('div', { 'data-tool': props.toolName, style: ROW }, h('span', { style: DOT }, '·'), h('span', { style: LABEL }, line ?? RUNNING[props.toolName] ?? 'memory'));
     };
 
     /** 建议行：一个「keep」按钮，按 candidateId 确认。 */
     const SuggestRow = (props) => {
-      useCitationBump(props.phase, props.sessionId);
-      if (!useLive(props.phase)) return null;
+      useCitationBump(props.phase, sessionKeyOf(props));
       const [state, setState] = React.useState('idle');
       const [note, setNote] = React.useState('');
       const operationId = React.useRef('');
@@ -126,7 +123,7 @@ window.__ModuleLoader__.load({
         post('/lite-memory/keep', { op: 'keep', candidateId, operationId: operationId.current, cwd }).then((result) => {
           if (result.ok) {
             setState('saved');
-            bumpCitations(props.sessionId);
+            bumpCitations(sessionKeyOf(props));
             return;
           }
           setNote(failure(result, '没有保存'));
@@ -142,8 +139,7 @@ window.__ModuleLoader__.load({
 
     /** 自动写入行：一个「✕」，有旧版本就还原成新一版，没有就归档。 */
     const SavedRow = (props) => {
-      useCitationBump(props.phase, props.sessionId);
-      if (!useLive(props.phase)) return null;
+      useCitationBump(props.phase, sessionKeyOf(props));
       const [state, setState] = React.useState('idle');
       const [note, setNote] = React.useState('');
       const text = props.phase === 'preparing' ? null : settledText(props.block);
@@ -172,7 +168,7 @@ window.__ModuleLoader__.load({
 
     /** 输入框下面的那一条：引用了几条。 */
     const Citations = (props) => {
-      const sessionId = typeof props.sessionId === 'string' ? props.sessionId : '';
+      const sessionId = sessionKeyOf(props);
       const [items, setItems] = React.useState([]);
       const [open, setOpen] = React.useState(false);
       const [shown, setShown] = React.useState(null);
