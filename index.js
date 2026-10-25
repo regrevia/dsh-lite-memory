@@ -422,6 +422,8 @@ export function apply(ctx, config) {
   const recallMode = () => (RECALL_MODES.includes(config?.mode) ? config.mode : 'adaptive');
   /** 已准备好的快照只挂在 Agent 上，弱引用随手回收，不跨会话串。 */
   const prepared = new WeakMap();
+  /** turn-stopping 只回 signal，不带头 agent；这里记 signal → agent 供收尾清理。 */
+  const signalAgents = new Map();
   const generations = new WeakMap();
   /** 同一真人请求共用一个额度窗口；provider 只读，不记账。 */
   const windows = new Map();
@@ -433,6 +435,8 @@ export function apply(ctx, config) {
 
   const clearPrepared = (agent) => {
     if (!agent) return;
+    const state = prepared.get(agent);
+    if (state && state.signal) signalAgents.delete(state.signal);
     prepared.delete(agent);
     const key = agentKey(agent);
     const cleanup = key ? abortCleanups.get(key) : null;
@@ -526,7 +530,10 @@ export function apply(ctx, config) {
       layerOf.set(group.record.id, group.scope === 'global' ? 'global' : 'project');
     }
     const ranked = view.rank(records, query, { limit: 8, requireApplicable: true, context });
-    let used = Buffer.byteLength(RECALL_HEADER);
+    const headerBytes = Buffer.byteLength(RECALL_HEADER);
+    let used = headerBytes;
+    /** 卡片上限含包装；共享请求账本也要把标题行算进去，不能只算卡片行。 */
+    let headerCharged = win ? win.recallHeader === true : false;
     const lines = [];
     const cards = [];
     for (const row of ranked) {
@@ -538,9 +545,14 @@ export function apply(ctx, config) {
       const revision = card.revision || 1;
       const already = win ? win.provided.get(card.id) === revision : false;
       if (win && !already) {
-        if (!affordable(win, size)) continue;
-        win.bytes += size;
+        const cost = size + (headerCharged ? 0 : headerBytes);
+        if (!affordable(win, cost)) continue;
+        win.bytes += cost;
         win.provided.set(card.id, revision);
+        if (!headerCharged) {
+          headerCharged = true;
+          win.recallHeader = true;
+        }
       }
       used += size;
       lines.push(line);
@@ -1072,7 +1084,12 @@ export function apply(ctx, config) {
         previous.signal = signal;
         const scope = scopeOf(cwdOf({ agent }));
         const fingerprint = fingerprintOf(scope);
-        if (fingerprint && fingerprint !== previous.fingerprint) {
+        /** 指纹拿不到就当作已失效：不拿旧任务内容硬撑这一步。 */
+        if (!fingerprint) {
+          clearPrepared(agent);
+          return decision;
+        }
+        if (fingerprint !== previous.fingerprint) {
           const win = windowOf(agent);
           const snapshot = projectRecall(scope, previous.query, view.trustedContext(scope, {}), win);
           if (generation === generations.get(agent) && !signal?.aborted) {
@@ -1132,6 +1149,7 @@ export function apply(ctx, config) {
         at: Date.now(),
       };
       prepared.set(agent, state);
+      if (signal) signalAgents.set(signal, agent);
       const key = agentKey(agent);
       if (key && signal && typeof signal.addEventListener === 'function') {
         const onAbort = () => clearPrepared(agent);
@@ -1153,10 +1171,16 @@ export function apply(ctx, config) {
     if (sessionId) seenHumans.delete(sessionId);
   });
 
-  if (typeof ctx.on === 'function') ctx.on('agent/turn-end', (payload) => {
-    const agent = payload?.agent;
-    const state = agent ? prepared.get(agent) : null;
-    if (state && payload?.turn !== undefined && String(payload.turn) !== String(state.turn)) clearPrepared(agent);
+  /**
+   * 宿主没有 agent/turn-end 这个派发；真正的轮次收尾是 agent/turn-stopping，
+   * 载荷只有 {turn, signal}。按 signal 找回对应 agent，只清这一轮的准备结果。
+   */
+  if (typeof ctx.on === 'function') ctx.on('agent/turn-stopping', (payload) => {
+    const signal = payload?.signal;
+    if (!signal) return;
+    const agent = signalAgents.get(signal);
+    if (agent) clearPrepared(agent);
+    signalAgents.delete(signal);
   });
 
   /** 测试与排查用：只暴露只读查询，不提供改状态入口。 */

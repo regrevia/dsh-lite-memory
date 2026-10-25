@@ -29,6 +29,23 @@ const IMPERATIVE = /^(?:你要|你得|你必须|请|务必|必须|记得|记住|
 
 const SUGGESTION_ID = /^sug_[a-z0-9]{6,}$/;
 
+/**
+ * 实验来源的条目默认不属于普通记忆读取面：开关关闭、暂停或身份未知时，
+ * 老 ID、病史查询和关联跳转都不能把正文带出来。管理面显式传 allowExperimental。
+ */
+export const EXPERIMENTAL_ORIGIN = 'project_evolution';
+
+export function isExperimentalRecord(record) {
+  if (!record) return false;
+  return record.origin === EXPERIMENTAL_ORIGIN
+    || record.source === EXPERIMENTAL_ORIGIN
+    || Boolean(record.learning);
+}
+
+function readableRecord(record, options) {
+  return !isExperimentalRecord(record) || Boolean(options && options.allowExperimental === true);
+}
+
 /** 正文缓存：一次读到的正文先放这里，saveIndex 落盘后清掉。 */
 const bodyCache = new Map();
 
@@ -42,6 +59,11 @@ function cachedBody(scope, id) {
   const map = bodyCache.get(scope.dir);
   if (!map || !map.has(id)) return undefined;
   return map.get(id);
+}
+
+/** 深拷贝 JSON 形状，避免扁平记录和权威条目共享引用。 */
+function cloneJson(value) {
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
 
 /** v2 条目 → 旧扁平记录：业务层只认这一种形状。 */
@@ -72,7 +94,12 @@ function toFlat(entry) {
     origin: entry.origin || 'user_explicit',
     hits: Number(maintenance.hits) || 0,
     merges: Number(maintenance.merges) || 0,
-    versions: Array.isArray(maintenance.versions) ? JSON.parse(JSON.stringify(maintenance.versions)) : [],
+    versions: Array.isArray(maintenance.versions) ? cloneJson(maintenance.versions) : [],
+    sourceRefs: Array.isArray(maintenance.sourceRefs) ? cloneJson(maintenance.sourceRefs) : [],
+    checks: Array.isArray(maintenance.checks) ? cloneJson(maintenance.checks) : [],
+    learning: cloneJson(maintenance.learning) || null,
+    /** 权威 maintenance 的完整副本：整层写回时不能只按白名单重建。 */
+    maintenance: cloneJson(maintenance) || {},
     bytes: entrySize({ title: current.title, summary: current.summary, when: current.when, tags: current.keywords, triggers: current.triggers, topicKey: current.topicKey, applicability: current.applicability, conditions: current.conditions, selection: current.selection, links: current.links }, current.body || ''),
   };
 }
@@ -83,7 +110,7 @@ function fromFlat(record, status) {
     id: record.id,
     revision: Number(record.revision) || 1,
     status: status || (record.status === 'archived' ? 'archived' : 'active'),
-    origin: record.origin === 'observed' ? 'observed' : 'user_explicit',
+    origin: typeof record.origin === 'string' && record.origin ? record.origin : 'user_explicit',
     createdAt: record.created || at,
     updatedAt: at,
     current: {
@@ -102,11 +129,15 @@ function fromFlat(record, status) {
       aliases: [],
     },
     maintenance: {
+      ...(cloneJson(record.maintenance) || {}),
       reviewState: record.reviewState === 'legacy_unreviewed' ? 'legacy_unreviewed' : 'active',
-      sourceRefs: [],
+      sourceRefs: Array.isArray(record.sourceRefs) ? cloneJson(record.sourceRefs)
+        : Array.isArray(record.maintenance?.sourceRefs) ? cloneJson(record.maintenance.sourceRefs) : [],
       retiredNames: Array.isArray(record.aliases) ? [...record.aliases] : [],
-      versions: Array.isArray(record.versions) ? JSON.parse(JSON.stringify(record.versions)) : [],
-      checks: [],
+      versions: Array.isArray(record.versions) ? cloneJson(record.versions) : [],
+      checks: Array.isArray(record.checks) ? cloneJson(record.checks)
+        : Array.isArray(record.maintenance?.checks) ? cloneJson(record.maintenance.checks) : [],
+      learning: cloneJson(record.learning) || cloneJson(record.maintenance?.learning) || undefined,
       hits: Number(record.hits) || 0,
       merges: Number(record.merges) || 0,
       lastUsed: record.lastUsed || at,
@@ -517,6 +548,8 @@ export function similarTarget(entries, draft) {
     if (hasField(draft, 'conditions') && view.conditionsKey(item.conditions) !== view.conditionsKey(draft.conditions)) return false;
     if (hasField(draft, 'selection') && selectionKeyOf(item.selection) !== selectionKeyOf(draft.selection)) return false;
     if (hasField(draft, 'applicability') && applicabilityOf(item) !== applicabilityOf(draft)) return false;
+    if (hasField(draft, 'triggers') && triggerKeyOf(item) !== triggerKeyOf(draft)) return false;
+    if (hasField(draft, 'topicKey') && (item.topicKey || '') !== (draft.topicKey || '')) return false;
     return true;
   });
   return compatible[0] || null;
@@ -598,7 +631,12 @@ function mergedFields(draft, record, oldBody, index, writeMode = 'patch', foreig
     assertLinksVisible(next.links, index, foreign);
     return next;
   }
-  /** 没显式给适用范围就按合并后的字段重算：清掉条件就回到普遍适用，不留悬空 conditional。 */
+  /**
+   * 只有范围字段变了才校验或重算。只改标题/摘要/正文/标签时保留原适用范围，
+   * 否则一条 unresolved 会因无关 patch 被悄悄放宽成 all_in_scope。
+   */
+  const scopeTouched = draft.has.applicability || draft.has.when
+    || draft.has.conditions || draft.has.selection;
   const requested = draft.has.applicability ? draft.applicability : undefined;
   const next = {
     title: draft.has.title ? draft.title : record.title,
@@ -613,7 +651,9 @@ function mergedFields(draft, record, oldBody, index, writeMode = 'patch', foreig
     topicKey: draft.has.topicKey ? draft.topicKey : (record.topicKey || ''),
     body: draft.has.body ? draft.body : oldBody,
   };
-  next.applicability = view.validateApplicability(requested, next.conditions, next.selection, next.when);
+  next.applicability = scopeTouched
+    ? view.validateApplicability(requested, next.conditions, next.selection, next.when)
+    : (record.applicability || 'all_in_scope');
   assertLinksVisible(next.links, index, foreign);
   return next;
 }
@@ -829,9 +869,11 @@ export function search(scope, query, limit = 4, options = {}) {
     for (const source of [scope, globalScope()]) {
       const index = loadIndex(source);
       const layer = source.key === 'global' ? 'global' : 'project';
-      layers[layer].push(...index.entries);
+      const owned = index.entries.filter((item) => readableRecord(item, options));
+      layers[layer].push(...owned);
       const collect = (pool, archived) => {
         for (const item of pool) {
+          if (!readableRecord(item, options)) continue;
           const score = scoreQuery(item, grams, query);
           if (score <= 0) continue;
           if (keywordMode && !matchesRun(item, runs)) continue;
@@ -907,6 +949,7 @@ export function readEntry(scope, id, options = {}) {
       const record = index.entries.find((item) => item.id === id);
       const archived = record ? null : index.archived.find((item) => item.id === id);
       if (!record && !archived) continue;
+      if (!readableRecord(record || archived, options)) continue;
       const body = readBody(source, id);
       return {
         ...(record || archived),
@@ -1004,9 +1047,10 @@ export function readLinks(scope, id, options = {}) {
       const index = loadIndex(source);
       const record = index.entries.find((item) => item.id === id);
       if (!record) continue;
+      if (!readableRecord(record, options)) continue;
       const links = [];
       for (const link of view.linksOf(record)) {
-        const target = findCurrent(link.id, scope);
+        const target = findCurrent(link.id, scope, options);
         if (target) links.push({ type: link.type || 'related', ...target });
         else links.push({ type: link.type || 'related', id: link.id, status: 'invalid' });
       }
@@ -1017,7 +1061,7 @@ export function readLinks(scope, id, options = {}) {
 }
 
 /** 关联目标按当前投影现场解引用：先项目层再全局层，归档和删除都算不存在。 */
-function findCurrent(id, scope) {
+function findCurrent(id, scope, options = {}) {
   for (const source of [scope, globalScope()]) {
     let index;
     try {
@@ -1027,6 +1071,7 @@ function findCurrent(id, scope) {
     }
     const record = index.entries.find((item) => item.id === id && item.status !== 'archived');
     if (!record) continue;
+    if (!readableRecord(record, options)) continue;
     return {
       id: record.id,
       title: record.title,
@@ -1319,6 +1364,22 @@ export function findSuggestion(scope, key) {
 }
 
 /**
+ * 旧候选或损坏候选的字段自检：has 说给了某个结构化字段，值就必须是合法形状。
+ * 不猜、不补默认值；不合格的候选直接失效，要求重新建立。
+ */
+export function candidateProblem(draft) {
+  const has = draft && draft.has && typeof draft.has === 'object' ? draft.has : null;
+  if (!has) return '';
+  if (has.conditions && !Array.isArray(draft.conditions)) return '候选的条件缺失';
+  if (has.selection && draft.selection !== null && (typeof draft.selection !== 'object' || Array.isArray(draft.selection))) return '候选的产物范围缺失';
+  if (has.links && !Array.isArray(draft.links)) return '候选的关联缺失';
+  if (has.triggers && !Array.isArray(draft.triggers)) return '候选的触发词缺失';
+  if (has.applicability && view.normalizeApplicability(draft.applicability) !== draft.applicability) return '候选的适用范围不合法';
+  if (has.topicKey && typeof draft.topicKey !== 'string') return '候选的主题缺失';
+  return '';
+}
+
+/**
  * 点「保留」：在同一个锁窗口里按 candidateId 确认、消费候选、写回执。
  * 已消费的候选不再写第二条；旧的 keep 重放返回原回执。
  */
@@ -1333,6 +1394,12 @@ export function acceptCandidate(scope, key, operationId = '') {
     const item = (index.suggestions || []).find((entry) => entry.id === key && entry.decision === 'asked');
     if (!item) return { ok: false, reason: '候选不存在或已过期' };
     const draft = item.draft || {};
+    const incomplete = candidateProblem(draft);
+    if (incomplete) {
+      index.suggestions = (index.suggestions || []).filter((entry) => entry.id !== item.id);
+      saveIndex(scope, index);
+      return { ok: false, invalid: true, reason: `${incomplete}，重新建议一次` };
+    }
     const target = draft.targetId ? index.entries.find((entry) => entry.id === draft.targetId) : null;
     if (draft.targetId && !target) return { ok: false, reason: '候选要更新的那条记忆已不在了' };
     if (target && draft.targetRevision && (target.revision || 1) !== draft.targetRevision) {
@@ -1786,10 +1853,10 @@ export function saveEntry(projectScope, source) {
 }
 
 /** 两层合并后的现行规范：同槽位只给胜出的那条；冲突或条件未知的不进自动召回。 */
-export function visibleRules(projectScope, context = {}) {
+export function visibleRules(projectScope, context = {}, options = {}) {
   return withLocks([projectScope, globalScope()], () => {
-    const project = loadIndex(projectScope).entries;
-    const global = loadIndex(globalScope()).entries;
+    const project = loadIndex(projectScope).entries.filter((item) => readableRecord(item, options));
+    const global = loadIndex(globalScope()).entries.filter((item) => readableRecord(item, options));
     const resolved = view.resolveTopics(project, global, context);
     const winners = [];
     for (const row of resolved.values()) {
