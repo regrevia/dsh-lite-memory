@@ -78,3 +78,26 @@ assert.equal(sibling.merged, false);
 assert.equal(store.loadIndex(mergeScope).entries.length, 2);
 
 console.log('store: merge rules ok');
+
+// 前置条件不同 → 两条，哪怕标题一样。
+const mac = store.upsert(mergeScope, { title: '构建耗时长', summary: '本机构建要几分钟', when: 'macOS 本地', body: '- 原因：磁盘加密' });
+const ci = store.upsert(mergeScope, { title: '构建耗时长', summary: '本机构建要几分钟', when: 'CI 容器', body: '- 原因：冷缓存' });
+assert.equal(mac.merged, false);
+assert.equal(ci.merged, false);
+assert.notEqual(ci.record.id, mac.record.id);
+assert.equal(store.loadIndex(mergeScope).entries.filter((item) => item.title.startsWith('构建耗时长')).length, 2);
+
+// 同一前置条件下合并：旧要点保留，同键覆盖。
+const plus = store.upsert(mergeScope, { title: '构建耗时长', summary: '本机构建要几分钟', when: 'macOS 本地', body: '- 绕过：先跑 cache\n- 原因：磁盘加密拖慢' });
+assert.equal(plus.merged, true);
+assert.equal(plus.record.id, mac.record.id);
+const body = store.readEntry(mergeScope, mac.record.id).body;
+assert.match(body, /绕过/);
+assert.match(body, /磁盘加密拖慢/);
+assert.equal(body.includes('磁盘加密\n'), false);
+
+// 前置条件参与检索。
+const hit = store.search(mergeScope, 'CI 容器');
+assert.ok(hit.some((item) => item.id === ci.record.id));
+
+console.log('store: precondition rules ok');

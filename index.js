@@ -114,6 +114,7 @@ const SAVE_PARAMS = {
     title: { type: 'string', description: `标题：名词短语，用户一眼能认出是哪件事，不超过 ${LIMITS.titleChars} 字` },
     summary: { type: 'string', description: `一句话说清要记的内容本身——用户只看这一行决定留不留，名词短语，不超过 ${LIMITS.summaryChars} 字` },
     body: { type: 'string', description: '正文 markdown。只写指针与要点，不抄录长文档' },
+    when: { type: 'string', description: `前置条件或适用场景（「在哪台机器 / 哪个环境 / 什么情况下」），不超过 ${LIMITS.whenChars} 字。同一主题但前置条件不同，会存成两条，不合并` },
     kind: { type: 'string', enum: ['preference', 'convention', 'procedure', 'pointer', 'pitfall', 'credential_hint', 'note'], description: '条目类型' },
     tags: { type: 'array', items: { type: 'string' }, description: '最多 5 个标签' },
   },
@@ -156,7 +157,7 @@ export function apply(ctx) {
 
   ctx.effect(() => tools.register({
     name: 'memory_save',
-    description: `保存一条记忆。用户明确说「记住」时直接调用；用户自己的话已经是长期规则（「以后都这样」「别再 X」）时也直接调用，不要先问。用户点了「保留」或发「保留记忆「X」」时，用那条建议的内容调用。更新已知主题时先 memory_read 旧正文再写：标题相同、或标题与摘要高度相近时，会合并进原来那条（merges+1），正文整篇替换，不新增条目。${NOTES}`,
+    description: `保存一条记忆。用户明确说「记住」时直接调用；用户自己的话已经是长期规则（「以后都这样」「别再 X」）时也直接调用，不要先问。用户点了「保留」或发「保留记忆「X」」时，用那条建议的内容调用。更新已知主题时先 memory_read 旧正文再写：标题相同、或标题与摘要高度相近、且前置条件一致时，会合并进原来那条（merges+1），旧要点保留，同键的新值覆盖。前置条件不同的同一主题是两条，不要硬合并。正文只写这次新增的要点。${NOTES}`,
     parameters: SAVE_PARAMS,
     output: {
       schema: {
