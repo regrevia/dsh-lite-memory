@@ -118,12 +118,12 @@ function fromFlat(record, status) {
  * 读一层：v2 状态是唯一权威。旧 index.json 只在迁移时读，读不到正文的旧条目
  * 由 state.js 拦成报告，这里不猜、不补空正文。
  */
-export function loadIndex(scope) {
+export function loadIndex(scope, options = {}) {
   if (!fs.existsSync(path.join(scope.dir, 'state.json'))) {
     const report = state.migrationReport(scope);
     if (report.required || report.adoptable.length) state.migrateLegacy(scope);
   }
-  const loaded = state.load(scope);
+  const loaded = state.load(scope, options);
   const entries = loaded.state.entries.filter((entry) => entry.status === 'active').map(toFlat);
   const archived = loaded.state.entries.filter((entry) => entry.status === 'archived').map(toFlat);
   cacheBodies(scope, loaded.state.entries);
@@ -507,7 +507,14 @@ function snapshot(record, body) {
  * 适用规则的合并：只认显式给过的字段，没给的保持原值；老条目的默认档位重新推断。
  * 关联目标必须当前存在，缺了就是错，不静默丢掉一条关联。
  */
-function rulesOf(draft, body, index) {
+function assertLinksVisible(links, index, foreign) {
+  const visible = foreign && foreign.length ? [...index.entries, ...foreign] : index.entries;
+  for (const link of links) {
+    if (!visible.some((item) => item.id === link.id)) throw new Error(`关联目标不存在：${link.id}`);
+  }
+}
+
+function rulesOf(draft, body, index, foreign) {
   const rules = {
     triggers: draft.has.triggers ? draft.triggers : [],
     conditions: draft.has.conditions ? draft.conditions : [],
@@ -517,14 +524,12 @@ function rulesOf(draft, body, index) {
   };
   rules.applicability = view.validateApplicability(draft.has.applicability ? draft.applicability : undefined,
     rules.conditions, rules.selection, draft.when);
-  for (const link of rules.links) {
-    if (!index.entries.some((item) => item.id === link.id)) throw new Error(`关联目标不存在：${link.id}`);
-  }
+  assertLinksVisible(rules.links, index, foreign);
   void body;
   return rules;
 }
 
-function mergedFields(draft, record, oldBody, index, writeMode = 'patch') {
+function mergedFields(draft, record, oldBody, index, writeMode = 'patch', foreign) {
   if (writeMode === 'replace_current') {
     const next = {
       title: draft.title,
@@ -541,9 +546,7 @@ function mergedFields(draft, record, oldBody, index, writeMode = 'patch') {
     };
     next.applicability = view.validateApplicability(draft.has.applicability ? draft.applicability : undefined,
       next.conditions, next.selection, next.when);
-    for (const link of next.links) {
-      if (!index.entries.some((item) => item.id === link.id)) throw new Error(`关联目标不存在：${link.id}`);
-    }
+    assertLinksVisible(next.links, index, foreign);
     return next;
   }
   /** 没显式给适用范围就按合并后的字段重算：清掉条件就回到普遍适用，不留悬空 conditional。 */
@@ -562,17 +565,16 @@ function mergedFields(draft, record, oldBody, index, writeMode = 'patch') {
     body: draft.has.body ? draft.body : oldBody,
   };
   next.applicability = view.validateApplicability(requested, next.conditions, next.selection, next.when);
-  for (const link of next.links) {
-    if (!index.entries.some((item) => item.id === link.id)) throw new Error(`关联目标不存在：${link.id}`);
-  }
+  assertLinksVisible(next.links, index, foreign);
   return next;
 }
 
 /**
  * 一次写入的纯业务部分：校验、身份、字节预算、版本。不改盘（正文写入由调用方在同一把锁里做）。
  */
-function applyDraft(scope, index, source, now) {
+function applyDraft(scope, index, source, now, options = {}) {
   const draft = normalizeDraft(source);
+  const foreign = options.foreignEntries || [];
   const distinct = source && source.resolution === 'distinct';
   let record = draft.id ? index.entries.find((item) => item.id === draft.id) : null;
   if (draft.id && !record) throw new Error('没有这条记忆，改用新增');
@@ -584,6 +586,15 @@ function applyDraft(scope, index, source, now) {
     if (hit) {
       record = hit.target;
       mergedFrom = hit.target.title === draft.title ? null : hit.target.title;
+    } else if (draft.has.topicKey && draft.topicKey && !distinct) {
+      /** 同一槽位只留一条现行规范：同层同 topicKey + 同条件必须确认是更新还是另一条。 */
+      const slot = index.entries.find((item) => (item.topicKey || '') === draft.topicKey
+        && view.conditionsKey(item.conditions) === view.conditionsKey(draft.conditions));
+      if (slot) {
+        const row = { id: slot.id, title: slot.title, summary: slot.summary || '', revision: slot.revision || 1 };
+        return { needsResolution: true, sameTopic: true, similarList: [row], similar: row, draft, record: null, merged: false, previousBody: null, archived: [] };
+      }
+      similarList = similarEntries(index.entries, draft.title, draft.summary, 2);
     } else {
       similarList = similarEntries(index.entries, draft.title, draft.summary, 2);
       /** 同名不同前置条件是用户明确表达的另一条，不走确认；只有换个说法的相近标题才拦。 */
@@ -602,7 +613,7 @@ function applyDraft(scope, index, source, now) {
   }
   if (record) {
     const oldBody = readBody(scope, record.id);
-    const next = mergedFields(draft, record, oldBody, index, writeMode);
+    const next = mergedFields(draft, record, oldBody, index, writeMode, foreign);
     const noop = next.title === record.title && next.summary === record.summary
       && next.when === (record.when || '') && next.kind === (record.kind || 'note')
       && JSON.stringify(next.tags) === JSON.stringify(record.tags || [])
@@ -637,7 +648,7 @@ function applyDraft(scope, index, source, now) {
     return { record, merged: true, mergedFrom, similar: null, similarList, draft, noop: false, previousBody: oldBody, archived };
   }
   if (writeMode === 'replace_current') throw new Error('整份替换要先指明是哪条，不能用来新增');
-  const rules = rulesOf(draft, draft.body, index);
+  const rules = rulesOf(draft, draft.body, index, foreign);
   const created = {
     id: newId(),
     title: draft.title,
@@ -692,10 +703,15 @@ function assertFits(scope, index, record) {
  * 文本相近不授权覆盖，也不先写一条再更新：返回 needsResolution，调用方决定 distinct 还是按 id 更新。
  */
 export function upsert(scope, source) {
-  return withLock(scope, () => {
-    const index = loadIndex(scope);
+  return withLock(scope, () => upsertLocked(scope, source));
+}
+
+/** 已经持锁的保存：saveEntry 用它把两层去重和写入放进同一个锁窗口。 */
+function upsertLocked(scope, source, options = {}) {
+  {
+    const index = loadIndex(scope, options.allowMove ? { allowMove: true } : {});
     const now = new Date().toISOString();
-    const result = applyDraft(scope, index, source, now);
+    const result = applyDraft(scope, index, source, now, options);
     if (!('needsResolution' in result)) result.needsResolution = false;
     if (result.needsResolution) return result;
     try {
@@ -715,7 +731,7 @@ export function upsert(scope, source) {
     const evicted = index.__archived || [];
     if (evicted.length) result.archived = [...(result.archived || []), ...evicted];
     return result;
-  });
+  }
 }
 
 const MATCH_WEIGHT = { title: 3, alias: 2, summary: 2, tags: 1.5 };
@@ -754,22 +770,40 @@ export function search(scope, query, limit = 4, options = {}) {
     const runs = queryRuns(query);
     const keywordMode = runs.length >= 2;
     const rows = [];
+    const layers = { project: [], global: [] };
     for (const source of [scope, globalScope()]) {
       const index = loadIndex(source);
-      for (const item of index.entries) {
-        const score = scoreQuery(item, grams, query);
-        if (score <= 0) continue;
-        if (keywordMode && !matchesRun(item, runs)) continue;
-        rows.push({ source, index, item, score });
-      }
+      const layer = source.key === 'global' ? 'global' : 'project';
+      layers[layer].push(...index.entries);
+      const collect = (pool, archived) => {
+        for (const item of pool) {
+          const score = scoreQuery(item, grams, query);
+          if (score <= 0) continue;
+          if (keywordMode && !matchesRun(item, runs)) continue;
+          rows.push({ source, index, item, score, archived });
+        }
+      };
+      collect(index.entries, false);
+      /** 归档不等于失声：真匹配上就返回，标成已归档，别让用户以为记忆丢了。 */
+      collect(index.archived, true);
     }
-    rows.sort((a, b) => b.score - a.score || String(b.item.lastUsed).localeCompare(String(a.item.lastUsed)));
-    const chosen = rows.slice(0, limit);
+    /** 被项目层压过的全局条目不再作为检索结果出现；冲突/条件未知的仍保留，便于人工处理。 */
+    const resolved = view.resolveTopics(layers.project, layers.global, options.context || {});
+    const shadowed = (item) => {
+      const group = resolved.get(view.topicSlot(item));
+      return Boolean(group && group.status === 'ok' && group.record && group.record.id !== item.id);
+    };
+    const visible = rows.filter((row) => row.archived || !shadowed(row.item));
+    visible.sort((a, b) => b.score - a.score
+      || Number(a.archived) - Number(b.archived)
+      || String(b.item.lastUsed).localeCompare(String(a.item.lastUsed)));
+    const chosen = visible.slice(0, limit);
     /** 检索不改盘：hits/lastUsed 只在用户真的处理过结果时才算数。 */
     return chosen.map((row) => ({
       ...row.item,
       scope: row.source.key === 'global' ? 'global' : 'project',
-      status: view.statusOf(row.item, options.context || {}),
+      status: row.archived ? 'archived' : view.statusOf(row.item, options.context || {}),
+      archived: Boolean(row.archived),
     }));
   });
 }
@@ -816,13 +850,14 @@ export function readEntry(scope, id, options = {}) {
     for (const source of [scope, globalScope()]) {
       const index = loadIndex(source);
       const record = index.entries.find((item) => item.id === id);
-      if (!record) continue;
+      const archived = record ? null : index.archived.find((item) => item.id === id);
+      if (!record && !archived) continue;
       const body = readBody(source, id);
       return {
-        ...record,
+        ...(record || archived),
         scope: source.key === 'global' ? 'global' : 'project',
         body,
-        status: view.statusOf(record, options.context || {}),
+        status: archived ? 'archived' : view.statusOf(record, options.context || {}),
       };
     }
     return null;
@@ -1171,7 +1206,7 @@ export function renderIndex(entries, budget = 400) {
   for (const item of entries) {
     const last = Date.parse(item.lastUsed || item.updated || item.created || '') || now;
     const stale = now - last > staleMs;
-    const stateTag = item.state === 'needs_context' ? ' · 适用范围待确认' : item.state === 'not_applicable' ? ' · 当前条件不适用' : '';
+    const stateTag = item.state === 'archived' ? ' · 已归档' : item.state === 'needs_context' ? ' · 适用范围待确认' : item.state === 'not_applicable' ? ' · 当前条件不适用' : '';
     const head = `${item.scope === 'global' ? '[全局] ' : ''}${item.id} ${item.title}${item.when ? `（${item.when}）` : ''} · 第 ${item.revision || 1} 版${stateTag}`;
     const line = stale ? `- ${head}` : `- ${head}｜${item.summary}`;
     if (used + line.length > budget) break;
@@ -1355,4 +1390,349 @@ export function readCitationBody(sessionId, id) {
     return null;
   }
   return { ...found.row, body: body.slice(0, LIMITS.entryBytes) };
+}
+
+/* ------------------------------------------------------------------ *
+ * 跨层：范围路由、两层去重、槽位、搬移。这些规则只在服务端判定，*
+ * 模型给的是提案（memoryClass / durability / evidenceRef），不是命令。*
+ * ------------------------------------------------------------------ */
+
+export const MEMORY_CLASSES = ['personal_preference', 'project_fact', 'environment_fact', 'portable_procedure'];
+export const DURABILITIES = ['durable', 'task'];
+
+const ENVIRONMENT_KEYS = ['machine', 'targetOs', 'runtime', 'shell'];
+
+/**
+ * 范围路由：用户明确说的范围最高；没有就按记忆类别提案，设备事实必须带设备条件。
+ * 判不出来就返回 needsScope，让调用方问一句，而不是默默写进某一层。
+ */
+export function routeScope(draft, options = {}) {
+  const source = draft || {};
+  const explicit = source.scope === 'global' || source.scope === 'project' ? source.scope : '';
+  const hasProject = Boolean(options.project);
+  const cls = typeof source.memoryClass === 'string' ? source.memoryClass : '';
+  const durability = typeof source.durability === 'string' ? source.durability : 'durable';
+  const base = { chosenScope: '', reasonCode: '', requiredConditions: [], needsScope: false, explicit };
+  if (durability === 'task') return { ...base, needsScope: true, reasonCode: 'task_state' };
+  if (explicit) {
+    if (explicit === 'project' && !hasProject) {
+      return { ...base, needsScope: true, reasonCode: 'no_project', requiredConditions: [{ key: 'projectRoot', value: '' }] };
+    }
+    return { ...base, chosenScope: explicit, reasonCode: 'explicit' };
+  }
+  if (!cls) return { ...base, chosenScope: 'project', reasonCode: 'unclassified_project' };
+  if (!MEMORY_CLASSES.includes(cls)) return { ...base, needsScope: true, reasonCode: 'unknown_class' };
+  if (cls === 'project_fact') {
+    if (!hasProject) return { ...base, needsScope: true, reasonCode: 'no_project', requiredConditions: [{ key: 'projectRoot', value: '' }] };
+    return { ...base, chosenScope: 'project', reasonCode: 'class_project_fact' };
+  }
+  if (cls === 'personal_preference') return { ...base, chosenScope: 'global', reasonCode: 'class_personal_preference' };
+  if (cls === 'portable_procedure') return { ...base, chosenScope: 'global', reasonCode: 'class_portable_procedure' };
+  const conditions = view.normalizeConditions(source.conditions) || [];
+  const scoped = conditions.some((item) => ENVIRONMENT_KEYS.includes(item.key));
+  if (!scoped) {
+    return {
+      ...base,
+      needsScope: true,
+      reasonCode: 'needs_environment',
+      requiredConditions: [{ key: 'machine', value: '' }, { key: 'runtime', value: '' }],
+    };
+  }
+  return { ...base, chosenScope: 'global', reasonCode: 'class_environment_fact' };
+}
+
+function locateInLayers(projectScope, id) {
+  for (const source of [projectScope, globalScope()]) {
+    try {
+      const record = loadIndex(source).entries.find((item) => item.id === id);
+      if (record) return { scope: source, record };
+    } catch {
+      /* 一层不可用不影响另一层 */
+    }
+  }
+  return null;
+}
+
+const visibleContent = (row) => JSON.stringify([
+  row.title || '',
+  row.summary || '',
+  row.when || '',
+  row.kind || 'note',
+  view.conditionsKey(row.conditions),
+  row.applicability || 'all_in_scope',
+  row.topicKey || '',
+  row.body || '',
+]);
+
+function exactDuplicate(projectScope, targetScope, draft) {
+  const layers = targetScope.key === 'global' ? [globalScope()] : [projectScope, globalScope()];
+  const wanted = visibleContent(draft);
+  for (const source of layers) {
+    const index = loadIndex(source);
+    for (const item of index.entries) {
+      if (visibleContent(item) === wanted) {
+        return { id: item.id, title: item.title, scope: source.key === 'global' ? 'global' : 'project', revision: item.revision || 1 };
+      }
+    }
+  }
+  return null;
+}
+
+function crossLayerSimilar(projectScope, targetScope, draft) {
+  const other = targetScope.key === 'global' ? projectScope : globalScope();
+  const index = loadIndex(other);
+  const rows = similarEntries(index.entries, draft.title, draft.summary, 2);
+  return rows.map((item) => ({
+    id: item.id,
+    title: item.title,
+    summary: item.summary || '',
+    revision: item.revision || 1,
+    scope: other.key === 'global' ? 'global' : 'project',
+  }));
+}
+
+function bindSameTopic(projectScope, ref) {
+  if (!ref || typeof ref !== 'object' || typeof ref.id !== 'string') return { error: 'sameTopicAs 要写成 {scope, id, revision}' };
+  const source = ref.scope === 'global' ? globalScope() : projectScope;
+  const record = loadIndex(source).entries.find((item) => item.id === ref.id);
+  if (!record) return { error: `sameTopicAs 指向的记忆不存在：${ref.id}` };
+  if (Number(ref.revision) !== Number(record.revision || 1)) {
+    return { error: `sameTopicAs 的版本不对：${ref.id} 当前是第 ${record.revision || 1} 版` };
+  }
+  return { topicKey: view.topicSlot(record) };
+}
+
+/**
+ * 保存的唯一入口：先路由，再在两层里查重（完全相同 → existing_ref；只是相近 → 只给候选），
+ * 最后才写。写之前判不出来的范围返回 needsScope，不替用户选。
+ */
+export function saveEntry(projectScope, source) {
+  return withLocks([projectScope, globalScope()], () => {
+    const routed = routeScope(source, { project: projectScope });
+    const draft = (() => {
+      try { return normalizeDraft({ ...source, title: source && source.title }); } catch { return null; }
+    })();
+    if (routed.needsScope) {
+      return { needsScope: true, chosenScope: '', reasonCode: routed.reasonCode, requiredConditions: routed.requiredConditions, needsResolution: false, similarList: [], draft };
+    }
+    let next = source;
+    if (source.sameTopicAs) {
+      const bound = bindSameTopic(projectScope, source.sameTopicAs);
+      if (bound.error) throw new Error(bound.error);
+      next = { ...source, topicKey: bound.topicKey };
+    }
+    let targetScope = routed.chosenScope === 'global' ? globalScope() : projectScope;
+    if (next.id) {
+      const found = locateInLayers(projectScope, next.id);
+      if (!found) throw new Error('没有这条记忆，改用新增');
+      targetScope = found.scope;
+    } else if (draft && source.resolution !== 'distinct') {
+      const duplicate = exactDuplicate(projectScope, targetScope, draft);
+      if (duplicate) {
+        return { existing: duplicate, needsResolution: false, needsScope: false, similarList: [], draft, changed: false, merged: false, chosenScope: duplicate.scope };
+      }
+      const near = crossLayerSimilar(projectScope, targetScope, draft);
+      if (near.length) {
+        return {
+          needsResolution: true,
+          crossLayer: true,
+          similarList: near,
+          similar: near[0],
+          draft,
+          needsScope: false,
+          chosenScope: targetScope.key === 'global' ? 'global' : 'project',
+        };
+      }
+    }
+    const foreign = targetScope.key === 'global' ? [] : loadIndex(globalScope()).entries;
+    const result = upsertLocked(targetScope, next, { foreignEntries: foreign });
+    return { ...result, chosenScope: targetScope.key === 'global' ? 'global' : 'project', needsScope: false, reasonCode: routed.reasonCode };
+  });
+}
+
+/** 两层合并后的现行规范：同槽位只给胜出的那条；冲突或条件未知的不进自动召回。 */
+export function visibleRules(projectScope, context = {}) {
+  return withLocks([projectScope, globalScope()], () => {
+    const project = loadIndex(projectScope).entries;
+    const global = loadIndex(globalScope()).entries;
+    const resolved = view.resolveTopics(project, global, context);
+    const winners = [];
+    for (const row of resolved.values()) {
+      if (row.status === 'ok' && row.record) winners.push({ record: row.record, scope: row.scope, key: row.key });
+    }
+    return { winners, resolved };
+  });
+}
+
+/* --------------------------- 跨层搬移 --------------------------- */
+
+const moveTargetOf = (projectScope, intent) => (intent.target.scopeKey === globalScope().key ? globalScope() : projectScope);
+const moveSourceOf = (projectScope, intent) => (intent.source.scopeKey === globalScope().key ? globalScope() : projectScope);
+
+function entryOf(scope, id) {
+  return state.load(scope, { allowMove: true, allowPurge: true }).state.entries.find((row) => row.id === id) || null;
+}
+
+/** 目标库可能还不存在：不存在时不带 CAS 期望值；刚被别处写入就重读一次再试。 */
+function transactWithRetry(scope, base, work) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const loaded = state.load(scope, { allowMove: true, allowPurge: true });
+    const options = loaded.exists
+      ? { ...base, expected: { generation: loaded.state.generation, epoch: loaded.state.epoch } }
+      : { ...base };
+    try {
+      return state.transact(scope, options, work);
+    } catch (error) {
+      const retryable = error instanceof state.StateError && error.code === 'conflict' && /重读后再写/.test(error.message);
+      if (attempt === 0 && retryable) continue;
+      throw error;
+    }
+  }
+  throw new state.StateError('recover_failed', '写入重试后仍冲突');
+}
+
+function commitTarget(scope, record, intent) {
+  transactWithRetry(scope, {
+    operationId: `${intent.operationId}:in`,
+    payloadDigest: `${intent.source.id}->${intent.target.newId}`,
+    allowMove: true,
+  }, (draft) => {
+    if (draft.entries.some((row) => row.id === intent.target.newId)) return { changed: false };
+    const next = JSON.parse(JSON.stringify(record));
+    next.id = intent.target.newId;
+    next.status = 'active';
+    next.revision = 1;
+    next.updated = new Date().toISOString();
+    next.current.topicKey = intent.topicKey || next.current.topicKey || intent.source.id;
+    next.maintenance = next.maintenance || {};
+    next.maintenance.lastUsed = next.updated;
+    next.current.body = record.current.body;
+    draft.entries.push(next);
+    return {
+      changed: true,
+      kind: 'moveIn',
+      receipt: { moveId: intent.operationId, entryId: intent.target.newId, from: intent.source.scopeKey },
+    };
+  });
+  state.sealPrev(scope);
+}
+
+function cleanSource(scope, intent) {
+  transactWithRetry(scope, {
+    operationId: `${intent.operationId}:out`,
+    payloadDigest: intent.source.id,
+    allowMove: true,
+  }, (draft) => {
+    const before = draft.entries.length;
+    draft.entries = draft.entries.filter((row) => row.id !== intent.source.id);
+    draft.candidates = draft.candidates.filter((row) => row.sourceId !== intent.source.id
+      && !(Array.isArray(row.sourceIds) && row.sourceIds.includes(intent.source.id)));
+    draft.receipts = draft.receipts.filter((row) => row.moveId !== intent.operationId || row.kind === 'moveOut');
+    return {
+      changed: draft.entries.length !== before,
+      kind: 'moveOut',
+      receipt: { moveId: intent.operationId, entryId: intent.source.id, to: intent.target.scopeKey },
+    };
+  });
+  state.sealPrev(scope);
+  removeBody(scope, intent.source.id);
+}
+
+function driveMove(projectScope, intent, options = {}) {
+  const sourceScope = moveSourceOf(projectScope, intent);
+  const targetScope = moveTargetOf(projectScope, intent);
+  let targetHas = entryOf(targetScope, intent.target.newId);
+  if (!targetHas) {
+    const record = entryOf(sourceScope, intent.source.id);
+    if (!record) throw new state.StateError('recover_failed', `移动中断且源与目标都找不到这条记忆；协调文件保留：${intent.operationId}`);
+    commitTarget(targetScope, record, intent);
+    if (options.stopAfter === 'target') {
+      return { status: 'move_pending', stage: 'target_committed', operationId: intent.operationId, id: intent.target.newId };
+    }
+  }
+  if (entryOf(sourceScope, intent.source.id)) {
+    cleanSource(sourceScope, intent);
+    if (options.stopAfter === 'source') {
+      return { status: 'move_pending', stage: 'source_cleaned', operationId: intent.operationId, id: intent.target.newId };
+    }
+  }
+  if (!entryOf(targetScope, intent.target.newId)) {
+    throw new state.StateError('recover_failed', `移动恢复后目标层仍没有这条记忆；协调文件保留：${intent.operationId}`);
+  }
+  if (entryOf(sourceScope, intent.source.id)) {
+    throw new state.StateError('recover_failed', `移动恢复后源层仍留着旧条目；协调文件保留：${intent.operationId}`);
+  }
+  state.clearMoveIntent();
+  return {
+    status: 'moved',
+    id: intent.target.newId,
+    previousId: intent.source.id,
+    from: sourceScope.key === 'global' ? 'global' : 'project',
+    to: targetScope.key === 'global' ? 'global' : 'project',
+    operationId: intent.operationId,
+    revision: 1,
+  };
+}
+
+/**
+ * §13.6 五步：根锁 → 协调文件 → 目标写入（moveIn + target.prev）→ 源删除（moveOut + source.prev）→ 校验后清协调文件。
+ * 每一步都可按 operationId 重放；协调文件在 = 屏障，两层读写都先收尾。
+ */
+export function move(projectScope, id, options = {}) {
+  return state.withRootLock(() => {
+    const existing = state.readMoveIntent();
+    if (existing) {
+      const operationId = options.operationId || existing.operationId;
+      if (operationId !== existing.operationId) {
+        throw new state.StateError('conflict', `另一笔移动还没收尾（${existing.operationId}），先调用 resumeMove`);
+      }
+      return driveMove(projectScope, existing, options);
+    }
+    const projectIndex = loadIndex(projectScope);
+    const projectRecord = projectIndex.entries.find((row) => row.id === id);
+    const globalIndex = projectRecord ? null : loadIndex(globalScope());
+    const globalRecord = globalIndex ? globalIndex.entries.find((row) => row.id === id) : null;
+    if (!projectRecord && !globalRecord) throw new state.StateError('conflict', `没有这条记忆：${id}`);
+    const sourceScope = projectRecord ? projectScope : globalScope();
+    const sourceIndex = projectRecord ? projectIndex : globalIndex;
+    const record = projectRecord || globalRecord;
+    const targetScope = options.target === 'global' ? globalScope() : projectScope;
+    if (targetScope.dir === sourceScope.dir) throw new state.StateError('conflict', '源和目标在同一层');
+    const targetIndex = loadIndex(targetScope);
+    const duplicate = targetIndex.entries.find((row) => visibleContent(row) === visibleContent(record));
+    if (duplicate) throw new state.StateError('conflict', `目标层已有相同内容（${duplicate.id}），不搬`);
+    if (view.topicSlot(record).trim()) {
+      const slot = targetIndex.entries.find((row) => (row.topicKey || '') && row.topicKey === record.topicKey
+        && view.conditionsKey(row.conditions) === view.conditionsKey(record.conditions) && row.id !== record.id);
+      if (slot) throw new state.StateError('conflict', `目标层已有同一槽位（${slot.id}），不搬`);
+    }
+    /** 入边不重写：搬走前先证明这条记录自己的出边在目标层仍可见。 */
+    for (const link of view.linksOf(record)) {
+      const visible = targetIndex.entries.some((row) => row.id === link.id)
+        || (targetScope.key !== 'global' && sourceIndex.entries.some((row) => row.id === link.id));
+      if (!visible) throw new state.StateError('conflict', `关联目标 ${link.id} 在目标层不可见，先解除关联再搬`);
+    }
+    const operationId = typeof options.operationId === 'string' && options.operationId ? options.operationId : `mov_${crypto.randomBytes(6).toString('hex')}`;
+    const newId = `mem_${crypto.createHash('sha256').update(`${operationId}:${id}`).digest('hex').slice(0, 12)}`;
+    const intent = state.writeMoveIntent({
+      operationId,
+      source: { scopeKey: sourceScope.key, id, revision: record.revision || 1, epoch: sourceIndex.epoch },
+      target: { scopeKey: targetScope.key, newId, epoch: targetIndex.epoch },
+      topicKey: view.topicSlot(record),
+    });
+    return driveMove(projectScope, intent, options);
+  });
+}
+
+/** 恢复入口：只认根目录的协调文件；没有就什么都不做。 */
+export function resumeMove(projectScope, options = {}) {
+  return state.withRootLock(() => {
+    const intent = state.readMoveIntent();
+    if (!intent) return { status: 'clean' };
+    return driveMove(projectScope, intent, options);
+  });
+}
+
+export function movePending() {
+  return state.readMoveIntent();
 }

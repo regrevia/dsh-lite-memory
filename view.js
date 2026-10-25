@@ -501,3 +501,77 @@ export function projectionText(view) {
   if (view.state === 'not_applicable') rows.push('当前条件不适用');
   return rows.join('\n');
 }
+
+/** 槽位 = 显式 topicKey；没有就退回条目自身身份，这样每条独立记录仍是自己的槽。 */
+export function topicSlot(record) {
+  if (!record) return '';
+  const key = String(record.topicKey || '').trim();
+  return key || String(record.id || '');
+}
+
+/** 适用条件归一成可比对字符串：顺序不同不算不同条件。 */
+export function conditionsKey(conditions) {
+  const list = Array.isArray(conditions) ? conditions : [];
+  return JSON.stringify([...list].map((item) => [String(item.key), String(item.value)]).sort((a, b) => a[0].localeCompare(b[0])));
+}
+
+function ruleFingerprint(record) {
+  return JSON.stringify([
+    record.title || '',
+    record.summary || '',
+    record.when || '',
+    record.topicKey || '',
+    conditionsKey(record.conditions),
+    record.applicability || '',
+    record.kind || '',
+  ]);
+}
+
+function classify(records, context) {
+  const matches = [];
+  const unknown = [];
+  for (const record of records || []) {
+    if (!record || record.status === 'archived') continue;
+    const status = statusOf(record, context);
+    if (status === 'ok') matches.push(record);
+    else if (status === 'needs_context') unknown.push(record);
+  }
+  if (matches.length > 1) {
+    const fingerprints = new Set(matches.map(ruleFingerprint));
+    if (fingerprints.size > 1) return { status: 'conflict', records: matches, record: null };
+    return { status: 'ok', records: matches, record: matches[0] };
+  }
+  if (matches.length === 1) return { status: 'ok', records: matches, record: matches[0] };
+  if (unknown.length) return { status: 'needs_context', records: unknown, record: null };
+  return { status: 'none', records: [], record: null };
+}
+
+/**
+ * 同一个槽位只留一条现行规范：项目层命中就压过全局层；不命中才回落到全局；
+ * 项目层条件未知时整组暂缓，不拿全局顶上，也不猜。
+ */
+export function resolveTopics(projectRecords, globalRecords, context = {}) {
+  const groups = new Map();
+  const groupOf = (record) => {
+    const key = topicSlot(record);
+    if (!groups.has(key)) groups.set(key, { key, project: [], global: [] });
+    return groups.get(key);
+  };
+  for (const record of projectRecords || []) groupOf(record).project.push(record);
+  for (const record of globalRecords || []) groupOf(record).global.push(record);
+  const out = new Map();
+  for (const group of groups.values()) {
+    const project = classify(group.project, context);
+    const global = classify(group.global, context);
+    let resolved;
+    if (project.status === 'conflict') resolved = { status: 'conflict', scope: 'project', record: null, records: project.records };
+    else if (project.status === 'needs_context') resolved = { status: 'needs_context', scope: 'project', record: null, records: project.records };
+    else if (project.status === 'ok') resolved = { status: 'ok', scope: 'project', record: project.record, records: [project.record] };
+    else if (global.status === 'conflict') resolved = { status: 'conflict', scope: 'global', record: null, records: global.records };
+    else if (global.status === 'needs_context') resolved = { status: 'needs_context', scope: 'global', record: null, records: global.records };
+    else if (global.status === 'ok') resolved = { status: 'ok', scope: 'global', record: global.record, records: [global.record] };
+    else resolved = { status: 'none', scope: '', record: null, records: [] };
+    out.set(group.key, { key: group.key, project: group.project, global: group.global, ...resolved });
+  }
+  return out;
+}
