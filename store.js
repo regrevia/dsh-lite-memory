@@ -389,6 +389,48 @@ function bigrams(text) {
   return out;
 }
 
+/** 查询按空格/标点切成段：多段按关键词处理，整句仍按相关度处理。 */
+function queryRuns(query) {
+  return normalizeText(query, 400)
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+    .slice(0, 12);
+}
+
+function fieldText(value) {
+  return String(value ?? '').toLowerCase().replace(/\s+/g, ' ');
+}
+
+/**
+ * 多段查询里，条目至少要在一段上过半命中，且命中段不能只是孤零零一个两字词；
+ * 否则「插件市场」这种东西只要沾了个「插件」就会挤进结果。
+ */
+function matchesRun(item, runs) {
+  const pool = [
+    item.title,
+    (item.aliases || []).join(' '),
+    (item.tags || []).join(' '),
+    item.summary,
+    item.when,
+  ].map(fieldText).join('\n');
+  let qualified = 0;
+  let substantial = 0;
+  for (const run of runs) {
+    const grams = bigrams(run);
+    if (grams.size === 0) continue;
+    let hit = 0;
+    for (const gram of grams) if (pool.includes(gram)) hit += 1;
+    if (hit === 0) continue;
+    const full = hit === grams.size;
+    const half = hit >= 2 && hit * 2 >= grams.size;
+    if (!full && !half) continue;
+    qualified += 1;
+    if (hit >= 2) substantial += 1;
+  }
+  return substantial >= 1 || qualified >= 2;
+}
+
 export function similarity(a, b) {
   const left = bigrams(a);
   const right = bigrams(b);
@@ -701,6 +743,7 @@ function scoreQuery(item, grams, raw) {
 
 /**
  * 按需检索：项目层 + 全局层，最多 limit 条。
+ * 空格/标点分开的查询按关键词处理：一段都没过半命中就不进结果，避免只沾了个常用词也挤进来。
  * 返回的记录带着「本次检索之前」的 lastUsed，给 renderIndex 判断陈旧用；
  * 命中计数在返回前写入，所以同一次调用既改盘又不污染展示。
  */
@@ -708,12 +751,16 @@ export function search(scope, query, limit = 4, options = {}) {
   return withLocks([scope, globalScope()], () => {
     const grams = bigrams(query);
     if (grams.size === 0) return [];
+    const runs = queryRuns(query);
+    const keywordMode = runs.length >= 2;
     const rows = [];
     for (const source of [scope, globalScope()]) {
       const index = loadIndex(source);
       for (const item of index.entries) {
         const score = scoreQuery(item, grams, query);
-        if (score > 0) rows.push({ source, index, item, score });
+        if (score <= 0) continue;
+        if (keywordMode && !matchesRun(item, runs)) continue;
+        rows.push({ source, index, item, score });
       }
     }
     rows.sort((a, b) => b.score - a.score || String(b.item.lastUsed).localeCompare(String(a.item.lastUsed)));
