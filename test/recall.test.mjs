@@ -434,4 +434,14 @@ assert.notEqual(bootA.provider.text({ agent: agentB, signal: signalB }), prepare
   assert.ok(win.bytes <= 8192);
 }
 
+// A20：没有命中是正常空结果，不是额度用尽。
+{
+  const agent = makeAgent('agent-empty-search', cwdA);
+  await bootA.preStep({ agent, signal: signal(), turn: 't1' }, enter(human('完全无关的一串词')));
+  const value = await bootA.exec('memory_search', { query: '完全不存在的主题 zzzqqq' }, agent);
+  assert.equal(value.status, 'ok');
+  assert.equal(value.count, 0);
+  assert.deepEqual(value.refs, []);
+}
+
 console.log('recall.test.mjs: ok');

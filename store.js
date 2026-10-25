@@ -157,6 +157,7 @@ function applyFlat(draft, index) {
   draft.entries = next;
   draft.candidates = Array.isArray(index.suggestions) ? JSON.parse(JSON.stringify(index.suggestions)) : [];
   draft.receipts = Array.isArray(index.receipts) ? JSON.parse(JSON.stringify(index.receipts)) : [];
+  draft.suppressions = Array.isArray(index.suppressions) ? JSON.parse(JSON.stringify(index.suppressions)) : [];
   draft.lastSuggestedAt = typeof index.lastSuggestedAt === 'string' ? index.lastSuggestedAt : draft.lastSuggestedAt || '';
   draft.scopeKey = draft.scopeKey || index.scope;
 }
@@ -169,9 +170,9 @@ export function saveIndex(scope, index) {
   const meta = index.__meta || { exists: false };
   const expected = meta.exists ? { generation: meta.generation, epoch: meta.epoch } : null;
   const result = state.transact(scope, { expected, expectCreate: !meta.exists }, (draft) => {
-    const before = JSON.stringify([draft.entries, draft.candidates, draft.receipts, draft.lastSuggestedAt]);
+    const before = JSON.stringify([draft.entries, draft.candidates, draft.receipts, draft.suppressions, draft.lastSuggestedAt]);
     applyFlat(draft, index);
-    const after = JSON.stringify([draft.entries, draft.candidates, draft.receipts, draft.lastSuggestedAt]);
+    const after = JSON.stringify([draft.entries, draft.candidates, draft.receipts, draft.suppressions, draft.lastSuggestedAt]);
     return { changed: before !== after };
   });
   const published = result.state;
@@ -417,6 +418,7 @@ function matchesRun(item, runs) {
     item.title,
     (item.aliases || []).join(' '),
     (item.tags || []).join(' '),
+    (item.triggers || []).join(' '),
     item.summary,
     item.when,
   ].map(fieldText).join('\n');
@@ -525,9 +527,9 @@ export function nearestEntry(entries, title, summary) {
   return similarEntries(entries, title, summary, 1)[0] || null;
 }
 
-/** 旧版本整段保留，字段齐全，恢复时可以连标题与条件一起还原。 */
+/** 旧版本整段保留，字段齐全，恢复时可以连标题与条件一起还原。
+ *  空正文也是合法版本：从空正文改成有正文，撤销必须回到空，而不是当成新建去归档。 */
 function snapshot(record, body) {
-  if (!body) return record.versions || [];
   const version = {
     at: record.updated || record.created || new Date().toISOString(),
     title: record.title,
@@ -790,6 +792,7 @@ function scoreQuery(item, grams, raw) {
     [item.summary, MATCH_WEIGHT.summary],
     [item.when, MATCH_WEIGHT.alias],
     [(item.tags || []).join(' '), MATCH_WEIGHT.tags],
+    [(item.triggers || []).join(' '), MATCH_WEIGHT.tags],
   ];
   let score = 0;
   for (const [text, weight] of fields) {
@@ -801,6 +804,11 @@ function scoreQuery(item, grams, raw) {
   }
   const plain = normalizeText(raw, 200).toLowerCase().replace(/\s+/g, '');
   if (plain && normalizeText(item.title, 200).toLowerCase().replace(/\s+/g, '').includes(plain)) score += 5;
+  /** 触发词命中按整词算：用户说的那句话里带着它，就该搜得到。 */
+  if (plain && (item.triggers || []).some((trigger) => {
+    const text = normalizeText(trigger, 200).toLowerCase().replace(/\s+/g, '');
+    return Boolean(text) && plain.includes(text);
+  })) score += 4;
   return score;
 }
 
@@ -950,6 +958,14 @@ export function forget(scope, id, options = {}) {
       if (mode === 'archive') {
         if (archived) return { id: record.id, title: record.title, mode: 'archive', already: true, scopeKey: source.key };
         archiveEntry(source, index, record);
+        /** 「别记」也要挡住以后的自动建议，不能过几天又从同一个来源冒出来。 */
+        addSuppression(index, {
+          fingerprint: state.fingerprintOf({ title: record.title, when: record.when }),
+          sourceIds: [],
+          reason: 'forgotten_source',
+          at: new Date().toISOString(),
+          expiresAt: null,
+        });
         saveIndex(source, index);
         return { id: record.id, title: record.title, mode: 'archive', scopeKey: source.key };
       }
@@ -1166,13 +1182,26 @@ function pruneSuggestions(index) {
 /** 抑制规则：忘掉的来源永久挡，候选被拒只挡一段时间。只存指纹，不存原文。 */
 function addSuppression(index, { fingerprint, sourceIds = [], reason, at, expiresAt }) {
   if (!fingerprint) return;
-  const rows = (index.suppressions || []).filter((row) => row.fingerprint !== fingerprint || row.reason !== reason);
+  const now = Date.now();
+  const rows = (index.suppressions || []).filter((row) => {
+    if (row.fingerprint === fingerprint && row.reason === reason) return false;
+    if (!row || row.reason === 'forgotten_source') return true;
+    const expires = Date.parse(row.expiresAt || '');
+    return Number.isFinite(expires) && expires > now;
+  });
   rows.push({ fingerprint, sourceIds: [...sourceIds].filter((id) => typeof id === 'string'), reason, at, expiresAt });
   index.suppressions = rows;
 }
 
-function suppressed(index, fingerprint) {
-  return forgottenFingerprints(index).has(fingerprint);
+/** 命中哪种抑制：永久忘掉 / 一段时间内不重复建议；过期的不算。 */
+function suppressionOf(index, fingerprint) {
+  for (const row of index.suppressions || []) {
+    if (!row || row.fingerprint !== fingerprint) continue;
+    if (row.reason === 'forgotten_source') return 'forgotten_source';
+    const expires = Date.parse(row.expiresAt || '');
+    if (Number.isFinite(expires) && expires > Date.now()) return 'candidate_rejected';
+  }
+  return '';
 }
 
 function pruneReceipts(index) {
@@ -1189,6 +1218,9 @@ function pruneReceipts(index) {
  * 走候选确认，不能直接改正式条目。
  */
 export function suggestionGate(scope, source) {
+  if (scope && scope.confirmed === false) {
+    return { ok: false, reason: '当前目录还不能确认属于哪个项目，先确认项目根目录再建议' };
+  }
   return withLock(scope, () => {
     const index = loadIndex(scope);
     pruneSuggestions(index);
@@ -1196,8 +1228,12 @@ export function suggestionGate(scope, source) {
     if (!title) return { ok: false, reason: '没有标题' };
     const summary = normalizeText(source?.summary, LIMITS.summaryChars);
     const when = normalizeText(source?.when, LIMITS.whenChars);
-    if (suppressed(index, state.fingerprintOf({ title, when }))) {
+    const blocked = suppressionOf(index, state.fingerprintOf({ title, when }));
+    if (blocked === 'forgotten_source') {
       return { ok: false, reason: '这个来源你已经明确忘掉了，不再自动建议' };
+    }
+    if (blocked === 'candidate_rejected') {
+      return { ok: false, reason: '这个来源刚被拒绝过，过几天再说' };
     }
     const hit = resolveTarget(index.entries, { title, summary, when });
     if (hit) return { ok: false, reason: `已有「${hit.target.title}」，这次不重复建议` };
@@ -1585,21 +1621,31 @@ const ENVIRONMENT_KEYS = ['machine', 'targetOs', 'runtime', 'shell'];
 export function routeScope(draft, options = {}) {
   const source = draft || {};
   const explicit = source.scope === 'global' || source.scope === 'project' ? source.scope : '';
-  const hasProject = Boolean(options.project);
+  /** 根目录没确认就还没有项目层身份：不能凭 cwd 新建一个命名空间。 */
+  const projectReady = Boolean(options.project) && options.project.confirmed !== false;
   const cls = typeof source.memoryClass === 'string' ? source.memoryClass : '';
   const durability = typeof source.durability === 'string' ? source.durability : 'durable';
   const base = { chosenScope: '', reasonCode: '', requiredConditions: [], needsScope: false, explicit };
   if (durability === 'task') return { ...base, needsScope: true, reasonCode: 'task_state' };
   if (explicit) {
-    if (explicit === 'project' && !hasProject) {
-      return { ...base, needsScope: true, reasonCode: 'no_project', requiredConditions: [{ key: 'projectRoot', value: '' }] };
+    if (explicit === 'project' && !projectReady) {
+      const reasonCode = options.project && options.project.confirmed === false ? 'unconfirmed_project' : 'no_project';
+      return { ...base, needsScope: true, reasonCode, requiredConditions: [{ key: 'projectRoot', value: '' }] };
     }
     return { ...base, chosenScope: explicit, reasonCode: 'explicit' };
   }
-  if (!cls) return { ...base, chosenScope: 'project', reasonCode: 'unclassified_project' };
+  if (!cls) {
+    if (!projectReady) {
+      return { ...base, needsScope: true, reasonCode: 'unconfirmed_project', requiredConditions: [{ key: 'projectRoot', value: '' }] };
+    }
+    return { ...base, chosenScope: 'project', reasonCode: 'unclassified_project' };
+  }
   if (!MEMORY_CLASSES.includes(cls)) return { ...base, needsScope: true, reasonCode: 'unknown_class' };
   if (cls === 'project_fact') {
-    if (!hasProject) return { ...base, needsScope: true, reasonCode: 'no_project', requiredConditions: [{ key: 'projectRoot', value: '' }] };
+    if (!projectReady) {
+      const reasonCode = options.project && options.project.confirmed === false ? 'unconfirmed_project' : 'no_project';
+      return { ...base, needsScope: true, reasonCode, requiredConditions: [{ key: 'projectRoot', value: '' }] };
+    }
     return { ...base, chosenScope: 'project', reasonCode: 'class_project_fact' };
   }
   if (cls === 'personal_preference') return { ...base, chosenScope: 'global', reasonCode: 'class_personal_preference' };
@@ -1707,7 +1753,15 @@ export function saveEntry(projectScope, source) {
       const found = locateInLayers(projectScope, next.id);
       if (!found) throw new Error('没有这条记忆，改用新增');
       targetScope = found.scope;
-    } else if (draft && source.resolution !== 'distinct') {
+    }
+    /** 更新已有项目条目也必须落在确认过的根目录里。 */
+    if (targetScope.key !== 'global' && targetScope.confirmed === false) {
+      return {
+        needsScope: true, chosenScope: '', reasonCode: 'unconfirmed_project',
+        requiredConditions: [{ key: 'projectRoot', value: '' }], needsResolution: false, similarList: [], draft,
+      };
+    }
+    if (!next.id && draft && source.resolution !== 'distinct') {
       const duplicate = exactDuplicate(projectScope, targetScope, draft);
       if (duplicate) {
         return { existing: duplicate, needsResolution: false, needsScope: false, similarList: [], draft, changed: false, merged: false, chosenScope: duplicate.scope };

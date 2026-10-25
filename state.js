@@ -82,7 +82,8 @@ function gitRoot(cwd) {
       encoding: 'utf8',
       timeout: 2000,
       maxBuffer: 64 * 1024,
-      stdio: ['ignore', 'pipe', 'ignore'],
+      /* stderr 要留着：git 明说「不在仓库里」是可信结果，不能和超时/失败混成未确认。 */
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
     const line = String(out || '').trim().split('\n')[0];
     if (line) return { root: realpathOf(path.resolve(line)) };
