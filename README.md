@@ -19,7 +19,7 @@ Lightweight memory for the DeepSeek Harness. No standing system prompt, nothing 
 | **L1** 它发现有跨会话价值的经验 | 一行灰字 `memory · suggested "X" · sug_x` + 一个 `keep` 按钮；标题加一句话，看得懂才点，不点就永远不写，48 小时内不重复 |
 | **L2** 常识、一次性参数、凭据的值 | 永不写入 |
 
-这些行只属于产生它的那一轮：重进会话就没了，历史里只留正文。再记一次时插件自己判是更新还是新增：同层、同前置条件下，标题（或这条用过的旧标题）完全一致就更新原条目，换过说法而标题变了的旧标题记成别名以后也认得。像但不同名的不写：先在结果里回「相近：X」和它的 id，确认要更新就带那个 id 再存，确认是另一条才加 `resolution="distinct"`。更新时没给的字段保持原值，正文整段替换——旧正文原样留在 `versions` 里（每字都留，不截断）；前置条件不同的同一主题是两条。
+这些行只属于产生它的那一轮：每轮按那轮自己的工具结果重建，重进会话还能看见，别的轮不会混进来。再记一次时插件自己判是更新还是新增：同层、同前置条件下，标题（或这条用过的旧标题）完全一致就更新原条目，换过说法而标题变了的旧标题记成别名以后也认得。像但不同名的不写：先在结果里回「相近：X」和它的 id，确认要更新就带那个 id 再存，确认是另一条才加 `resolution="distinct"`。更新时没给的字段保持原值，正文整段替换——旧正文原样留在 `versions` 里（每字都留，不截断）；前置条件不同的同一主题是两条。
 
 写入时分两层：默认只在这个项目生效；用户说「以后所有项目都这样」才进全局层（200 条起提示，硬上限 1000 条），检索时一起查。同一主题在不同前提下用 `when` 区分，各存一条。
 
@@ -33,21 +33,21 @@ Lightweight memory for the DeepSeek Harness. No standing system prompt, nothing 
 | **L1** it spots something worth keeping | one muted line `memory · suggested "X" · sug_x` with a single `keep` button — readable before you click, nothing written unless you click, at most once per two days |
 | **L2** common sense, one-off parameters, credential values | never written |
 
-Those lines belong to the turn that made them: reopening the session drops them, leaving only the prose in history. Saving again updates an entry only when the title (or one of its earlier titles) matches exactly under the same precondition. A merely similar title writes nothing first: the result reports the closest entry and its id, so the caller either updates that id or re-saves with `resolution="distinct"`. An update keeps every field it was not given and replaces the body wholesale; the previous body stays in `versions` verbatim. The same subject under different preconditions stays two entries.
+Those lines belong to the turn that made them: each turn is rebuilt from its own tool results, so reopening the session shows them again and no other turn leaks in. Saving again updates an entry only when the title (or one of its earlier titles) matches exactly under the same precondition. A merely similar title writes nothing first: the result reports the closest entry and its id, so the caller either updates that id or re-saves with `resolution="distinct"`. An update keeps every field it was not given and replaces the body wholesale; the previous body stays in `versions` verbatim. The same subject under different preconditions stays two entries.
 
 Writes land in one of two layers: the current project by default, or the global layer (warns past 200, hard ceiling 1000) when the user says the rule holds for every project. Both layers are searched together, and a `when` field separates the same subject under different preconditions.
 
 ## 点一下就存 / One click, no turn
 
-`keep` 是同源直写：不产生消息、不动输入框、不打断当前回复。按钮变 `kept` 就结束了。行尾的 `✕` 按 id 撤销：改过的条目还原成上一版（显示 `restored`），刚建的条目移入归档（显示 `archived`）。
+`keep` 是同源直写：不产生消息、不动输入框、不打断当前回复。按钮变 `kept` 就结束了。真写过的行尾才有 `✕`，按 id 带着写入时的版本撤销：改过的条目还原成上一版（显示 `restored`），刚建的条目移入归档（显示 `archived`）；条目后来又改过就停下并提示版本已变，不覆盖后来的修改。没变、需要确认、保存失败的行没有撤销。
 
-`keep` writes straight to disk from the page: no message, no extra model turn, the input box untouched. The button turns into `kept` and that is the whole interaction. The `✕` at the end of a line undoes by id: an edited entry goes back to its previous version (`restored`), a freshly created one moves to the archive (`archived`).
+`keep` writes straight to disk from the page: no message, no extra model turn, the input box untouched. The button turns into `kept` and that is the whole interaction. Only a row that really changed gets the `✕`, and it undoes by id with the version it wrote: an edited entry goes back to its previous version (`restored`), a freshly created one moves to the archive (`archived`); if the entry changed again it stops and says the version moved instead of overwriting. Noop, needs-confirmation and failed saves get no undo.
 
-## 底部引用条 / Citation footer
+## 每轮引用条 / Per-turn references
 
-这次会话真正读进来的记忆，会在输入框下面留一行 `记忆引用 N 条`：点开是标题，再点一条就地展开正文，再点收起。行和正文都按当前状态显示——条目改过名就显示新名字，被归档或删掉就不再出现。没读过记忆就不出现；换会话回来还在，一个会话最多留 20 条，30 天不用就清掉。
+每次回复末尾、在「已编辑 N 个文件」下面，按这一轮实际发生的工具结果留几行：`本轮参考 N 条` 和 `本轮更新 N 条`。点开是记忆名，再点一条就地展开当前正文；名字、版本都说当前值——改过名显示新名字，改过版本显示「当前第 N 版」，归档的标「已归档」，删掉的显示「已删除」。同一轮同一版本只出现一次；没读过也没写过就整段不出现。切换会话不丢，每轮只按自己的工具结果重建。本轮有更新时另有 `准备续聊摘要`，只列这一轮的记忆 id、名字和版本，可复制。
 
-Memories actually read into this session leave one line under the composer — `记忆引用 N 条`. It expands to titles, a title expands to the raw body, and clicking again collapses it. Nothing read, nothing shown. It reads the entry as it is now — a renamed entry shows its new title, a dropped one disappears. It survives switching conversations; at most 20 rows per session, cleared after 30 days.
+Each completed turn keeps a few lines under 「已编辑 N 个文件」, built from that turn's own tool results: `本轮参考 N 条` and `本轮更新 N 条`. A line expands to memory names, a name expands to the body as it is now — current title, current version, archived marked, deleted said outright. One row per version per turn; nothing read or written, nothing shown. Switching conversations keeps them, because each turn is rebuilt from its own tool results only. A turn that changed memory also offers `准备续聊摘要`, listing just that turn's ids, names and versions, ready to copy.
 
 ## 为什么轻 / Why it stays light
 
@@ -71,7 +71,7 @@ Install from the DSH Plugin Manager (search `dsh-lite-memory`), or `npm pack` an
 
 `memory_save` · `memory_suggest` · `memory_search` · `memory_read` · `memory_forget`
 
-完整触发规则见 [TRIGGERS.md](TRIGGERS.md)。 / Full trigger rules: [TRIGGERS.md](TRIGGERS.md).
+完整触发规则见 [TRIGGERS.md](TRIGGERS.md)；性能与 UI 门禁的实测数字见 [docs/BENCH.md](docs/BENCH.md)。 / Full trigger rules: [TRIGGERS.md](TRIGGERS.md); measured performance and UI-gate evidence: [docs/BENCH.md](docs/BENCH.md).
 
 ## License
 

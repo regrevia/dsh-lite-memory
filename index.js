@@ -8,6 +8,7 @@ import {
   forget,
   undoChange,
   locate,
+  findAnywhere,
   renderIndex,
   loadIndex,
   saveEntry,
@@ -126,24 +127,29 @@ function keepHandler(webServer) {
       return sendJson(res, 400, { ok: false, reason: error instanceof Error ? error.message : '请求无法解析' });
     }
 
-    /** 引用列表与正文都按会话查，不需要项目路径。 */
-    if (action === 'citations' || action === 'body') {
-      const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
-      if (!sessionId) return sendJson(res, 400, { ok: false, reason: '缺少 sessionId' });
-      if (action === 'citations') return sendJson(res, 200, { ok: true, ...listCitations(sessionId) });
+    /** 正文按 id 现查当前层：引用是历史事实，正文必须给当前版本，不能吃缓存。 */
+    if (action === 'body') {
       const id = typeof body.id === 'string' ? body.id : '';
       if (!id) return sendJson(res, 400, { ok: false, reason: '缺少 id' });
-      const found = readCitationBody(sessionId, id);
-      if (!found) return sendJson(res, 404, { ok: false, reason: '没有这条引用的正文' });
+      const found = findAnywhere(id);
+      if (!found) return sendJson(res, 200, { ok: true, status: 'gone', id });
       return sendJson(res, 200, {
         ok: true,
         id: found.id,
+        status: found.status,
         title: found.title,
         when: found.when || '',
         scope: found.scope,
+        scopeLabel: found.scopeLabel || '',
         revision: found.revision,
         body: found.body,
       });
+    }
+
+    if (action === 'citations') {
+      const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
+      if (!sessionId) return sendJson(res, 400, { ok: false, reason: '缺少 sessionId' });
+      return sendJson(res, 200, { ok: true, ...listCitations(sessionId) });
     }
 
     const cwd = typeof body.cwd === 'string' ? body.cwd : '';
@@ -176,7 +182,8 @@ function keepHandler(webServer) {
       if (!id) return sendJson(res, 400, { ok: false, reason: '缺少 id' });
       if (!locate(scope, id)) return sendJson(res, 404, { ok: false, reason: '没有这条记忆' });
       try {
-        const undone = undoChange(scope, id);
+        const expectedRevision = Number.isInteger(body.revision) ? body.revision : undefined;
+        const undone = undoChange(scope, id, { expectedRevision });
         if (!undone) return sendJson(res, 404, { ok: false, reason: '没有这条记忆' });
         return sendJson(res, 200, { ok: true, id: undone.id, mode: undone.mode });
       } catch (error) {
@@ -203,6 +210,17 @@ function keepHandler(webServer) {
       return sendJson(res, 409, { ok: false, reason: error instanceof Error ? error.message : '保存失败' });
     }
   };
+}
+
+/** 给界面的事件引用：只有定位与版次，不带正文，避免把维护字段当内容画出来。 */
+function refsOf(hits) {
+  return hits.map((item) => ({
+    id: item.id,
+    title: item.title || '',
+    scope: item.scope || 'project',
+    revision: item.revision || 1,
+    status: item.status || 'ok',
+  }));
 }
 
 const SAVE_PARAMS = {
@@ -508,7 +526,18 @@ export function apply(ctx, config) {
     description: `保存一条记忆。用户明确说「记住」时直接调用；用户自己的话已经是长期规则（「以后都这样」「别再 X」）时也直接调用，不要先问。更新同一件事时带 id：身份只看标题、旧标题和前置条件，像不像不授权覆盖。文本相近但标题不同时先不写，返回 needsResolution 与 1–2 条相近条目：确实是同一条就用那个 id 更新，确实是另一条才带 resolution="distinct" 再存。带 id 更新时没给的字段保持原值，正文整段替换，旧版本留在 versions 里（每字都留，不截断）。条数到硬上限时把同层最久没被读的一条移进归档，结果里写明动了哪条，不拒绝新记忆；单条正文超限只报错、不截断。前置条件不同的同一标题是两条。${NOTES}`,
     parameters: SAVE_PARAMS,
     output: {
-      presentationMeta: (_args, value) => ({ kind: 'memory-save', id: value.id, scope: value.scope, revision: value.revision, changed: value.changed }),
+      presentationMeta: (_args, value) => ({
+        kind: 'memory-save',
+        id: value.id || '',
+        title: value.title || '',
+        scope: value.scope || '',
+        revision: value.revision || 0,
+        changed: value.changed === true,
+        mode: value.needsScope ? 'needs_scope'
+          : value.existingId ? 'duplicate'
+            : value.needsResolution ? 'needs_resolution'
+              : value.changed === false ? 'unchanged' : value.merged ? 'updated' : 'created',
+      }),
       schema: {
         type: 'object',
         properties: {
@@ -671,7 +700,7 @@ export function apply(ctx, config) {
     description: `按需检索已有记忆：先搜，命中再 memory_read 读正文。用户提到「记住了什么 / 上次 / 规范 / 约定 / 路径 / 凭据怎么取」，或者眼前反复出现的报错、弹窗、异常时，先查这里有没有记过解法。跨项目的通用条目以 [全局] 开头。中文长句可以直接当查询。每行带 id 与版次，更新时把 id 传回 memory_save。已归档的条目也会返回，标为「已归档」。`,
     parameters: SEARCH_PARAMS,
     output: {
-      presentationMeta: (_args, value) => ({ kind: 'memory-search', count: value.count, status: value.status || 'ok' }),
+      presentationMeta: (_args, value) => ({ kind: 'memory-search', count: value.count, status: value.status || 'ok', refs: value.refs || [] }),
       schema: {
         type: 'object',
         properties: {
@@ -679,8 +708,23 @@ export function apply(ctx, config) {
           chars: { type: 'integer' },
           text: { type: 'string' },
           status: { type: 'string', enum: ['ok', 'budget_exhausted', 'memory_disabled'] },
+          refs: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                title: { type: 'string' },
+                scope: { type: 'string' },
+                revision: { type: 'integer' },
+                status: { type: 'string' },
+              },
+              required: ['id', 'title', 'scope', 'revision', 'status'],
+              additionalProperties: false,
+            },
+          },
         },
-        required: ['count', 'chars', 'text'],
+        required: ['count', 'chars', 'text', 'refs'],
         additionalProperties: false,
       },
       render: (_args, value) => [{
@@ -695,10 +739,10 @@ export function apply(ctx, config) {
       }],
     },
     execute: async (args, execution) => {
-      if (recallMode() === 'off') return { count: 0, chars: 0, text: '', status: 'memory_disabled' };
+      if (recallMode() === 'off') return { count: 0, chars: 0, text: '', status: 'memory_disabled', refs: [] };
       const agent = execution?.agent;
       const win = windowOf(agent);
-      if (win && !affordable(win, 0)) return { count: 0, chars: 0, text: '', status: 'budget_exhausted' };
+      if (win && !affordable(win, 0)) return { count: 0, chars: 0, text: '', status: 'budget_exhausted', refs: [] };
       const scope = scopeOf(cwdOf(execution));
       const context = view.trustedContext(scope, {});
       const hits = search(scope, args.query, args.limit ?? 3, { context });
@@ -711,15 +755,15 @@ export function apply(ctx, config) {
           kept -= 1;
           rendered = renderIndex(shown.slice(0, kept));
         }
-        if (kept === 0) return { count: 0, chars: 0, text: '', status: 'budget_exhausted' };
+        if (kept === 0) return { count: 0, chars: 0, text: '', status: 'budget_exhausted', refs: [] };
         if (kept < shown.length) rendered = renderIndex(shown.slice(0, kept));
         win.bytes += Buffer.byteLength(`memory · 命中 ${kept} 条 · 引用 ${rendered.chars} 字\n${rendered.text}`);
         win.reads += 1;
         recordCitations(scope, sessionIdOf(execution), hits.slice(0, kept));
-        return { count: kept, chars: rendered.chars, text: rendered.text };
+        return { count: kept, chars: rendered.chars, text: rendered.text, refs: refsOf(hits.slice(0, kept)) };
       }
       recordCitations(scope, sessionIdOf(execution), hits);
-      return { count: hits.length, chars: rendered.chars, text: rendered.text };
+      return { count: hits.length, chars: rendered.chars, text: rendered.text, refs: refsOf(hits) };
     },
   }), 'lite-memory: memory_search');
 
@@ -756,7 +800,14 @@ export function apply(ctx, config) {
                 ? `memory · 「${value.title}」${value.when ? `（${value.when}）` : ''} · ${value.id} · 第 ${value.revision} 版${scopeLabel(value)}${statusLabel(value.status)}\n${value.body}`
                 : `memory · 「${value.title}」的相关记忆\n${value.links || '(无)'}`,
       }],
-      presentationMeta: (_args, value) => ({ kind: 'memory-read', id: value.id, scope: value.scope, revision: value.revision, status: value.status }),
+      presentationMeta: (_args, value) => ({
+        kind: 'memory-read',
+        id: value.id || '',
+        title: value.title || '',
+        scope: value.scope || '',
+        revision: value.revision || 0,
+        status: value.status || 'ok',
+      }),
     },
     execute: async (args, execution) => {
       if (recallMode() === 'off') return { id: '', scope: '', status: 'memory_disabled' };
@@ -838,7 +889,13 @@ export function apply(ctx, config) {
               ? `memory · 先确认是归档还是彻底忘掉 · ${value.id}`
               : `memory · archived${scopeLabel(value)} "${value.title}" · ${value.id}，可找回`,
       }],
-      presentationMeta: (_args, value) => ({ kind: 'memory-forget', id: value.id, mode: value.mode }),
+      presentationMeta: (_args, value) => ({
+        kind: 'memory-forget',
+        id: value.id || '',
+        title: value.title || '',
+        scope: value.scope || '',
+        mode: value.mode,
+      }),
     },
     execute: async (args, execution) => {
       const scope = scopeOf(cwdOf(execution));
