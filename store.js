@@ -143,8 +143,8 @@ export function trimIndex(scope, index) {
   }
 }
 
-/** 同一主题的判定线。跨过就合并成一条，跨不过就新建。 */
-export const MERGE = { title: 0.6, summary: 0.75 };
+/** 同一主题的判定线。跨过就更新原来那条，跨不过就新建；live 库里不同主题实测最高 0.27。 */
+export const MERGE = { title: 0.45, summary: 0.55, near: 0.3 };
 
 /** 相邻两字为一组：中文没有空格，按词切分永远对不上，按字片才认得出改写的同一件事。 */
 function bigrams(text) {
@@ -156,7 +156,7 @@ function bigrams(text) {
   return out;
 }
 
-function similarity(a, b) {
+export function similarity(a, b) {
   const left = bigrams(a);
   const right = bigrams(b);
   if (left.size === 0 || right.size === 0) return 0;
@@ -165,24 +165,37 @@ function similarity(a, b) {
   return shared / (left.size + right.size - shared);
 }
 
+/** 标题、摘要、以及这条以前用过的标题，各算一次。 */
+function scoreEntry(item, title, summary) {
+  const names = [item.title, ...(item.aliases || [])];
+  const titleScore = Math.max(...names.map((name) => similarity(name, title)));
+  return { titleScore, summaryScore: similarity(item.summary, summary) };
+}
+
 /**
- * 同一主题的判定。前置条件必须一致：同一件事在不同场景下是两条记忆，
- * 哪怕正文互相看不上眼，也不能合并成一条。
+ * 保存时自己判：同一层、同一前置条件下，标题或摘要够像、或撞上这条用过的旧标题，
+ * 就是同一条，返回要更新的条目；否则 null，调用方新增。
  */
-function mergeCandidate(entries, title, summary, when) {
+export function resolveTarget(entries, title, summary, when) {
   let best = null;
-  let bestScore = 0;
   for (const item of entries) {
     if ((item.when || '') !== when) continue;
-    if (item.title === title) return item;
-    const titleScore = similarity(item.title, title);
-    const summaryScore = similarity(item.summary, summary);
-    if (titleScore < MERGE.title && summaryScore < MERGE.summary) continue;
+    if (item.title === title) return { target: item, score: 1 };
+    const { titleScore, summaryScore } = scoreEntry(item, title, summary);
     const score = Math.max(titleScore, summaryScore);
-    if (score > bestScore) {
-      best = item;
-      bestScore = score;
-    }
+    if (titleScore < MERGE.title && summaryScore < MERGE.summary) continue;
+    if (!best || score > best.score) best = { target: item, score };
+  }
+  return best;
+}
+
+/** 没有合并时，把最接近的那条报出来（含别的场景的同主题条目）：看得到，才有可能纠正。 */
+export function nearestEntry(entries, title, summary) {
+  let best = null;
+  for (const item of entries) {
+    const { titleScore, summaryScore } = scoreEntry(item, title, summary);
+    const score = Math.max(titleScore, summaryScore);
+    if (score >= MERGE.near && (!best || score > best.score)) best = { title: item.title, score };
   }
   return best;
 }
@@ -223,7 +236,9 @@ export function upsert(scope, draft) {
   const when = normalizeText(draft.when ?? '', LIMITS.whenChars);
   const index = loadIndex(scope);
   const now = new Date().toISOString();
-  const existing = mergeCandidate(index.entries, title, summary.text, when);
+  const target = resolveTarget(index.entries, title, summary.text, when);
+  const existing = target && target.target;
+  const near = existing ? null : nearestEntry(index.entries, title, summary.text);
   const id = existing ? existing.id : `mem_${Date.now().toString(36)}${crypto.randomBytes(2).toString('hex')}`;
   const stated = existing ? fs.readFileSync(entryFile(scope, id), 'utf8') : '';
   const mergedBody = existing ? mergeBody(stated, body) : body;
@@ -238,6 +253,7 @@ export function upsert(scope, draft) {
     created: existing ? existing.created : now,
     updated: now,
     lastUsed: now,
+    aliases: existing ? [...new Set([...(existing.aliases || []), ...(existing.title !== title ? [existing.title] : [])])].slice(-5) : [],
     hits: existing ? existing.hits || 0 : 0,
     merges: existing ? (existing.merges || 0) + 1 : 0,
     bytes: Buffer.byteLength(mergedBody, 'utf8'),
@@ -248,7 +264,12 @@ export function upsert(scope, draft) {
   index.suggestions = (index.suggestions || []).filter((item) => item.title !== title).slice(-19);
   trimIndex(scope, index);
   saveIndex(scope, index);
-  return { record, merged: Boolean(existing), mergedFrom: existing && existing.title !== title ? existing.title : null };
+  return {
+    record,
+    merged: Boolean(existing),
+    mergedFrom: existing && existing.title !== title ? existing.title : null,
+    similar: near ? near.title : null,
+  };
 }
 
 export function search(scope, query, limit = 4) {
@@ -303,10 +324,13 @@ export function forget(scope, id) {
 }
 
 /** Why a suggestion is refused: one per two days per project, and never for a saved topic. */
-export function suggestionGate(scope, title) {
+export function suggestionGate(scope, draft) {
   const index = loadIndex(scope);
-  const text = normalizeText(title, LIMITS.titleChars);
-  if (index.entries.some((item) => item.title === text)) return { ok: false, reason: '这条已经存过' };
+  const title = normalizeText(draft.title, LIMITS.titleChars);
+  const summary = normalizeText(draft.summary ?? '', LIMITS.summaryChars);
+  const when = normalizeText(draft.when ?? '', LIMITS.whenChars);
+  const hit = resolveTarget(index.entries, title, summary, when);
+  if (hit) return { ok: false, reason: `已有相近条目「${hit.target.title}」，点保留会更新它` };
   const now = Date.now();
   const recent = index.suggestions.find((item) => now - Date.parse(item.at) < LIMITS.suggestionWindowMs);
   if (recent) return { ok: false, reason: `48 小时内已建议过「${recent.title}」` };

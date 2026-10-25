@@ -19,7 +19,7 @@ Lightweight memory for the DeepSeek Harness. Nothing in the system prompt, nothi
 | **L1** 它发现有跨会话价值的经验 | 一行灰字 `memory · keep? "X" — 要记的内容` + 一个 `keep` 按钮；标题加一句话，看得懂才点，不点就永远不写，48 小时内不重复 |
 | **L2** 常识、一次性参数、凭据的值 | 永不写入 |
 
-这些行只属于产生它的那一轮：重进会话就没了，历史里只留正文。同一件事再记一次会合并进原条目（旧要点保留，同键的新值覆盖）；前置条件不同的同一主题是两条，不合并。
+这些行只属于产生它的那一轮：重进会话就没了，历史里只留正文。再记一次时插件自己判是更新还是新增：同层、同前置条件下标题或摘要够像（0.45 / 0.55）就更新原条目，换过说法的旧标题记成别名以后也认得；旧要点保留，同键的新值覆盖；前置条件不同的同一主题是两条。
 
 写入时分两层：默认只在这个项目生效；用户说「以后所有项目都这样」才进全局层（上限 40 条），检索时一起查。同一主题在不同前提下用 `when` 区分，各存一条。
 
@@ -45,7 +45,7 @@ Writes land in one of two layers: the current project by default, or the global 
 
 - **0 依赖**，存储层无定时器、无监听、无网络，只有同步单文件写。
 - 搜索最多 4 条、400 字；正文只在 `memory_read` 里出现，全文永不进上下文。
-- 同标题自动合并；90 天未用只留 `id + 标题`；超 200 条或 512 KB 转 `archive/`，文件从不删除。
+- 判重自动合并，不靠模型判断；90 天未用只留 `id + 标题`；超 200 条或 512 KB 转 `archive/`，文件从不删除。
 - 一个项目一个目录，项目之间互相看不见。
 
 - **Zero dependencies.** The store has no timers, no listeners, no network — just synchronous single-file writes.
