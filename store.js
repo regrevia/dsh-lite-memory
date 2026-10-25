@@ -42,8 +42,13 @@ export function isExperimentalRecord(record) {
     || Boolean(record.learning);
 }
 
-function readableRecord(record, options) {
-  return !isExperimentalRecord(record) || Boolean(options && options.allowExperimental === true);
+function readableRecord(record, options, index) {
+  if (!isExperimentalRecord(record)) return true;
+  if (options && options.allowExperimental === true) return true;
+  if (!index || !index.__evolution || index.__evolution.enabled !== true) return false;
+  const learning = record.learning;
+  if (learning && (learning.state === 'paused' || learning.blockedReason)) return false;
+  return true;
 }
 
 /** 正文缓存：一次读到的正文先放这里，saveIndex 落盘后清掉。 */
@@ -170,6 +175,8 @@ export function loadIndex(scope, options = {}) {
     receipts: JSON.parse(JSON.stringify(loaded.state.receipts || [])),
     lastSuggestedAt: loaded.state.lastSuggestedAt || '',
     suppressions: JSON.parse(JSON.stringify(loaded.state.suppressions || [])),
+    __evolution: state.evolutionOf(loaded.state),
+    __exists: loaded.exists === true,
   };
   index.__meta = {
     exists: loaded.exists,
@@ -853,6 +860,50 @@ function scoreQuery(item, grams, raw) {
 }
 
 /**
+ * 项目实验开关：权威状态里缺字段即关闭。状态只回可核验事实，不编学习分数。
+ * 关闭时保留已完成成果；试用条目暂停，等新的有效反馈或明确管理动作再复核。
+ */
+export function evolutionStatus(scope) {
+  const index = loadIndex(scope);
+  const config = index.__evolution || { enabled: false, epoch: '', policyVersion: 0, feedbackGeneration: 0, compatible: true };
+  const counts = { active: 0, trial: 0, paused: 0 };
+  for (const record of index.entries) {
+    if (!isExperimentalRecord(record)) continue;
+    const phase = record.learning && typeof record.learning === 'object' ? record.learning.state : '';
+    if (phase === 'active' || phase === 'trial' || phase === 'paused') counts[phase] += 1;
+  }
+  return { ...config, counts };
+}
+
+export function setEvolution(scope, enabled, options = {}) {
+  return withLock(scope, () => {
+    const before = loadIndex(scope);
+    const config = before.__evolution || {};
+    if (config.compatible === false) {
+      return { ok: false, reason: '实验配置版本不认，先不要改动开关', compatible: false };
+    }
+    const operationId = typeof options.operationId === 'string' ? options.operationId : '';
+    let applied = null;
+    try {
+      state.transact(scope, {
+        operationId,
+        expectCreate: !before.__exists,
+        expected: before.__exists ? { generation: before.generation, epoch: before.epoch } : null,
+      }, (draft) => {
+        applied = state.applyEvolution(draft, enabled);
+        return applied.changed ? { changed: true } : { changed: false };
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : '开关没有改动';
+      if (error && error.code === 'conflict') return { ok: false, reason: '项目状态刚被改过，重试一次', retry: true };
+      return { ok: false, reason };
+    }
+    const after = evolutionStatus(scope);
+    return { ok: true, changed: Boolean(applied && applied.changed), ...after };
+  });
+}
+
+/**
  * 按需检索：项目层 + 全局层，最多 limit 条。
  * 空格/标点分开的查询按关键词处理：一段都没过半命中就不进结果，避免只沾了个常用词也挤进来。
  * 返回的记录带着「本次检索之前」的 lastUsed，给 renderIndex 判断陈旧用；
@@ -869,11 +920,11 @@ export function search(scope, query, limit = 4, options = {}) {
     for (const source of [scope, globalScope()]) {
       const index = loadIndex(source);
       const layer = source.key === 'global' ? 'global' : 'project';
-      const owned = index.entries.filter((item) => readableRecord(item, options));
+      const owned = index.entries.filter((item) => readableRecord(item, options, index));
       layers[layer].push(...owned);
       const collect = (pool, archived) => {
         for (const item of pool) {
-          if (!readableRecord(item, options)) continue;
+          if (!readableRecord(item, options, index)) continue;
           const score = scoreQuery(item, grams, query);
           if (score <= 0) continue;
           if (keywordMode && !matchesRun(item, runs)) continue;
@@ -949,7 +1000,7 @@ export function readEntry(scope, id, options = {}) {
       const record = index.entries.find((item) => item.id === id);
       const archived = record ? null : index.archived.find((item) => item.id === id);
       if (!record && !archived) continue;
-      if (!readableRecord(record || archived, options)) continue;
+      if (!readableRecord(record || archived, options, index)) continue;
       const body = readBody(source, id);
       return {
         ...(record || archived),
@@ -1047,7 +1098,7 @@ export function readLinks(scope, id, options = {}) {
       const index = loadIndex(source);
       const record = index.entries.find((item) => item.id === id);
       if (!record) continue;
-      if (!readableRecord(record, options)) continue;
+      if (!readableRecord(record, options, index)) continue;
       const links = [];
       for (const link of view.linksOf(record)) {
         const target = findCurrent(link.id, scope, options);
@@ -1071,7 +1122,7 @@ function findCurrent(id, scope, options = {}) {
     }
     const record = index.entries.find((item) => item.id === id && item.status !== 'archived');
     if (!record) continue;
-    if (!readableRecord(record, options)) continue;
+    if (!readableRecord(record, options, index)) continue;
     return {
       id: record.id,
       title: record.title,
@@ -1480,7 +1531,8 @@ export function renderIndex(entries, budget = 400) {
     const last = Date.parse(item.lastUsed || item.updated || item.created || '') || now;
     const stale = now - last > staleMs;
     const stateTag = item.state === 'archived' ? ' · 已归档' : item.state === 'needs_context' ? ' · 适用范围待确认' : item.state === 'not_applicable' ? ' · 当前条件不适用' : '';
-    const head = `${item.scope === 'global' ? '[全局] ' : ''}${item.id} ${item.title}${item.when ? `（${item.when}）` : ''} · 第 ${item.revision || 1} 版${stateTag}`;
+    const originTag = item.origin === 'project_evolution' ? ' · 实验' : '';
+    const head = `${item.scope === 'global' ? '[全局] ' : ''}${item.id} ${item.title}${item.when ? `（${item.when}）` : ''} · 第 ${item.revision || 1} 版${originTag}${stateTag}`;
     const line = stale ? `- ${head}` : `- ${head}｜${item.summary}`;
     if (used + line.length > budget) break;
     lines.push(line);
@@ -1855,8 +1907,10 @@ export function saveEntry(projectScope, source) {
 /** 两层合并后的现行规范：同槽位只给胜出的那条；冲突或条件未知的不进自动召回。 */
 export function visibleRules(projectScope, context = {}, options = {}) {
   return withLocks([projectScope, globalScope()], () => {
-    const project = loadIndex(projectScope).entries.filter((item) => readableRecord(item, options));
-    const global = loadIndex(globalScope()).entries.filter((item) => readableRecord(item, options));
+    const projectIndex = loadIndex(projectScope);
+    const globalIndex = loadIndex(globalScope());
+    const project = projectIndex.entries.filter((item) => readableRecord(item, options, projectIndex));
+    const global = globalIndex.entries.filter((item) => readableRecord(item, options, globalIndex));
     const resolved = view.resolveTopics(project, global, context);
     const winners = [];
     for (const row of resolved.values()) {

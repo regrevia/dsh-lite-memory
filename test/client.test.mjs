@@ -1,11 +1,24 @@
 import assert from 'node:assert/strict';
 
 let seen = null;
+let plugin = null;
 const fakeReact = { createElement: () => null, useRef: (value) => ({ current: value }), useState: (value) => [value, () => {}], useEffect: () => {}, useMemo: (fn) => fn() };
-globalThis.window = { __ModuleLoader__: { load: ({ factory }) => { factory((name) => (name === 'react' ? fakeReact : null)); } } };
+globalThis.window = { __ModuleLoader__: { load: (definition) => { plugin = definition.factory((name) => (name === 'react' ? fakeReact : null)); } } };
 globalThis.__LITE_MEMORY_TEST__ = (helpers) => { seen = helpers; };
 await import('../client.js');
 assert.ok(seen, 'client test seam missing');
+
+// 会话头的项目开关：注册到宿主认的位置，状态只能问服务端。
+const registrations = [];
+const slots = {
+  inject: (_name, callback) => callback(),
+  register: (definition) => { registrations.push(definition); return () => {}; },
+};
+plugin.apply({ slots, sessions: { binding: () => undefined }, uiConversation: {} });
+const evolution = registrations.find((item) => item.id === 'lite-memory:project-evolution');
+assert.ok(evolution, '项目开关没有注册');
+assert.equal(evolution.name, 'conversation.session.header.utilities');
+assert.equal(evolution.order, 30);
 
 const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf } = seen;
 const settled = (meta, extra = {}) => ({ kind: 'tool-result', meta, isError: false, content: [], ...extra });
@@ -56,4 +69,4 @@ assert.equal(turn[1].title, 'A2');
 // 旧行没有元数据：什么也不产出，绝不从文案猜 id。
 assert.deepEqual(citationsOfTurn([{ root: null }, { root: { kind: 'tool-result', content: [{ type: 'text', text: 'memory · saved "A" mem_aaaaaaaa' }] } }]), []);
 
-console.log('client.test.mjs: 9 passed');
+console.log('client.test.mjs: 10 passed');

@@ -9,7 +9,8 @@ const state = await import('../state.js');
 
 const { upsert, search, readEntry, forget, undoChange, acceptCandidate, rejectCandidate,
   suggestionGate, noteSuggestion, findSuggestion, renderIndex, normalizeDraft, loadIndex,
-  scopeOf, globalScope, LIMITS, recordCitations, listCitations, readCitationBody } = store;
+  scopeOf, globalScope, LIMITS, recordCitations, listCitations, readCitationBody,
+  evolutionStatus, setEvolution } = store;
 
 let passed = 0;
 const test = (name, fn) => {
@@ -733,6 +734,63 @@ test('实验来源条目默认不进入检索、正文与关联，只有管理�
   assert.equal(search(scope, '实验记录', 4, { allowExperimental: true }).some((row) => row.id === target.id), true);
   assert.equal(readEntry(scope, target.id, { allowExperimental: true }).body, '实验正文');
   assert.ok(readEntry(scope, normal.record.id));
+});
+
+test('项目实验默认关闭；打开才放行实验读取，关闭暂停试用且不自动复活', () => {
+  const scope = fresh('evolution-switch');
+  upsert(scope, { title: '实验规则', summary: '实验规则默认不参与读取', body: '实验正文' });
+  const target = stateOf(scope).entries.find((entry) => entry.current.title === '实验规则');
+  state.transact(scope, {}, (draft) => {
+    const row = draft.entries.find((entry) => entry.id === target.id);
+    row.origin = 'project_evolution';
+    row.maintenance.learning = { state: 'trial', specDigest: 'digest-1', supportedEpisodeIds: [] };
+    return { changed: true };
+  });
+  const initial = evolutionStatus(scope);
+  assert.equal(initial.enabled, false);
+  assert.equal(initial.compatible, true);
+  assert.equal(initial.counts.trial, 1);
+  assert.equal(search(scope, '实验规则', 4).some((row) => row.id === target.id), false);
+
+  const on = setEvolution(scope, true, { operationId: 'op-enable-1' });
+  assert.equal(on.ok, true);
+  assert.equal(on.changed, true);
+  assert.equal(on.enabled, true);
+  assert.notEqual(on.epoch, initial.epoch);
+  assert.equal(search(scope, '实验规则', 4).some((row) => row.id === target.id), true);
+  assert.equal(readEntry(scope, target.id).body, '实验正文');
+
+  const off = setEvolution(scope, false, { operationId: 'op-disable-1' });
+  assert.equal(off.ok, true);
+  assert.equal(off.enabled, false);
+  assert.equal(off.counts.paused, 1);
+  const paused = stateOf(scope).entries.find((entry) => entry.id === target.id);
+  assert.equal(paused.maintenance.learning.state, 'paused');
+  assert.equal(paused.maintenance.learning.blockedReason, 'needs_revalidation');
+  assert.equal(search(scope, '实验规则', 4).some((row) => row.id === target.id), false);
+
+  const again = setEvolution(scope, true);
+  assert.equal(again.enabled, true);
+  assert.equal(again.counts.paused, 1);
+  assert.equal(again.counts.trial, 0);
+  assert.equal(search(scope, '实验规则', 4).some((row) => row.id === target.id), false);
+});
+
+test('实验策略版本不认时保持关闭，开关拒绝改动且盘上不变', () => {
+  const scope = fresh('evolution-policy');
+  upsert(scope, { title: '普通规则', summary: '普通规则', body: '正文' });
+  state.transact(scope, {}, (draft) => {
+    draft.experimental.projectEvolution.policyVersion = 99;
+    return { changed: true };
+  });
+  const before = fs.readFileSync(path.join(scope.dir, 'state.json'), 'utf8');
+  const status = evolutionStatus(scope);
+  assert.equal(status.compatible, false);
+  assert.equal(status.enabled, false);
+  const refused = setEvolution(scope, true);
+  assert.equal(refused.ok, false);
+  assert.equal(refused.compatible, false);
+  assert.equal(fs.readFileSync(path.join(scope.dir, 'state.json'), 'utf8'), before);
 });
 
 for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });

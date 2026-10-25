@@ -9,7 +9,7 @@ process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-state-
 const state = await import('../state.js');
 
 const { LIMITS, StateError, scopeOf, globalScope, memoryRoot, resolveRoot, load, transact,
-  readEntryBody, migrateLegacy, migrationReport, withScopeLock, validateState, emptyState } = state;
+  readEntryBody, migrateLegacy, migrationReport, withScopeLock, validateState, emptyState, evolutionOf } = state;
 
 let passed = 0;
 const test = (name, fn) => {
@@ -55,11 +55,52 @@ test('瘦包一封就是一份带校验和的状态', () => {
   assert.equal(created.changed, true);
   assert.equal(created.state.generation, 1);
   const parsed = JSON.parse(raw(scope));
-  assert.equal(parsed.format, 'dsh-lite-memory/state@2');
+  assert.equal(parsed.format, 'dsh-lite-memory/state@3');
   assert.match(parsed.checksum, /^sha256:[a-f0-9]{64}$/);
   assert.equal(parsed.payload.generation, 1);
   assert.ok(fs.existsSync(path.join(scope.dir, 'state.prev.json')) === false);
   assert.equal(fs.existsSync(path.join(scope.dir, '.lock')), false);
+});
+
+test('2 版状态可读，下一次写入升级为 3 版并保留记录', () => {
+  const scope = fresh('migrate-v2');
+  const payload = emptyState(scope);
+  addNote('旧库里的规则', '原文')(payload);
+  payload.schemaVersion = 2;
+  delete payload.experimental;
+  const checksum = `sha256:${createHash('sha256').update(JSON.stringify(payload)).digest('hex')}`;
+  fs.mkdirSync(scope.dir, { recursive: true });
+  fs.writeFileSync(stateFile(scope), `${JSON.stringify({ format: 'dsh-lite-memory/state@2', checksum, payload })}\n`);
+  const loaded = load(scope);
+  assert.equal(loaded.state.schemaVersion, 3);
+  assert.equal(loaded.state.entries[0].current.title, '旧库里的规则');
+  assert.equal(evolutionOf(loaded.state).enabled, false);
+  transact(scope, { expected: { generation: loaded.state.generation } }, (draft) => {
+    draft.entries[0].current.body = '升级后的正文';
+    return { changed: true };
+  });
+  const parsed = JSON.parse(raw(scope));
+  assert.equal(parsed.format, 'dsh-lite-memory/state@3');
+  assert.equal(parsed.payload.entries[0].current.body, '升级后的正文');
+});
+
+test('D04 旧程序拒绝写新格式，不抹掉实验标记', () => {
+  const scope = fresh('d04-format');
+  transact(scope, { expectCreate: true }, (draft) => {
+    state.applyEvolution(draft, true);
+    return { changed: true };
+  });
+  const before = raw(scope);
+  assert.equal(JSON.parse(before).format, 'dsh-lite-memory/state@3');
+  // 旧版只认 state@2，读到新格式会拒绝而不是当空库覆盖；实验标记因此留在盘上。
+  const oldReader = (text) => {
+    const data = JSON.parse(text);
+    if (data.format !== 'dsh-lite-memory/state@2') throw new StateError('invalid', '旧版不认这个格式');
+    return data.payload;
+  };
+  assert.throws(() => oldReader(before), (error) => error instanceof StateError && error.code === 'invalid');
+  assert.equal(raw(scope), before);
+  assert.equal(load(scope).state.experimental.projectEvolution.enabled, true);
 });
 
 test('D01 发布点失败：状态一个字节没动，也没有留下锁', () => {
@@ -126,7 +167,7 @@ test('D08 坏 JSON 与不认识的版本都不当空库覆盖', () => {
   payload.schemaVersion = 99;
   const checksum = `sha256:${createHash('sha256').update(JSON.stringify(payload)).digest('hex')}`;
   fs.writeFileSync(stateFile(unknown), `${JSON.stringify({ format: 'dsh-lite-memory/state@2', checksum, payload })}\n`);
-  assert.throws(() => load(unknown), (error) => error instanceof StateError && error.code === 'invalid');
+  assert.throws(() => load(unknown), (error) => error instanceof StateError && error.code === 'corrupt');
 });
 
 test('D08 重入锁：读—改—写同一个窗口里连续调用不死锁', () => {
@@ -336,7 +377,7 @@ test('validateState 拦坏结构，不拦合法的一条', () => {
   const scope = fresh('validate');
   const good = emptyState(scope);
   addNote('一条', '正文')(good);
-  assert.equal(validateState(good).schemaVersion, 2);
+  assert.equal(validateState(good).schemaVersion, 3);
   const bad = JSON.parse(JSON.stringify(good));
   bad.entries[0].id = 'not-an-id';
   assert.throws(() => validateState(bad), (error) => error instanceof StateError);

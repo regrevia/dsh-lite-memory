@@ -403,6 +403,7 @@ export function toModelView(record, purpose, extra = {}) {
   if (purpose === 'search') {
     const view = pick(record, ['id', 'title', 'summary', 'when', 'revision']);
     view.scope = scope;
+    if (record.origin === 'project_evolution') view.origin = 'project_evolution';
     if (extra.status && extra.status !== 'ok') view.state = extra.status;
     return view;
   }

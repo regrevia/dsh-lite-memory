@@ -262,7 +262,7 @@ window.__ModuleLoader__.load({
       return h('div', { 'data-tool': props.toolName, style: ROW }, h('span', { style: DOT }, '·'), h('span', { style: LABEL }, label), button);
     };
 
-    /** 撤销目标：只认真的写入了、带当前版本、且知道工作目录的那一次保存。 */
+    /** 撤销只认真正写入且版本一致的那次保存。 */
     const undoRefOf = (meta, cwd) => (meta
       && meta.kind === 'memory-save'
       && meta.changed === true
@@ -382,7 +382,7 @@ window.__ModuleLoader__.load({
         'aria-label': `查看记忆 ${item.title || item.id}`,
         title: item.title || item.id,
         style: ITEM, // ui-copy-ignore
-      }, item.title || item.id)) : [];
+      }, `${item.title || item.id}${item.origin === 'project_evolution' ? ' · 实验' : ''}`)) : [];
       const detail = shown && shown.ref && items.some((item) => item.id === shown.id && item.revision === shown.ref.revision)
         ? h('div', { style: BODY },
           shown.loading ? '读取中' : null,
@@ -449,6 +449,75 @@ window.__ModuleLoader__.load({
       );
     };
 
+    const EVO_BUTTON = { flex: '0 0 auto', border: '1px solid currentColor', background: 'transparent', color: 'inherit', borderRadius: '999px', padding: '0 8px', fontSize: '12px', lineHeight: '18px', opacity: 0.7, cursor: 'pointer', whiteSpace: 'nowrap' };
+    const EVO_WRAP = { position: 'relative', display: 'flex', alignItems: 'center' };
+    const EVO_PANEL = {
+      position: 'absolute', right: 0, top: 'calc(100% + 6px)', zIndex: 30, width: '220px',
+      padding: '8px', border: '1px solid currentColor', borderRadius: '8px',
+      background: 'Canvas', color: 'CanvasText', boxShadow: '0 4px 18px rgba(0, 0, 0, 0.22)',
+      display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '12px', lineHeight: '1.6',
+    };
+    const EVO_MUTED = { opacity: 0.65 };
+    const EVO_ACTION = { ...KEEP_ON, alignSelf: 'flex-start' };
+
+    /** 会话头的项目开关，状态都问服务端。 */
+    const ProjectEvolution = (props) => {
+      const sessionId = sessionKeyOf(props);
+      const [open, setOpen] = React.useState(false);
+      const [status, setStatus] = React.useState(null);
+      const [busy, setBusy] = React.useState(false);
+      const [note, setNote] = React.useState('');
+      const alive = React.useRef(true);
+      React.useEffect(() => () => { alive.current = false; }, []);
+      const load = () => {
+        if (!sessionId) return;
+        setBusy(true);
+        setNote('');
+        post('/lite-memory/evolution', { sessionId }).then((result) => {
+          if (!alive.current) return;
+          setBusy(false);
+          if (result.ok && result.body) setStatus(result.body);
+          else setNote(failure(result, '读不到这个项目的设置'));
+        });
+      };
+      React.useEffect(() => { load(); }, [sessionId]);
+      if (!sessionId) return null;
+      const enabled = status ? status.enabled === true : false;
+      const active = status && status.counts && Number.isInteger(status.counts.active) ? status.counts.active : 0;
+      const toggle = () => {
+        if (busy || !status) return;
+        setBusy(true);
+        setNote('');
+        post('/lite-memory/evolution', { sessionId, enabled: !enabled, operationId: newOperationId() }).then((result) => {
+          if (!alive.current) return;
+          setBusy(false);
+          if (result.ok && result.body) setStatus(result.body);
+          else setNote(failure(result, '开关没有改动'));
+        });
+      };
+      return h('div', { style: EVO_WRAP },
+        h('button', {
+          type: 'button',
+          onClick: () => { setOpen(!open); },
+          'aria-expanded': open,
+          'aria-pressed': enabled,
+          title: '项目自进化',
+          style: { ...EVO_BUTTON, opacity: enabled ? 0.9 : 0.6 },
+        }, enabled ? '自进化 · 开' : '自进化'),
+        open ? h('div', { style: EVO_PANEL },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+            h('span', null, '项目自进化'),
+            h('span', { style: EVO_MUTED }, '实验'),
+          ),
+          h('div', null, status ? (enabled ? '已开启' : '未开启') : (busy ? '读取中…' : '未读取')),
+          enabled ? h('div', { style: EVO_MUTED }, active > 0 ? `${active} 条规则` : '还没有生效的规则') : null,
+          h('div', { style: EVO_MUTED }, enabled ? '关闭后停止学习，结果保留。' : '开启后整理修正、增加用量。'),
+          h('button', { type: 'button', onClick: toggle, disabled: busy || !status, style: busy || !status ? KEEP_OFF : EVO_ACTION }, busy ? '处理中…' : (enabled ? '关闭' : '开启')),
+          note ? h('div', { style: EVO_MUTED }, note) : null,
+        ) : null,
+      );
+    };
+
     /** 输出末尾那几条：只算本轮的。 */
     const TurnMemory = (props) => {
       const sessionId = sessionKeyOf(props);
@@ -488,6 +557,11 @@ window.__ModuleLoader__.load({
         }
         ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({ name: 'tool.call.toolview', key: 'memory_suggest' }, SuggestRow));
         ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({ name: 'tool.call.toolview', key: 'memory_save' }, SavedRow));
+        ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
+          name: 'conversation.session.header.utilities',
+          id: 'lite-memory:project-evolution',
+          order: 30, // ui-copy-ignore
+        }, ProjectEvolution));
         ctx.slots.inject('conversation.chat.turnTail', () => {
           try {
             return ctx.slots.register({
