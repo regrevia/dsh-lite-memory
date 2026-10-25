@@ -16,7 +16,7 @@ Lightweight memory for the DeepSeek Harness. Nothing in the system prompt, nothi
 | 场景 | 行为 |
 | --- | --- |
 | **L0** 你明确要求「记住这个」 | 立即写盘，一条确认行 |
-| **L1** 它发现有跨会话价值的经验 | 一行灰字 `可记「X」` + 一个 `保留` 按钮；不点就永远不写 |
+| **L1** 它发现有跨会话价值的经验 | 一行灰字 `可记「X」` + 一个 `保留` 按钮；不写问句、不用你打字，不点就永远不写，48 小时内不重复 |
 | **L2** 常识、一次性参数、凭据的值 | 永不写入 |
 
 触发词：`记住`、`记一下`、`上次`、`规范`、`约定`、`路径`、`凭据怎么取`。
@@ -24,7 +24,7 @@ Lightweight memory for the DeepSeek Harness. Nothing in the system prompt, nothi
 | Case | Behaviour |
 | --- | --- |
 | **L0** you ask it to remember | written immediately, one confirmation line |
-| **L1** it spots something worth keeping | one muted line `可记「X」` with a single `保留` button — nothing is written unless you click |
+| **L1** it spots something worth keeping | one muted line `可记「X」` with a single `保留` button — never a question, no typing, nothing written unless you click, at most once per two days |
 | **L2** common sense, one-off parameters, credential values | never written |
 
 ## 点一下就存 / One click, no turn

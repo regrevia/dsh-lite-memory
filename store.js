@@ -13,7 +13,7 @@ export const LIMITS = {
   totalBytes: 512 * 1024,
   titleChars: 40,
   summaryChars: 60,
-  suggestionWindowMs: 24 * 60 * 60 * 1000,
+  suggestionWindowMs: 48 * 60 * 60 * 1000,
 };
 
 /** Strings that mean "this is a credential", never a memory. */
@@ -220,14 +220,14 @@ export function forget(scope, id) {
   return record;
 }
 
-/** Why a suggestion is refused: one per day per project, and never for a saved topic. */
+/** Why a suggestion is refused: one per two days per project, and never for a saved topic. */
 export function suggestionGate(scope, title) {
   const index = loadIndex(scope);
   const text = normalizeText(title, LIMITS.titleChars);
   if (index.entries.some((item) => item.title === text)) return { ok: false, reason: '这条已经存过' };
   const now = Date.now();
   const recent = index.suggestions.find((item) => now - Date.parse(item.at) < LIMITS.suggestionWindowMs);
-  if (recent) return { ok: false, reason: `今天已经建议过「${recent.title}」` };
+  if (recent) return { ok: false, reason: `48 小时内已建议过「${recent.title}」` };
   return { ok: true };
 }
 
