@@ -80,6 +80,8 @@ assert.equal(saveParams.mode.enum.includes('replace_current'), true);
 assert.equal(JSON.stringify(saveParams.applicability.enum), JSON.stringify(['all_in_scope', 'conditional', 'unresolved']));
 
 assert.deepEqual(saveParams.resolution.enum, ['distinct']);
+/** 一次检索最多回 4 条：列表是给下一步取正文用的，不是索引。 */
+assert.equal(defs.get('memory_search').parameters.properties.limit.maximum, 4);
 assert.equal(saveParams.id.type, 'string');
 assert.deepEqual(saveParams.scope.enum, ['project', 'global']);
 assert.equal(defs.get('memory_suggest').parameters.properties.scope, undefined);

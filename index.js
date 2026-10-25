@@ -257,7 +257,7 @@ const SEARCH_PARAMS = {
   type: 'object',
   properties: {
     query: { type: 'string', description: '要查的主题；用用户原话里的词，长句也行' },
-    limit: { type: 'integer', minimum: 1, maximum: 6, description: '最多返回几条，默认 4' },
+    limit: { type: 'integer', minimum: 1, maximum: 4, description: '最多返回几条，默认 3' },
   },
   required: ['query'],
   additionalProperties: false,
@@ -293,32 +293,9 @@ function scopeLabel(value) {
 
 /** 自动提示只在用户这句话跟已有记忆真有关时出现；整条索引不常驻。 */
 const HINT_QUERY_CHARS = 400;
+const HINT_TTL_MS = 20 * 60 * 1000;
+/** 这些是宿主自己合成的「用户消息」，不是用户说的话，不能拿来当查询。 */
 const hintState = new Map();
-
-function textOfMessage(message) {
-  const content = message?.content;
-  if (typeof content === 'string') return content.trim();
-  if (!Array.isArray(content)) return '';
-  let text = '';
-  for (const part of content) {
-    if (!part || typeof part !== 'object') continue;
-    if (part.type === 'tool-result' || part.type === 'tool-call') return '';
-    if (part.type !== 'text' || typeof part.text !== 'string') continue;
-    text += `${part.text}\n`;
-  }
-  return text.trim();
-}
-
-function newestUserText(messages) {
-  if (!Array.isArray(messages)) return '';
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i];
-    if (!message || message.role !== 'user') continue;
-    const text = textOfMessage(message);
-    if (text) return text;
-  }
-  return '';
-}
 
 function renderHint(items) {
   const rows = items.slice(0, 3).map((item) => `- 「${item.title}」${item.scope === 'global' ? ' [全局]' : ''} · ${item.id}`);
@@ -465,7 +442,7 @@ export function apply(ctx) {
     execute: async (args, execution) => {
       const scope = scopeOf(cwdOf(execution));
       const context = view.trustedContext(scope, {});
-      const hits = search(scope, args.query, args.limit ?? 4, { context });
+      const hits = search(scope, args.query, args.limit ?? 3, { context });
       recordCitations(scope, sessionIdOf(execution), hits);
       const shown = hits.map((item) => view.toModelView(item, 'search'));
       const rendered = renderIndex(shown);
@@ -615,6 +592,7 @@ export function apply(ctx) {
           const agent = typeof agents?.currentInitiator === 'function' ? agents.currentInitiator() : undefined;
           const state = hintState.get(String(agent?.id ?? ''));
           if (!state || !state.items.length) return '';
+          if (Date.now() - state.at > HINT_TTL_MS) return '';
           return renderHint(state.items);
         } catch {
           return '';
@@ -627,7 +605,7 @@ export function apply(ctx) {
     const decision = await next();
     try {
       const sessionId = String(payload?.agent?.id ?? '');
-      const text = newestUserText(payload?.messages).slice(0, HINT_QUERY_CHARS);
+      const text = view.newestUserQuery(payload?.messages).slice(0, HINT_QUERY_CHARS);
       if (!sessionId || !text) return decision;
       const previous = hintState.get(sessionId);
       if (previous && previous.text === text) return decision;
