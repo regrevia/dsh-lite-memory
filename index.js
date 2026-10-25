@@ -2,6 +2,7 @@ import {
   scopeOf,
   globalScope,
   upsert,
+  peek,
   search,
   readEntry,
   forget,
@@ -235,6 +236,40 @@ function scopeLabel(value) {
   return value.scope === 'global' ? ' [全局]' : '';
 }
 
+/** 自动提示只在用户这句话跟已有记忆真有关时出现；整条索引不常驻。 */
+const HINT_QUERY_CHARS = 400;
+const hintState = new Map();
+
+function textOfMessage(message) {
+  const content = message?.content;
+  if (typeof content === 'string') return content.trim();
+  if (!Array.isArray(content)) return '';
+  let text = '';
+  for (const part of content) {
+    if (!part || typeof part !== 'object') continue;
+    if (part.type === 'tool-result' || part.type === 'tool-call') return '';
+    if (part.type !== 'text' || typeof part.text !== 'string') continue;
+    text += `${part.text}\n`;
+  }
+  return text.trim();
+}
+
+function newestUserText(messages) {
+  if (!Array.isArray(messages)) return '';
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (!message || message.role !== 'user') continue;
+    const text = textOfMessage(message);
+    if (text) return text;
+  }
+  return '';
+}
+
+function renderHint(items) {
+  const rows = items.slice(0, 3).map((item) => `- 「${item.title}」${item.scope === 'global' ? ' [全局]' : ''} · ${item.id}`);
+  return `已有记忆可能相关（需要细节用 memory_read 取正文，别凭标题猜）：\n${rows.join('\n')}`;
+}
+
 export function apply(ctx) {
   const tools = ctx.tools;
 
@@ -444,6 +479,59 @@ export function apply(ctx) {
   };
   if (typeof ctx.inject === 'function') ctx.inject(['webServer'], (scope) => mountRoute(scope));
   else mountRoute(ctx);
+
+  /**
+   * 命中才提示：用户消息进来时只查一次（只读，不动 hits），命中就把标题挂到本步的
+   * 运行时上下文里；模型要看正文仍然自己调 memory_read。没命中时这段是空字符串。
+   */
+  const getService = (name) => (typeof ctx.get === 'function' ? ctx.get(name) : undefined);
+  const prompt = getService('systemPrompt');
+  if (prompt && typeof prompt.context === 'function') {
+    ctx.effect(() => prompt.context({
+      name: 'lite-memory:hint',
+      order: 30,
+      interpolate: false,
+      text: () => {
+        try {
+          if (hintState.size === 0) return '';
+          const agents = getService('agents');
+          const agent = typeof agents?.currentInitiator === 'function' ? agents.currentInitiator() : undefined;
+          console.log(`[lite-memory] hint render ${agent?.id ? 'ok' : 'no-agent'}`);
+          const state = hintState.get(String(agent?.id ?? ''));
+          if (!state || !state.items.length) return '';
+          return renderHint(state.items);
+        } catch {
+          return '';
+        }
+      },
+    }), 'lite-memory: hint context');
+  }
+
+  if (typeof ctx.on === 'function') ctx.on('agent/pre-step', async (payload, next) => {
+    const decision = await next();
+    try {
+      const sessionId = String(payload?.agent?.id ?? '');
+      const text = newestUserText(payload?.messages).slice(0, HINT_QUERY_CHARS);
+      if (!sessionId || !text) return decision;
+      const previous = hintState.get(sessionId);
+      if (previous && previous.text === text) return decision;
+      const items = peek(scopeOf(cwdOf({ agent: payload.agent })), text, 3);
+      if (items.length === 0) {
+        hintState.delete(sessionId);
+      } else {
+        hintState.set(sessionId, { text, items, at: Date.now() });
+        console.log(`[lite-memory] hint ${items.map((item) => item.id).join(',')}`);
+      }
+    } catch {
+      /* 提示只是锦上添花，坏了就当没命中 */
+    }
+    return decision;
+  });
+
+  if (typeof ctx.on === 'function') ctx.on('agent/disposed', (payload) => {
+    const sessionId = String(payload?.agent?.id ?? '');
+    if (sessionId) hintState.delete(sessionId);
+  });
 
   /** Read-only summary for the Client row: how big the store already is. */
   ctx.effect(() => {

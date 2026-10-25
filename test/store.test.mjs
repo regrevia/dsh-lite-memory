@@ -432,5 +432,19 @@ test('title is identity: separator and pasted condition are cut before saving', 
   assert.equal(whole.title, '发布顺序');
 });
 
+test('peek hints on real title overlap and never writes hits', () => {
+  const scope = fresh('peek');
+  const saved = upsert(scope, { title: 'Chrome 弹钥匙串窗口', summary: '临时 profile 起 Chrome 会弹钥匙串窗口' });
+  const before = loadIndex(scope).entries.find((item) => item.id === saved.record.id);
+  const hits = store.peek(scope, '又弹钥匙串窗口了，怎么弄', 3);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].id, saved.record.id);
+  assert.equal(hits[0].scope, 'project');
+  const after = loadIndex(scope).entries.find((item) => item.id === saved.record.id);
+  assert.equal(after.hits, before.hits);
+  assert.equal(after.lastUsed, before.lastUsed);
+  assert.deepEqual(store.peek(scope, '把这个按钮的圆角改小一点', 3), []);
+});
+
 for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
 console.log(`store.test.mjs: ${passed} passed`);

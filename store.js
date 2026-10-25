@@ -617,6 +617,41 @@ export function search(scope, query, limit = 4) {
   });
 }
 
+/**
+ * 只读命中：给自动提示用。不改 hits / lastUsed，不落盘。
+ * 标题（含旧标题）必须真跟查询有交集，否则长句里零星重合也会冒出提示。
+ */
+export function peek(scope, query, limit = 3) {
+  const grams = bigrams(query);
+  if (grams.size === 0) return [];
+  const rows = [];
+  for (const source of [scope, globalScope()]) {
+    let index;
+    try {
+      index = loadIndex(source);
+    } catch {
+      continue;
+    }
+    for (const item of index.entries) {
+      if (!item || !item.title) continue;
+      const pool = bigrams(`${item.title} ${(item.aliases || []).join(' ')}`);
+      let shared = 0;
+      for (const gram of grams) if (pool.has(gram)) shared += 1;
+      if (shared === 0) continue;
+      const score = scoreQuery(item, grams, query);
+      if (score < 6) continue;
+      rows.push({ item, source, score });
+    }
+  }
+  rows.sort((a, b) => b.score - a.score);
+  return rows.slice(0, limit).map(({ item, source }) => ({
+    id: item.id,
+    title: item.title,
+    summary: item.summary || '',
+    scope: source.key === 'global' ? 'global' : 'project',
+  }));
+}
+
 export function readEntry(scope, id) {
   return withLocks([scope, globalScope()], () => {
     for (const source of [scope, globalScope()]) {

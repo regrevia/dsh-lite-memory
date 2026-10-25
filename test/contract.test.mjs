@@ -14,10 +14,19 @@ let route = null;
 
 const webServer = { getOrigin: () => ORIGIN, register: (entry) => { route = entry; return () => {}; } };
 const effect = (fn) => { const dispose = fn(); return typeof dispose === 'function' ? dispose : () => {}; };
+let currentAgent = null;
+const subscriptions = new Map();
+const promptContexts = [];
 const ctx = {
   tools: { register: (def) => { defs.set(def.name, def); return () => {}; } },
   effect,
   inject: (deps, callback) => { if (deps.includes('webServer')) callback({ webServer, effect }); return () => {}; },
+  get: (name) => {
+    if (name === 'systemPrompt') return { context: (entry) => { promptContexts.push(entry); return () => {}; } };
+    if (name === 'agents') return { currentInitiator: () => currentAgent };
+    return undefined;
+  },
+  on: (event, handler) => { subscriptions.set(event, handler); return () => {}; },
 };
 apply(ctx);
 
@@ -204,5 +213,24 @@ assert.equal((await call('/lite-memory/citations', {}, { origin: 'http://evil.ex
 assert.notEqual((await call('/lite-memory/citations', { sessionId: 'session-contract' }, { origin: 'dsh-app://app' })).status, 403);
 assert.notEqual((await call('/lite-memory/keep', { candidateId: 'sug_000000', cwd }, { origin: 'dsh-app://app' })).status, 403);
 assert.equal((await call('/lite-memory/citations', {}, { method: 'GET' })).status, 405);
+
+// ── 自动提示：只在这句话跟已有记忆有关时出现，且不改命中计数 ─────────────────
+const hinted = await exec('memory_save', { title: 'Chrome 弹钥匙串窗口要带 mock keychain', summary: '临时 profile 起 Chrome 会弹钥匙串窗口', when: '用 Chrome 抓页面时' });
+currentAgent = { id: 'session-contract', cwd };
+const preStep = subscriptions.get('agent/pre-step');
+assert.equal(typeof preStep, 'function');
+const pass = async () => ({ kind: 'enter', messages: [] });
+const hitsBefore = store.loadIndex(store.scopeOf(cwd)).entries.find((item) => item.id === hinted.id).hits;
+await preStep({ agent: currentAgent, messages: [{ role: 'user', content: [{ type: 'text', text: '又弹钥匙串窗口了，怎么弄' }] }], turn: 2, step: 0 }, pass);
+assert.equal(promptContexts.length, 1);
+assert.equal(promptContexts[0].name, 'lite-memory:hint');
+const hintText = promptContexts[0].text();
+assert.match(hintText, new RegExp(hinted.id));
+assert.match(hintText, /需要细节用 memory_read/);
+const hitsAfter = store.loadIndex(store.scopeOf(cwd)).entries.find((item) => item.id === hinted.id).hits;
+assert.equal(hitsAfter, hitsBefore);
+await preStep({ agent: currentAgent, messages: [{ role: 'user', content: [{ type: 'text', text: '把这个按钮的圆角改小一点' }] }], turn: 3, step: 0 }, pass);
+assert.equal(promptContexts[0].text(), '');
+assert.equal(subscriptions.has('agent/disposed'), true);
 
 console.log('contract.test.mjs: all passed');
