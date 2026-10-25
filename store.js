@@ -140,7 +140,12 @@ export function loadIndex(scope, options = {}) {
     lastSuggestedAt: loaded.state.lastSuggestedAt || '',
     suppressions: JSON.parse(JSON.stringify(loaded.state.suppressions || [])),
   };
-  index.__meta = { exists: loaded.exists, generation: loaded.state.generation, epoch: loaded.state.epoch };
+  index.__meta = {
+    exists: loaded.exists,
+    generation: loaded.state.generation,
+    epoch: loaded.state.epoch,
+    storeId: loaded.state.storeId || '',
+  };
   return index;
 }
 
@@ -441,16 +446,43 @@ export function similarity(a, b) {
   return shared / (left.size + right.size - shared);
 }
 
+/** 身份比较只认给定的语义字段：没给的字段不参与，不拿默认值把两条规则并成一条。 */
+const hasField = (draft, key) => (draft && draft.has && typeof draft.has === 'object'
+  ? draft.has[key] === true
+  : Boolean(draft) && draft[key] !== undefined);
+
+const selectionKeyOf = (selection) => {
+  if (!selection) return '';
+  const items = Array.isArray(selection.items) ? [...selection.items].map(String).sort() : [];
+  return JSON.stringify([selection.mode || '', selection.artifactKey || '', items]);
+};
+
+const triggerKeyOf = (row) => JSON.stringify([...(row.triggers || [])].map(String).sort());
+
+const linkKeyOf = (row) => JSON.stringify([...(row.links || [])]
+  .map((link) => [String(link.type || 'related'), String(link.id)])
+  .sort((a, b) => a[1].localeCompare(b[1])));
+
+/** 适用范围仍是推断出来的值也算数：显式写 conditional 与靠条件推出来的是同一档。 */
+function applicabilityOf(row) {
+  return view.validateApplicability(row.applicability, row.conditions || [], row.selection || null, row.when || '');
+}
+
 /**
- * 身份只由「标题 / 用过的旧标题 + 前置条件」决定，相似度不授权覆盖。
- * 精确同名同条件才算同一条；相近只作为候选返回，让调用方决定。
+ * 身份 = 标题/旧标题 + 前置条件 + 这次真正给出的适用范围字段。
+ * 不同机器、不同运行时的规则即使同名也是两条；没给的字段保持兼容，不误判成另一条。
  */
 export function resolveTarget(entries, draft, whenArg) {
-  const title = typeof draft === 'string' ? normalizeText(draft, LIMITS.titleChars) : draft.title;
-  const when = typeof draft === 'string' ? normalizeText(whenArg, LIMITS.whenChars) : draft.when || '';
-  const plain = normalizeText(title, LIMITS.titleChars).toLowerCase();
+  const source = typeof draft === 'string' ? { title: draft, when: whenArg } : draft || {};
+  const title = normalizeText(source.title, LIMITS.titleChars);
+  const when = normalizeText(source.when, LIMITS.whenChars);
+  const plain = title.toLowerCase();
   for (const item of entries) {
     if ((item.when || '') !== when) continue;
+    if (hasField(source, 'conditions') && view.conditionsKey(item.conditions) !== view.conditionsKey(source.conditions)) continue;
+    if (hasField(source, 'selection') && selectionKeyOf(item.selection) !== selectionKeyOf(source.selection)) continue;
+    if (hasField(source, 'triggers') && triggerKeyOf(item) !== triggerKeyOf(source)) continue;
+    if (hasField(source, 'applicability') && applicabilityOf(item) !== applicabilityOf(source)) continue;
     const names = [item.title, ...(item.aliases || [])].map((name) => String(name || '').toLowerCase());
     if (names.includes(plain)) return { target: item, score: 1 };
   }
@@ -472,6 +504,20 @@ export function similarEntries(entries, title, summary, limit = 2) {
   }
   rows.sort((a, b) => b.score - a.score);
   return rows.slice(0, limit);
+}
+
+/** 候选更新目标：标题相近还不够，应用范围和条件也必须一致，否则保留会改错条目。 */
+export function similarTarget(entries, draft) {
+  const rows = similarEntries(entries, draft.title, draft.summary, 2);
+  const compatible = rows.filter((row) => {
+    const item = entries.find((entry) => entry.id === row.id);
+    if (!item) return false;
+    if (hasField(draft, 'conditions') && view.conditionsKey(item.conditions) !== view.conditionsKey(draft.conditions)) return false;
+    if (hasField(draft, 'selection') && selectionKeyOf(item.selection) !== selectionKeyOf(draft.selection)) return false;
+    if (hasField(draft, 'applicability') && applicabilityOf(item) !== applicabilityOf(draft)) return false;
+    return true;
+  });
+  return compatible[0] || null;
 }
 
 /** 没有合并时，把最接近的那条报出来：看得到，才有可能纠正。 */
@@ -785,8 +831,8 @@ export function search(scope, query, limit = 4, options = {}) {
         }
       };
       collect(index.entries, false);
-      /** 归档不等于失声：真匹配上就返回，标成已归档，别让用户以为记忆丢了。 */
-      collect(index.archived, true);
+      /** 正常检索只看当前有效的；归档的旧记录只在明确要求病史时列出。 */
+      if (options.history === true) collect(index.archived, true);
     }
     /** 被项目层压过的全局条目不再作为检索结果出现；冲突/条件未知的仍保留，便于人工处理。 */
     const resolved = view.resolveTopics(layers.project, layers.global, options.context || {});
@@ -873,19 +919,63 @@ export function forget(scope, id, options = {}) {
   const mode = options.mode;
   if (mode !== 'archive' && mode !== 'purge') return { id, mode: 'needs_resolution' };
   return withLocks([scope, globalScope()], () => {
+    /** 屏障优先：上次彻底删除没做完时，先按原层 + 原 operationId 收尾，再决定这条在哪。 */
+    let replayed = null;
+    if (mode === 'purge') {
+      for (const source of [scope, globalScope()]) {
+        const pending = state.purgeIntent(source);
+        if (!pending) continue;
+        const result = state.purge(source, { resume: true });
+        removeBody(source, id);
+        if (pending.ids.includes(id)) {
+          replayed = {
+            id,
+            mode: 'purged',
+            operationId: result.operationId,
+            epoch: result.epoch,
+            generation: result.generation,
+            scopeKey: source.key,
+            replay: true,
+          };
+        }
+      }
+      if (replayed) return replayed;
+    }
     for (const source of [scope, globalScope()]) {
       const index = loadIndex(source);
-      const record = index.entries.find((item) => item.id === id);
+      const active = index.entries.find((item) => item.id === id);
+      const archived = active ? null : index.archived.find((item) => item.id === id);
+      const record = active || archived;
+      if (!record) continue;
       if (mode === 'archive') {
-        if (!record) continue;
+        if (archived) return { id: record.id, title: record.title, mode: 'archive', already: true, scopeKey: source.key };
         archiveEntry(source, index, record);
         saveIndex(source, index);
-        return { id: record.id, title: record.title, mode: 'archive' };
+        return { id: record.id, title: record.title, mode: 'archive', scopeKey: source.key };
       }
-      if (!record) continue;
+      if (archived) {
+        /** 归档条目也能彻底删除：state.purge 本来就按 id 清整份状态，只是以前没走到这里。 */
+        const result = state.purge(source, { ids: [id], operationId: options.operationId });
+        removeBody(source, id);
+        return {
+          id,
+          mode: 'purged',
+          operationId: result.operationId,
+          epoch: result.epoch,
+          generation: result.generation,
+          scopeKey: source.key,
+        };
+      }
       const result = state.purge(source, { ids: [id], operationId: options.operationId });
       removeBody(source, id);
-      return { id, mode: 'purged', operationId: result.operationId, epoch: result.epoch };
+      return {
+        id,
+        mode: 'purged',
+        operationId: result.operationId,
+        epoch: result.epoch,
+        generation: result.generation,
+        scopeKey: source.key,
+      };
     }
     return null;
   });
@@ -1040,11 +1130,14 @@ export function findAnywhere(id) {
   return null;
 }
 
-/** 按 id 在项目层与全局层里找位置，不靠文案猜作用域。 */
+/** 按 id 在项目层与全局层里找位置，不靠文案猜作用域；管理动作也要看得见已归档的条目。 */
 export function locate(scope, id) {
   for (const source of [scope, globalScope()]) {
-    const record = loadIndex(source).entries.find((item) => item.id === id);
-    if (record) return { scope: source, record };
+    const index = loadIndex(source);
+    const active = index.entries.find((item) => item.id === id);
+    if (active) return { scope: source, record: active, archived: false };
+    const archived = index.archived.find((item) => item.id === id);
+    if (archived) return { scope: source, record: archived, archived: true };
   }
   return null;
 }
@@ -1108,7 +1201,12 @@ export function suggestionGate(scope, source) {
     }
     const hit = resolveTarget(index.entries, { title, summary, when });
     if (hit) return { ok: false, reason: `已有「${hit.target.title}」，这次不重复建议` };
-    const near = similarEntries(index.entries, title, summary, 1)[0];
+    const wanted = { title, summary, when };
+    for (const key of ['triggers', 'conditions', 'selection', 'applicability']) {
+      if (source && source[key] !== undefined) wanted[key] = source[key];
+      if (source && source.has && typeof source.has === 'object') wanted.has = source.has;
+    }
+    const near = similarTarget(index.entries, wanted);
     if (near) return { ok: true, target: { id: near.id, title: near.title, revision: near.revision || 1 } };
     const last = Date.parse(index.lastSuggestedAt || '');
     if (Number.isFinite(last) && Date.now() - last < LIMITS.suggestionWindowMs) {
@@ -1144,6 +1242,13 @@ export function noteSuggestion(scope, source, decision = 'asked') {
         body: draft.body,
         kind: draft.kind,
         tags: draft.tags,
+        /** 语义字段整份带走：确认前后不能因为过了一道待确认区就换一套适用范围。 */
+        ...(draft.triggers !== undefined ? { triggers: draft.triggers } : {}),
+        ...(draft.conditions !== undefined ? { conditions: draft.conditions } : {}),
+        ...(draft.selection !== undefined ? { selection: draft.selection } : {}),
+        ...(draft.links !== undefined ? { links: draft.links } : {}),
+        ...(draft.applicability !== undefined ? { applicability: draft.applicability } : {}),
+        ...(draft.topicKey !== undefined ? { topicKey: draft.topicKey } : {}),
         /** 字段「有」和「空」不是一回事：确认时只写真正给过的字段。 */
         has: { ...draft.has },
         targetId: target ? target.id : '',
@@ -1206,6 +1311,12 @@ export function acceptCandidate(scope, key, operationId = '') {
       if (has.kind) source.kind = draft.kind;
       if (has.tags) source.tags = Array.isArray(draft.tags) ? draft.tags : [];
       if (has.body) source.body = draft.body;
+      if (has.triggers) source.triggers = draft.triggers;
+      if (has.conditions) source.conditions = draft.conditions;
+      if (has.selection) source.selection = draft.selection;
+      if (has.links) source.links = draft.links;
+      if (has.applicability) source.applicability = draft.applicability;
+      if (has.topicKey) source.topicKey = draft.topicKey;
     } else {
       if (draft.summary) source.summary = draft.summary;
       if (draft.when) source.when = draft.when;
@@ -1406,7 +1517,9 @@ function resolveCitation(row) {
   if (!scope) return null;
   let entry = null;
   try {
-    entry = (loadIndex(scope).entries || []).find((item) => item && item.id === row.id) || null;
+    const index = loadIndex(scope);
+    scope.cwd = index.cwd || '';
+    entry = (index.entries || []).find((item) => item && item.id === row.id) || null;
   } catch {
     return null;
   }
@@ -1448,7 +1561,11 @@ export function readCitationBody(sessionId, id) {
   } catch {
     return null;
   }
-  return { ...found.row, body: body.slice(0, LIMITS.entryBytes) };
+  return {
+    ...found.row,
+    scopeLabel: found.scope.key === 'global' ? '全局' : path.basename(found.scope.cwd || '') || found.scope.key,
+    body: body.slice(0, LIMITS.entryBytes),
+  };
 }
 
 /* ------------------------------------------------------------------ *
@@ -1512,6 +1629,7 @@ function locateInLayers(projectScope, id) {
   return null;
 }
 
+/** 完全重复的判据：内容、适用范围、结构化条件、只对某个产物成立的规则、关联都算。 */
 const visibleContent = (row) => JSON.stringify([
   row.title || '',
   row.summary || '',
@@ -1520,6 +1638,10 @@ const visibleContent = (row) => JSON.stringify([
   view.conditionsKey(row.conditions),
   row.applicability || 'all_in_scope',
   row.topicKey || '',
+  Array.isArray(row.tags) ? [...row.tags].map(String).sort() : [],
+  Array.isArray(row.triggers) ? [...row.triggers].map(String).sort() : [],
+  row.selection ? [row.selection.mode || '', row.selection.artifactKey || '', Array.isArray(row.selection.items) ? [...row.selection.items].map(String).sort() : []] : null,
+  Array.isArray(row.links) ? row.links.map((link) => [String(link.type || 'related'), String(link.id)]).sort((a, b) => a[1].localeCompare(b[1])) : [],
   row.body || '',
 ]);
 
@@ -1625,20 +1747,65 @@ export function visibleRules(projectScope, context = {}) {
 
 /* --------------------------- 跨层搬移 --------------------------- */
 
-const moveTargetOf = (projectScope, intent) => (intent.target.scopeKey === globalScope().key ? globalScope() : projectScope);
-const moveSourceOf = (projectScope, intent) => (intent.source.scopeKey === globalScope().key ? globalScope() : projectScope);
+/** 搬移两侧都从协调文件里的身份还原：不拿调用方项目顶替另一层的 scope。 */
+function moveProjectOf(intent) {
+  const side = intent.source.scopeKey === globalScope().key ? intent.target : intent.source;
+  return {
+    key: side.scopeKey,
+    dir: path.join(state.memoryRoot(), side.scopeKey),
+    cwd: typeof side.cwd === 'string' ? side.cwd : '',
+    requestedCwd: typeof side.cwd === 'string' ? side.cwd : '',
+    rootSource: 'move-intent',
+    confirmed: true,
+  };
+}
+
+const moveTargetOf = (intent) => (intent.target.scopeKey === globalScope().key ? globalScope() : moveProjectOf(intent));
+const moveSourceOf = (intent) => (intent.source.scopeKey === globalScope().key ? globalScope() : moveProjectOf(intent));
+
+/** A 项目发起的搬移只能在 A 项目里续跑：换项目续跑会把它解释成另一层，必须先挡住。 */
+function assertMoveCaller(projectScope, intent) {
+  const owner = intent.source.scopeKey === globalScope().key ? intent.target : intent.source;
+  if (projectScope.key !== owner.scopeKey) {
+    throw new state.StateError('conflict', `这笔搬移属于另一个项目（${owner.scopeKey}），不能在当前项目续跑；回到原项目再调用 resumeMove`);
+  }
+  if (owner.cwd && projectScope.cwd) {
+    let left = owner.cwd;
+    let right = projectScope.cwd;
+    try {
+      left = fs.realpathSync(left);
+    } catch {
+      /* 旧目录可能已不在，按原样比较 */
+    }
+    try {
+      right = fs.realpathSync(right);
+    } catch {
+      /* 同上 */
+    }
+    if (path.resolve(left) !== path.resolve(right)) {
+      throw new state.StateError('conflict', '这笔搬移属于另一个项目，不能在当前项目续跑；回到原项目再调用 resumeMove');
+    }
+  }
+}
 
 function entryOf(scope, id) {
   return state.load(scope, { allowMove: true, allowPurge: true }).state.entries.find((row) => row.id === id) || null;
+}
+
+function stageOf(scope) {
+  const loaded = state.load(scope, { allowMove: true, allowPurge: true });
+  return { state: loaded.state, exists: loaded.exists };
 }
 
 /** 目标库可能还不存在：不存在时不带 CAS 期望值；刚被别处写入就重读一次再试。 */
 function transactWithRetry(scope, base, work) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const loaded = state.load(scope, { allowMove: true, allowPurge: true });
+    const expectedEpoch = base.expectedEpoch || loaded.state.epoch;
     const options = loaded.exists
-      ? { ...base, expected: { generation: loaded.state.generation, epoch: loaded.state.epoch } }
-      : { ...base };
+      ? { ...base, expected: { generation: loaded.state.generation, epoch: expectedEpoch } }
+      : { ...base, expected: null };
+    delete options.expectedEpoch;
     try {
       return state.transact(scope, options, work);
     } catch (error) {
@@ -1651,10 +1818,13 @@ function transactWithRetry(scope, base, work) {
 }
 
 function commitTarget(scope, record, intent) {
+  const toEpoch = typeof intent.target.toEpoch === 'string' ? intent.target.toEpoch : '';
   transactWithRetry(scope, {
     operationId: `${intent.operationId}:in`,
     payloadDigest: `${intent.source.id}->${intent.target.newId}`,
     allowMove: true,
+    expectedEpoch: typeof intent.target.epoch === 'string' ? intent.target.epoch : '',
+    nextEpoch: toEpoch,
   }, (draft) => {
     if (draft.entries.some((row) => row.id === intent.target.newId)) return { changed: false };
     const next = JSON.parse(JSON.stringify(record));
@@ -1673,14 +1843,16 @@ function commitTarget(scope, record, intent) {
       receipt: { moveId: intent.operationId, entryId: intent.target.newId, from: intent.source.scopeKey },
     };
   });
-  state.sealPrev(scope);
 }
 
 function cleanSource(scope, intent) {
+  const toEpoch = typeof intent.source.toEpoch === 'string' ? intent.source.toEpoch : '';
   transactWithRetry(scope, {
     operationId: `${intent.operationId}:out`,
     payloadDigest: intent.source.id,
     allowMove: true,
+    expectedEpoch: typeof intent.source.epoch === 'string' ? intent.source.epoch : '',
+    nextEpoch: toEpoch,
   }, (draft) => {
     const before = draft.entries.length;
     draft.entries = draft.entries.filter((row) => row.id !== intent.source.id);
@@ -1693,34 +1865,76 @@ function cleanSource(scope, intent) {
       receipt: { moveId: intent.operationId, entryId: intent.source.id, to: intent.target.scopeKey },
     };
   });
-  state.sealPrev(scope);
-  removeBody(scope, intent.source.id);
+}
+
+/** 完成条件只看身份与 epoch：current、prev、回执、两侧 epoch 都到位才算搬完。 */
+function verifyMove(sourceScope, targetScope, intent) {
+  const problems = [];
+  const target = stageOf(targetScope);
+  const source = stageOf(sourceScope);
+  if (intent.target.toEpoch && target.state.epoch !== intent.target.toEpoch) problems.push('目标层 epoch 不是这一步该到的值');
+  if (intent.source.toEpoch && source.state.epoch !== intent.source.toEpoch) problems.push('源层 epoch 不是这一步该到的值');
+  if (!target.state.entries.some((row) => row.id === intent.target.newId && row.status === 'active')) problems.push('目标层没有这条记忆');
+  if (source.state.entries.some((row) => row.id === intent.source.id)) problems.push('源层还留着旧条目');
+  if (!target.state.receipts.some((row) => row.operationId === `${intent.operationId}:in`)) problems.push('目标层缺少写入回执');
+  if (!source.state.receipts.some((row) => row.operationId === `${intent.operationId}:out`)) problems.push('源层缺少删除回执');
+  const prev = (scope) => {
+    try {
+      return JSON.parse(fs.readFileSync(state.stateFiles(scope).prev, 'utf8')).payload;
+    } catch {
+      return null;
+    }
+  };
+  const targetPrev = prev(targetScope);
+  if (!targetPrev) problems.push('目标层缺少可恢复的上一步');
+  else if (!(targetPrev.entries || []).some((row) => row.id === intent.target.newId)) problems.push('目标层上一步里没有这条记忆');
+  const sourcePrev = prev(sourceScope);
+  if (!sourcePrev) problems.push('源层缺少可恢复的上一步');
+  else if ((sourcePrev.entries || []).some((row) => row.id === intent.source.id)) problems.push('源层上一步里还留着旧条目');
+  if (problems.length) {
+    throw new state.StateError('recover_failed', `移动恢复没通过校验（${problems.join('；')}）；协调文件保留：${intent.operationId}`);
+  }
 }
 
 function driveMove(projectScope, intent, options = {}) {
-  const sourceScope = moveSourceOf(projectScope, intent);
-  const targetScope = moveTargetOf(projectScope, intent);
-  let targetHas = entryOf(targetScope, intent.target.newId);
+  assertMoveCaller(projectScope, intent);
+  const sourceScope = moveSourceOf(intent);
+  const targetScope = moveTargetOf(intent);
+  const target = stageOf(targetScope);
+  const source = stageOf(sourceScope);
+  const targetHas = target.state.entries.find((row) => row.id === intent.target.newId) || null;
+  if (targetHas && intent.target.toEpoch && target.state.epoch !== intent.target.toEpoch) {
+    throw new state.StateError('conflict', `目标层在搬移期间被改过（epoch 变了），先人工确认；协调文件保留：${intent.operationId}`);
+  }
   if (!targetHas) {
-    const record = entryOf(sourceScope, intent.source.id);
+    if (target.exists && intent.target.epoch && target.state.epoch !== intent.target.epoch) {
+      throw new state.StateError('conflict', `目标层在搬移期间被改过（epoch 变了），先人工确认；协调文件保留：${intent.operationId}`);
+    }
+    const record = source.state.entries.find((row) => row.id === intent.source.id) || null;
     if (!record) throw new state.StateError('recover_failed', `移动中断且源与目标都找不到这条记忆；协调文件保留：${intent.operationId}`);
     commitTarget(targetScope, record, intent);
     if (options.stopAfter === 'target') {
       return { status: 'move_pending', stage: 'target_committed', operationId: intent.operationId, id: intent.target.newId };
     }
   }
-  if (entryOf(sourceScope, intent.source.id)) {
+  const sourceEntry = source.state.entries.find((row) => row.id === intent.source.id) || null;
+  if (sourceEntry) {
+    if (intent.source.epoch && source.state.epoch !== intent.source.epoch) {
+      throw new state.StateError('conflict', `源层在搬移期间被改过（epoch 变了），先人工确认；协调文件保留：${intent.operationId}`);
+    }
     cleanSource(sourceScope, intent);
+    removeBody(sourceScope, intent.source.id);
     if (options.stopAfter === 'source') {
       return { status: 'move_pending', stage: 'source_cleaned', operationId: intent.operationId, id: intent.target.newId };
     }
   }
-  if (!entryOf(targetScope, intent.target.newId)) {
-    throw new state.StateError('recover_failed', `移动恢复后目标层仍没有这条记忆；协调文件保留：${intent.operationId}`);
-  }
-  if (entryOf(sourceScope, intent.source.id)) {
-    throw new state.StateError('recover_failed', `移动恢复后源层仍留着旧条目；协调文件保留：${intent.operationId}`);
-  }
+  // 收尾也重放：先把两侧 prev 封成新状态，再逐项校验，最后才清协调文件。
+  state.sealPrev(targetScope);
+  state.sealPrev(sourceScope);
+  removeBody(sourceScope, intent.source.id);
+  state.cleanStateResidue(targetScope);
+  state.cleanStateResidue(sourceScope);
+  verifyMove(sourceScope, targetScope, intent);
   state.clearMoveIntent();
   return {
     status: 'moved',
@@ -1732,10 +1946,10 @@ function driveMove(projectScope, intent, options = {}) {
     revision: 1,
   };
 }
-
 /**
  * §13.6 五步：根锁 → 协调文件 → 目标写入（moveIn + target.prev）→ 源删除（moveOut + source.prev）→ 校验后清协调文件。
  * 每一步都可按 operationId 重放；协调文件在 = 屏障，两层读写都先收尾。
+ * 协调文件里带项目身份与两侧 epoch：换项目续跑会被拒绝，续跑也不再靠猜。
  */
 export function move(projectScope, id, options = {}) {
   return state.withRootLock(() => {
@@ -1773,10 +1987,28 @@ export function move(projectScope, id, options = {}) {
     }
     const operationId = typeof options.operationId === 'string' && options.operationId ? options.operationId : `mov_${crypto.randomBytes(6).toString('hex')}`;
     const newId = `mem_${crypto.createHash('sha256').update(`${operationId}:${id}`).digest('hex').slice(0, 12)}`;
+    /** 目标 epoch 由 operationId 决定：续跑时不需要再猜「现在应该是第几代」。 */
+    const epochOf = (side) => `e${crypto.createHash('sha256').update(`${operationId}:${side}`).digest('hex').slice(0, 20)}`;
+    const identity = (scope, index) => ({
+      scopeKey: scope.key,
+      cwd: typeof scope.cwd === 'string' ? scope.cwd : '',
+      storeId: (index.__meta && index.__meta.storeId) || '',
+    });
     const intent = state.writeMoveIntent({
       operationId,
-      source: { scopeKey: sourceScope.key, id, revision: record.revision || 1, epoch: sourceIndex.epoch },
-      target: { scopeKey: targetScope.key, newId, epoch: targetIndex.epoch },
+      source: {
+        ...identity(sourceScope, sourceIndex),
+        id,
+        revision: record.revision || 1,
+        epoch: sourceIndex.epoch,
+        toEpoch: epochOf('out'),
+      },
+      target: {
+        ...identity(targetScope, targetIndex),
+        newId,
+        epoch: targetIndex.epoch,
+        toEpoch: epochOf('in'),
+      },
       topicKey: view.topicSlot(record),
     });
     return driveMove(projectScope, intent, options);

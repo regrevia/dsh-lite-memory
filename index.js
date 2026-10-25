@@ -24,6 +24,7 @@ import {
   readCitationBody,
   LIMITS,
 } from './store.js';
+import path from 'node:path';
 import * as view from './view.js';
 import * as state from './state.js';
 
@@ -127,11 +128,36 @@ function keepHandler(webServer) {
       return sendJson(res, 400, { ok: false, reason: error instanceof Error ? error.message : '请求无法解析' });
     }
 
-    /** 正文按 id 现查当前层：引用是历史事实，正文必须给当前版本，不能吃缓存。 */
+    /**
+     * 正文按 id 现查当前层：引用是历史事实，正文必须给当前版本，不能吃缓存。
+     * 只认本会话引用过的那条，或本工作目录这一层的条目；否则任意 id 都能读到别人的正文。
+     */
     if (action === 'body') {
       const id = typeof body.id === 'string' ? body.id : '';
       if (!id) return sendJson(res, 400, { ok: false, reason: '缺少 id' });
-      const found = findAnywhere(id);
+      const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
+      const cwd = typeof body.cwd === 'string' ? body.cwd : '';
+      let found;
+      if (sessionId) {
+        try {
+          found = readCitationBody(sessionId, id);
+        } catch {
+          found = null;
+        }
+        /** 不在本会话引用里就当已消失：不给跨会话探正文，界面也只显示「已删除」。 */
+        if (!found) return sendJson(res, 200, { ok: true, status: 'gone', id });
+      } else if (cwd) {
+        const located = locate(scopeOf(cwd), id);
+        if (!located) return sendJson(res, 200, { ok: true, status: 'gone', id });
+        found = {
+          ...located.record,
+          scope: located.scope.key === 'global' ? 'global' : 'project',
+          scopeLabel: located.scope.key === 'global' ? '全局' : path.basename(located.scope.cwd || '') || located.scope.key,
+          body: located.record.body,
+        };
+      } else {
+        return sendJson(res, 400, { ok: false, reason: '缺少来源' });
+      }
       if (!found) return sendJson(res, 200, { ok: true, status: 'gone', id });
       return sendJson(res, 200, {
         ok: true,
@@ -181,9 +207,12 @@ function keepHandler(webServer) {
     if (action === 'undo') {
       if (!id) return sendJson(res, 400, { ok: false, reason: '缺少 id' });
       if (!locate(scope, id)) return sendJson(res, 404, { ok: false, reason: '没有这条记忆' });
+      /** 撤销是精确动作：必须带当时看到的版本；缺版本就不猜，免得撤掉别人后来的修改。 */
+      if (!Number.isInteger(body.revision) || body.revision < 1) {
+        return sendJson(res, 400, { ok: false, reason: '缺少版本' });
+      }
       try {
-        const expectedRevision = Number.isInteger(body.revision) ? body.revision : undefined;
-        const undone = undoChange(scope, id, { expectedRevision });
+        const undone = undoChange(scope, id, { expectedRevision: body.revision });
         if (!undone) return sendJson(res, 404, { ok: false, reason: '没有这条记忆' });
         return sendJson(res, 200, { ok: true, id: undone.id, mode: undone.mode });
       } catch (error) {
@@ -278,25 +307,34 @@ const SAVE_PARAMS = {
     },
     selection: {
       type: ['object', 'null'],
-      description: '只对某个产物成立的规则：complete 表示清单完整（必须给 artifactKey），examples 只是举例',
+      description: '只对某个产物成立的规则：complete 表示清单完整（必须给 artifactKey），examples 只是举例。null 表示清空',
       properties: {
         mode: { type: 'string', enum: view.SELECTION_MODES },
         artifactKey: { type: 'string' },
+        items: { type: 'array', items: { type: 'string' }, description: 'examples 模式下的举例清单' },
       },
       required: ['mode'],
       additionalProperties: false,
     },
     links: {
       type: 'array',
-      items: { type: 'string' },
-      description: '相关记忆的 id，最多 3 条，只表示同类相关；目标必须当前存在。给空数组就是清空',
+      description: '相关记忆，最多 3 条，只表示同类相关；目标必须当前存在。给空数组就是清空',
+      items: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: view.LINK_TYPES, description: '默认 related' },
+          id: { type: 'string', pattern: '^mem_[a-z0-9]{6,}$' },
+        },
+        required: ['id'],
+        additionalProperties: false,
+      },
     },
     triggers: {
       type: 'array',
       items: { type: 'string' },
       description: '自动召回用的固定触发词，最多 4 个；给空数组就是清空',
     },
-    topicKey: { type: 'string', description: '主题槽位，用来判断同一件事避免重复；不给就保持原值，null 表示清空' },
+    topicKey: { type: ['string', 'null'], description: '主题槽位，用来判断同一件事避免重复；不给就保持原值，null 表示清空' },
   },
   required: ['title', 'summary'],
   additionalProperties: false,
@@ -312,6 +350,7 @@ const SEARCH_PARAMS = {
   properties: {
     query: { type: 'string', description: '要查的主题；用用户原话里的词，长句也行' },
     limit: { type: 'integer', minimum: 1, maximum: 4, description: '最多返回几条，默认 3' },
+    history: { type: 'boolean', description: '连已归档的旧记录一起找；默认只看当前有效的，旧修正不混进正常检索' },
   },
   required: ['query'],
   additionalProperties: false,
@@ -405,6 +444,9 @@ export function apply(ctx, config) {
 
   const windowOf = (agent) => windows.get(agentKey(agent)) || null;
 
+  /** 预算按规范化 JSON 字节算：转义、中文、换行都算进模型真正收到的内容。 */
+  const jsonBytes = (value) => Buffer.byteLength(JSON.stringify(value));
+
   function affordable(win, bytes, bodies = 0) {
     if (!win) return true;
     if (win.reads >= view.REQUEST_LIMITS.reads) return false;
@@ -445,14 +487,20 @@ export function apply(ctx, config) {
     return fresh;
   }
 
+  /** 两层都算：任何一层换库、换代或清空，之前准备的卡片都要失效。 */
   function fingerprintOf(scope) {
     try {
-      const index = loadIndex(scope);
-      return `${index.scope}:${index.generation}:${index.epoch}`;
+      return [scope, globalScopeView()].map((source) => {
+        const index = loadIndex(source);
+        const meta = index.__meta || {};
+        return `${index.scope}:${meta.storeId || ''}:${index.generation}:${index.epoch}`;
+      }).join('|');
     } catch {
       return '';
     }
   }
+
+  const globalScopeView = () => globalScope();
 
   /** 纯内存：读两层当前投影，先判适用再排序，整卡装预算。 */
   function projectRecall(scope, query, context, win) {
@@ -745,25 +793,25 @@ export function apply(ctx, config) {
       if (win && !affordable(win, 0)) return { count: 0, chars: 0, text: '', status: 'budget_exhausted', refs: [] };
       const scope = scopeOf(cwdOf(execution));
       const context = view.trustedContext(scope, {});
-      const hits = search(scope, args.query, args.limit ?? 3, { context });
+      const hits = search(scope, args.query, args.limit ?? 3, { context, history: args.history === true });
       const shown = hits.map((item) => view.toModelView(item, 'search', { status: item.archived ? 'archived' : '' }));
-      let rendered = renderIndex(shown);
+      const valueOf = (kept) => {
+        const rendered = renderIndex(shown.slice(0, kept));
+        return { count: kept, chars: rendered.chars, text: rendered.text, refs: refsOf(hits.slice(0, kept)) };
+      };
       if (win) {
-        const header = `memory · 命中 ${shown.length} 条 · 引用 0 字\n`;
         let kept = shown.length;
-        while (kept > 0 && !affordable(win, Buffer.byteLength(header) + rendered.chars)) {
-          kept -= 1;
-          rendered = renderIndex(shown.slice(0, kept));
-        }
+        while (kept > 0 && !affordable(win, jsonBytes(valueOf(kept)))) kept -= 1;
         if (kept === 0) return { count: 0, chars: 0, text: '', status: 'budget_exhausted', refs: [] };
-        if (kept < shown.length) rendered = renderIndex(shown.slice(0, kept));
-        win.bytes += Buffer.byteLength(`memory · 命中 ${kept} 条 · 引用 ${rendered.chars} 字\n${rendered.text}`);
+        const value = valueOf(kept);
+        win.bytes += jsonBytes(value);
         win.reads += 1;
         recordCitations(scope, sessionIdOf(execution), hits.slice(0, kept));
-        return { count: kept, chars: rendered.chars, text: rendered.text, refs: refsOf(hits.slice(0, kept)) };
+        return value;
       }
+      const value = valueOf(shown.length);
       recordCitations(scope, sessionIdOf(execution), hits);
-      return { count: hits.length, chars: rendered.chars, text: rendered.text, refs: refsOf(hits) };
+      return value;
     },
   }), 'lite-memory: memory_search');
 
@@ -822,36 +870,20 @@ export function apply(ctx, config) {
           ? `- ${link.id} · 已失效`
           : `- 「${link.title}」${link.scope === 'global' ? ' [全局]' : ''} · ${link.id} · 第 ${link.revision} 版`));
         const text = rows.join('\n') || '(无)';
+        const value = { id: found.id, scope: found.scope, status: found.status, links: text };
         if (win) {
-          if (!affordable(win, Buffer.byteLength(text))) return { id: '', scope: '', status: 'budget_exhausted' };
-          win.bytes += Buffer.byteLength(text);
+          const bytes = jsonBytes(value);
+          if (!affordable(win, bytes)) return { id: '', scope: '', status: 'budget_exhausted' };
+          win.bytes += bytes;
           win.reads += 1;
         }
-        return { id: found.id, scope: found.scope, status: found.status, links: text };
+        return value;
       }
       const record = readEntry(scope, args.id, { context });
       if (!record) throw new Error(`没有 ${args.id} 这条记忆`);
       const revision = record.revision || 1;
       const body = String(record.body ?? '');
-      if (win) {
-        if (!affordable(win, 0)) return { id: '', scope: '', status: 'budget_exhausted' };
-        const seenRevision = win.readBodies.get(record.id);
-        if (seenRevision === revision) {
-          const receipt = Buffer.byteLength(`memory · 本请求已读过「${record.title}」 · ${record.id} · 第 ${revision} 版`);
-          if (!affordable(win, receipt)) return { id: '', scope: '', status: 'budget_exhausted' };
-          win.bytes += receipt;
-          win.reads += 1;
-          return { id: record.id, title: record.title, when: record.when || '', revision, scope: record.scope, status: record.status, body: '', repeat: true };
-        }
-        const payload = Buffer.byteLength(body) + Buffer.byteLength(record.title) + Buffer.byteLength(record.when || '');
-        if (!affordable(win, payload, 1)) return { id: '', scope: '', status: 'budget_exhausted' };
-        win.bytes += payload;
-        win.bodies += 1;
-        win.reads += 1;
-        win.readBodies.set(record.id, revision);
-      }
-      recordCitations(scope, sessionIdOf(execution), [record]);
-      return {
+      const value = {
         id: record.id,
         title: record.title,
         when: record.when || '',
@@ -860,6 +892,26 @@ export function apply(ctx, config) {
         status: record.status,
         body,
       };
+      if (win) {
+        if (!affordable(win, 0)) return { id: '', scope: '', status: 'budget_exhausted' };
+        const seenRevision = win.readBodies.get(record.id);
+        if (seenRevision === revision) {
+          const receipt = { ...value, body: '', repeat: true };
+          const bytes = jsonBytes(receipt);
+          if (!affordable(win, bytes)) return { id: '', scope: '', status: 'budget_exhausted' };
+          win.bytes += bytes;
+          win.reads += 1;
+          return receipt;
+        }
+        const bytes = jsonBytes(value);
+        if (!affordable(win, bytes, 1)) return { id: '', scope: '', status: 'budget_exhausted' };
+        win.bytes += bytes;
+        win.bodies += 1;
+        win.reads += 1;
+        win.readBodies.set(record.id, revision);
+      }
+      recordCitations(scope, sessionIdOf(execution), [record]);
+      return value;
     },
   }), 'lite-memory: memory_read');
 
@@ -899,20 +951,28 @@ export function apply(ctx, config) {
     },
     execute: async (args, execution) => {
       const scope = scopeOf(cwdOf(execution));
-      const found = locate(scope, args.id);
-      if (!found) throw new Error(`没有 ${args.id} 这条记忆`);
-      if (!args.mode) return { id: args.id, mode: 'needs_resolution', scope: found.scope.key === 'global' ? 'global' : 'project' };
+      const located = locate(scope, args.id);
+      if (!located && !args.mode) throw new Error(`没有 ${args.id} 这条记忆`);
+      if (!args.mode) {
+        return { id: args.id, mode: 'needs_resolution', scope: located.scope.key === 'global' ? 'global' : 'project' };
+      }
       let dropped;
       try {
         dropped = forget(scope, args.id, { mode: args.mode });
       } catch (error) {
         if (error && error.code === 'purge_pending') {
+          const layer = located ? located.scope : scope;
           try {
-            state.resumePurge(scope);
+            state.resumePurge(layer);
             dropped = forget(scope, args.id, { mode: args.mode });
           } catch (again) {
             if (again && again.code === 'purge_pending') {
-              return { id: args.id, title: found.title, mode: 'purge_pending', scope: found.scope.key === 'global' ? 'global' : 'project' };
+              return {
+                id: args.id,
+                title: located ? located.record.title : '',
+                mode: 'purge_pending',
+                scope: layer.key === 'global' ? 'global' : 'project',
+              };
             }
             throw again;
           }
@@ -921,11 +981,12 @@ export function apply(ctx, config) {
         }
       }
       if (!dropped) throw new Error(`没有 ${args.id} 这条记忆`);
+      const layerKey = dropped.scopeKey || (located ? located.scope.key : scope.key);
       return {
         id: dropped.id,
-        title: dropped.title,
+        title: dropped.title || (located ? located.record.title : ''),
         mode: dropped.mode,
-        scope: found.scope.key === 'global' ? 'global' : 'project',
+        scope: layerKey === 'global' ? 'global' : 'project',
       };
     },
   }), 'lite-memory: memory_forget');
@@ -1014,6 +1075,10 @@ export function apply(ctx, config) {
         return decision;
       }
 
+      /** 工具模式也要开额度窗口：只是不自动注入，工具调用同样受每请求预算约束。 */
+      const ids = fresh.map((message) => String(message?.id ?? '')).filter(Boolean).sort();
+      const win = openWindow(agent, { sessionId, turn, messageIds: ids });
+
       if (recallMode() !== 'adaptive') {
         clearPrepared(agent);
         return decision;
@@ -1029,13 +1094,14 @@ export function apply(ctx, config) {
         clearPrepared(agent);
         return decision;
       }
-      const ids = fresh.map((message) => String(message?.id ?? '')).filter(Boolean).sort();
-      const win = openWindow(agent, { sessionId, turn, messageIds: ids });
       const scope = scopeOf(cwd);
       const context = view.trustedContext(scope, {});
       const fingerprint = fingerprintOf(scope);
       const snapshot = projectRecall(scope, query, context, win);
-      if (generation !== generations.get(agent) || signal?.aborted || Date.now() - startedAt > RECALL_DEADLINE_MS) {
+      if (generation !== generations.get(agent)) return decision;
+      /** 超时或被取消：这一步不留半旧卡片，下一真人请求重新投影。 */
+      if (signal?.aborted || Date.now() - startedAt > RECALL_DEADLINE_MS) {
+        clearPrepared(agent);
         return decision;
       }
       if (!snapshot) {

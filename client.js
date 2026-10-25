@@ -262,6 +262,17 @@ window.__ModuleLoader__.load({
       return h('div', { 'data-tool': props.toolName, style: ROW }, h('span', { style: DOT }, '·'), h('span', { style: LABEL }, label), button);
     };
 
+    /** 撤销目标：只认真的写入了、带当前版本、且知道工作目录的那一次保存。 */
+    const undoRefOf = (meta, cwd) => (meta
+      && meta.kind === 'memory-save'
+      && meta.changed === true
+      && isMemoryId(meta.id)
+      && Number.isInteger(meta.revision)
+      && typeof cwd === 'string'
+      && cwd.length > 0
+      ? meta
+      : null);
+
     /** 写入行：只有真的改了东西才给撤销，且带着当时的版本。 */
     const SavedRow = (props) => {
       const meta = metaOf(props.block);
@@ -269,10 +280,8 @@ window.__ModuleLoader__.load({
       const [note, setNote] = React.useState('');
       const text = props.phase === 'preparing' ? null : settledText(props.block);
       const cwd = typeof props.cwd === 'string' ? props.cwd : '';
-      const changed = meta && meta.kind === 'memory-save' && meta.changed === true && isMemoryId(meta.id) && Number.isInteger(meta.revision)
-        ? meta
-        : null;
-      const canDrop = Boolean(changed) && Boolean(cwd) && (state === 'idle' || state === 'failed');
+      const changed = undoRefOf(meta, cwd);
+      const canDrop = Boolean(changed) && (state === 'idle' || state === 'failed');
       const drop = () => {
         if (!canDrop) return;
         setState('saving');
@@ -341,7 +350,7 @@ window.__ModuleLoader__.load({
         setOpen(true);
         setShown({ id: item.id, ref: item, loading: true });
         setNote('');
-        post('/lite-memory/body', { id: item.id, revision: item.revision }).then((result) => {
+        post('/lite-memory/body', { id: item.id, revision: item.revision, sessionId }).then((result) => {
           if (!alive.current || generation.current !== request) return;
           const payload = result.ok && result.body ? result.body : null;
           if (!payload || payload.ok !== true) {
@@ -468,7 +477,7 @@ window.__ModuleLoader__.load({
 
     // 测试缝：Node 里验引用投影，浏览器里没有任何副作用。
     if (typeof globalThis.__LITE_MEMORY_TEST__ === 'function') {
-      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe });
+      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf });
     }
 
     return {

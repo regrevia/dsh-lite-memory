@@ -5,6 +5,7 @@ import path from 'node:path';
 
 process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-'));
 const store = await import('../store.js');
+const state = await import('../state.js');
 
 const { upsert, search, readEntry, forget, undoChange, acceptCandidate, rejectCandidate,
   suggestionGate, noteSuggestion, findSuggestion, renderIndex, normalizeDraft, loadIndex,
@@ -236,7 +237,9 @@ test('forget archives both body and record; undo restores the previous version',
   const archived = loadIndex(scope).archived.find((item) => item.id === first.record.id);
   assert.equal(archived.status, 'archived');
   assert.equal(archived.body, '第一版正文');
-  assert.equal(forget(scope, first.record.id, { mode: 'archive' }), null);
+  const againArchive = forget(scope, first.record.id, { mode: 'archive' });
+  assert.equal(againArchive.mode, 'archive');
+  assert.equal(againArchive.already, true);
 });
 
 test('suggestion gate, keep, replay and reject', () => {
@@ -553,13 +556,66 @@ test('归档条目仍能搜到并标已归档，正文也能读', () => {
   const scope = fresh('archived-search');
   const created = upsert(scope, { title: '旧端口约定', summary: 'unlag 走 49661', body: '49661' }).record;
   forget(scope, created.id, { mode: 'archive' });
-  const hits = search(scope, '旧端口约定', 3, {});
+  /** 归档后默认检索不到；只有明确查历史才列出来，并如实标成归档。 */
+  assert.equal(search(scope, '旧端口约定', 3, {}).length, 0);
+  const hits = search(scope, '旧端口约定', 3, { history: true });
   assert.equal(hits.length, 1);
   assert.equal(hits[0].archived, true);
   assert.equal(hits[0].status, 'archived');
   const entry = readEntry(scope, created.id);
   assert.equal(entry.status, 'archived');
   assert.equal(entry.body, '49661');
+});
+
+test('归档条目也能彻底删除，旧版本与残留正文一并清掉', () => {
+  const scope = fresh('purge-archived');
+  const saved = upsert(scope, { title: '归档后再忘掉', summary: '管理动作覆盖归档条目', body: '第一版' });
+  upsert(scope, { id: saved.record.id, title: '归档后再忘掉', summary: '管理动作覆盖归档条目', body: '第二版' });
+  forget(scope, saved.record.id, { mode: 'archive' });
+  assert.equal(loadIndex(scope).archived.length, 1);
+  const purged = forget(scope, saved.record.id, { mode: 'purge' });
+  assert.equal(purged.mode, 'purged');
+  assert.equal(loadIndex(scope).archived.length, 0);
+  assert.equal(stateOf(scope).entries.length, 0);
+  assert.equal(fs.existsSync(path.join(scope.dir, 'entries', `${saved.record.id}.md`)), false);
+  assert.equal(forget(scope, saved.record.id, { mode: 'purge' }), null);
+});
+
+test('上次彻底删除没做完时，forget 先按原层收尾再返回原回执', () => {
+  const scope = fresh('purge-pending');
+  const saved = upsert(scope, { title: '删到一半', summary: '屏障期间的重试', body: 'x' });
+  const payload = stateOf(scope);
+  const op = 'purge_test_pending';
+  fs.writeFileSync(path.join(scope.dir, 'purge.intent.json'), `${JSON.stringify({
+    operationId: op, scopeKey: scope.key, storeId: payload.storeId, fromEpoch: payload.epoch,
+    toEpoch: 'epoch-after-purge', ids: [saved.record.id], phase: 'planned', at: new Date().toISOString(),
+  })}
+`);
+  const purged = forget(scope, saved.record.id, { mode: 'purge' });
+  assert.equal(purged.mode, 'purged');
+  assert.equal(purged.operationId, op);
+  assert.equal(stateOf(scope).entries.length, 0);
+  assert.equal(fs.existsSync(path.join(scope.dir, 'purge.intent.json')), false);
+});
+
+test('归档条目的彻底删除同样先过屏障，断点收尾后不留正文', () => {
+  const scope = fresh('purge-archived-pending');
+  const saved = upsert(scope, { title: '归档删一半', summary: '归档条目也走屏障', body: '旧正文' });
+  upsert(scope, { id: saved.record.id, title: '归档删一半', summary: '归档条目也走屏障', body: '新正文' });
+  forget(scope, saved.record.id, { mode: 'archive' });
+  const payload = stateOf(scope);
+  fs.writeFileSync(path.join(scope.dir, 'purge.intent.json'), `${JSON.stringify({
+    operationId: 'purge_archived_test', scopeKey: scope.key, storeId: payload.storeId, fromEpoch: payload.epoch,
+    toEpoch: 'epoch-after-archived-purge', ids: [saved.record.id], phase: 'planned', at: new Date().toISOString(),
+  })}
+`);
+  assert.throws(() => search(scope, '归档删一半', 3, { history: true }), (error) => error.code === 'purge_pending');
+  const purged = forget(scope, saved.record.id, { mode: 'purge' });
+  assert.equal(purged.mode, 'purged');
+  assert.equal(purged.operationId, 'purge_archived_test');
+  assert.equal(loadIndex(scope).archived.length, 0);
+  assert.equal(fs.existsSync(path.join(scope.dir, 'purge.intent.json')), false);
+  assert.equal(search(scope, '归档删一半', 3, {}).length, 0);
 });
 
 for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
