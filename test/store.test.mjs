@@ -101,3 +101,19 @@ const hit = store.search(mergeScope, 'CI 容器');
 assert.ok(hit.some((item) => item.id === ci.record.id));
 
 console.log('store: precondition rules ok');
+
+// 全局层：一处写入，别的项目查得到；两层同名不合并，全局 id 跨作用域可读可归档。
+const projA = store.scopeOf('/tmp/global-a');
+const projB = store.scopeOf('/tmp/global-b');
+const global = store.globalScope();
+store.upsert(global, { title: '回复用中文', summary: '所有项目的中文回复约定', body: '- 回复：中文' });
+const seen = store.search(projB, '中文回复');
+assert.equal(seen.some((item) => item.scope === 'global'), true);
+const local = store.upsert(projA, { title: '回复用中文', summary: '所有项目的中文回复约定', body: '- 回复：中文' });
+assert.equal(local.merged, false);
+assert.equal(store.loadIndex(global).entries.length, 1);
+assert.equal(store.loadIndex(projA).entries.length, 1);
+assert.match(store.readEntry(projB, seen[0].id).body, /中文/);
+store.forget(projB, seen[0].id);
+assert.equal(store.loadIndex(global).entries.length, 0);
+console.log('store: global scope ok');
