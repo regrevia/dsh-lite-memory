@@ -971,10 +971,33 @@ export function recordCitations(scope, sessionId, items) {
   return next;
 }
 
+/** 行里的名字、层跟当前条目走：改过标题或换过层的，不该继续显示旧的。 */
+function refreshCitation(item) {
+  if (!item || typeof item.path !== 'string') return item;
+  const dir = path.dirname(path.dirname(path.resolve(item.path)));
+  if (!dir.startsWith(memoryRoot() + path.sep)) return item;
+  const key = dir === path.join(memoryRoot(), 'global') ? 'global' : path.basename(dir);
+  let entry;
+  try {
+    const index = loadIndex({ key, dir });
+    entry = (index.entries || []).find((row) => row && row.id === item.id);
+  } catch {
+    return item;
+  }
+  if (!entry) return item;
+  return {
+    ...item,
+    title: entry.title || item.title,
+    scope: key === 'global' ? 'global' : 'project',
+    revision: Number(entry.revision) || item.revision,
+    when: entry.when || '',
+  };
+}
+
 /** 界面要的那几列：不返回正文，也不返回磁盘路径。 */
 export function listCitations(sessionId) {
   const data = readSessionFile(sessionId);
-  const items = ((data && data.items) || []).map((item) => ({
+  const items = ((data && data.items) || []).map(refreshCitation).filter(Boolean).map((item) => ({
     id: item.id,
     title: item.title,
     scope: item.scope,
