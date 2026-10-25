@@ -149,6 +149,10 @@ const lockFile = (scope) => path.join(scope.dir, '.lock');
 const migrationIntentFile = (scope) => path.join(scope.dir, 'migration.intent.json');
 const purgeIntentFile = (scope) => path.join(scope.dir, 'purge.intent.json');
 
+/** 搬移的协调文件放在根目录：它跨两层，不属于任何一层的状态包。 */
+export const MOVE_FORMAT = 'dsh-lite-memory/move@1';
+const moveIntentFile = () => path.join(memoryRoot(), 'move.intent.json');
+
 function sleepSync(ms) {
   try {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -697,6 +701,7 @@ export function migrateLegacy(scope, options = {}) {
  * 绝不用空库覆盖。
  */
 export function load(scope, options = {}) {
+  moveBarrier(scope, options);
   const intent = purgeIntent(scope);
   if (intent && !options.allowPurge) {
     throw new StateError('purge_pending', `这个记忆库正在彻底删除（${intent.operationId}），先调用 resumePurge 收尾；期间不提供内容读取`);
@@ -733,7 +738,7 @@ export function load(scope, options = {}) {
  */
 export function transact(scope, options, work) {
   return withScopeLock(scope, () => {
-    const loaded = load(scope);
+    const loaded = load(scope, { allowMove: Boolean(options && options.allowMove), allowPurge: Boolean(options && options.allowPurge) });
     const { operationId = '', payloadDigest = '', expected = null, expectCreate = false } = options || {};
     if (operationId) {
       const replay = loaded.state.receipts.find((row) => row.operationId === operationId);
@@ -789,6 +794,77 @@ export function readEntryBody(scope, id) {
   return { body: entry.current.body, entry };
 }
 
+
+
+/** 根目录的协调锁：移动要同时持有两层，先拿这一把，固定顺序就不会互相等死。 */
+export function withRootLock(fn) {
+  return withScopeLock({ dir: memoryRoot(), key: 'root' }, fn);
+}
+
+/** 损坏的 intent 不当成不存在：宁可报错，也不让两层的半截状态被继续使用。 */
+export function readMoveIntent() {
+  const file = moveIntentFile();
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw new StateError('unavailable', `移动协调文件读不出来（${error.code || 'IO'}）：${file}`);
+  }
+  let intent;
+  try {
+    intent = JSON.parse(raw);
+  } catch {
+    throw new StateError('conflict', `移动中断，协调文件已损坏：${file}；先人工确认两层状态再删除它`);
+  }
+  const ok = intent && intent.format === MOVE_FORMAT
+    && typeof intent.operationId === 'string' && intent.operationId
+    && intent.source && typeof intent.source.scopeKey === 'string' && typeof intent.source.id === 'string'
+    && intent.target && typeof intent.target.scopeKey === 'string' && typeof intent.target.newId === 'string';
+  if (!ok) throw new StateError('conflict', `移动中断，协调文件内容不认：${file}`);
+  return intent;
+}
+
+export function writeMoveIntent(intent) {
+  const payload = {
+    format: MOVE_FORMAT,
+    operationId: intent.operationId,
+    at: intent.at || new Date().toISOString(),
+    source: { ...intent.source },
+    target: { ...intent.target },
+    topicKey: typeof intent.topicKey === 'string' ? intent.topicKey : '',
+  };
+  writeDurable(moveIntentFile(), `${JSON.stringify(payload, null, 2)}\n`);
+  return payload;
+}
+
+export function clearMoveIntent() {
+  fs.rmSync(moveIntentFile(), { force: true });
+}
+
+/**
+ * 双重屏障：purge 和 move 都先落 intent 再改状态。涉及的两个 scope 读写在
+ * intent 期间一律拒绝，直到恢复流程（resume）走完；allowMove 只给恢复路径自己用。
+ */
+export function moveBarrier(scope, options = {}) {
+  const intent = readMoveIntent();
+  if (!intent || options.allowMove) return intent;
+  if (intent.source.scopeKey === scope.key || intent.target.scopeKey === scope.key) {
+    throw new StateError('move_pending', `这条记忆正在跨层搬移（${intent.operationId}），先调用 resumeMove 收尾；期间不提供这两层的内容读取`);
+  }
+  return intent;
+}
+
+/** 把 prev 归一成刚发布的状态：搬移协议要求 prev 不保留搬动前的对立状态。 */
+export function sealPrev(scope) {
+  const current = stateFile(scope);
+  if (!fs.existsSync(current)) throw new StateError('unavailable', '状态还没发布，不能封存 prev');
+  writeDurable(prevFile(scope), fs.readFileSync(current, 'utf8'));
+}
+
+export function removePrev(scope) {
+  fs.rmSync(prevFile(scope), { force: true });
+}
 
 /** 屏障只在 intent 存在期间生效：它不含标题与正文，只记身份与两个固定 epoch。 */
 export function purgeIntent(scope) {

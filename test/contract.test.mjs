@@ -83,7 +83,11 @@ assert.deepEqual(saveParams.resolution.enum, ['distinct']);
 /** 一次检索最多回 4 条：列表是给下一步取正文用的，不是索引。 */
 assert.equal(defs.get('memory_search').parameters.properties.limit.maximum, 4);
 assert.equal(saveParams.id.type, 'string');
-assert.deepEqual(saveParams.scope.enum, ['project', 'global']);
+assert.deepEqual(saveParams.scope.enum, ['auto', 'project', 'global']);
+assert.equal(saveParams.memoryClass.type, 'string');
+assert.deepEqual(saveParams.memoryClass.enum, ['personal_preference', 'project_fact', 'environment_fact', 'portable_procedure']);
+assert.deepEqual(saveParams.durability.enum, ['durable', 'task']);
+assert.deepEqual(saveParams.sameTopicAs.required, ['scope', 'id', 'revision']);
 assert.equal(defs.get('memory_suggest').parameters.properties.scope, undefined);
 assert.equal(defs.get('memory_suggest').parameters.properties.resolution, undefined);
 

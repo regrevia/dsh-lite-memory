@@ -549,5 +549,18 @@ test('candidate keeps field presence: explicit empty body clears, omitted fields
   assert.equal(after.body, '');
 });
 
+test('归档条目仍能搜到并标已归档，正文也能读', () => {
+  const scope = fresh('archived-search');
+  const created = upsert(scope, { title: '旧端口约定', summary: 'unlag 走 49661', body: '49661' }).record;
+  forget(scope, created.id, { mode: 'archive' });
+  const hits = search(scope, '旧端口约定', 3, {});
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].archived, true);
+  assert.equal(hits[0].status, 'archived');
+  const entry = readEntry(scope, created.id);
+  assert.equal(entry.status, 'archived');
+  assert.equal(entry.body, '49661');
+});
+
 for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
 console.log(`store.test.mjs: ${passed} passed`);
