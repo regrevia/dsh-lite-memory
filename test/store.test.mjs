@@ -32,11 +32,12 @@ const read = store.readEntry(scope, first.record.id);
 assert.match(read.body, /UPLOAD-GUIDE/);
 assert.ok(store.loadIndex(scope).entries[0].hits >= 2);
 
-assert.equal(store.suggestionGate(scope, '插件市场条目规范').ok, false);
+assert.equal(store.suggestionGate(scope, { title: '插件市场条目规范' }).ok, false);
 store.noteSuggestion(scope, '提交前先跑 lint');
-assert.equal(store.suggestionGate(scope, '另一条').ok, false);
+assert.equal(store.suggestionGate(scope, { title: '另一条' }).ok, false);
 store.upsert(scope, { title: '提交前先跑 lint', summary: '交付前的文案检查步骤' });
-assert.equal(store.suggestionGate(scope, '新的建议').ok, true);
+assert.equal(store.suggestionGate(scope, { title: '新的建议' }).ok, true);
+assert.equal(store.suggestionGate(scope, { title: '提交前先跑 lint 的步骤', summary: '交付前的文案检查步骤' }).ok, false);
 
 const old = store.upsert(scope, { title: '很久没用到的条目', summary: '三个月没命中', body: 'x' });
 const index = store.loadIndex(scope);
@@ -117,3 +118,23 @@ assert.match(store.readEntry(projB, seen[0].id).body, /中文/);
 store.forget(projB, seen[0].id);
 assert.equal(store.loadIndex(global).entries.length, 0);
 console.log('store: global scope ok');
+
+// 只是「记下来」时自己判：换个说法的同一条 → 更新，旧标题留成别名。
+const bareScope = store.scopeOf('/tmp/bare-save');
+const bareFirst = store.upsert(bareScope, { title: '本地发布前先跑预检', summary: '推送前在本地过一遍预检脚本', body: '- 命令：npm run precheck' });
+const bareAgain = store.upsert(bareScope, { title: '推送前先跑本地预检', summary: '推送前在本地过一遍预检脚本', body: '- 例外：只改文档时跳过' });
+assert.equal(bareAgain.merged, true);
+assert.equal(bareAgain.record.id, bareFirst.record.id);
+assert.equal(bareAgain.record.aliases.includes('本地发布前先跑预检'), true);
+const bareBody = store.readEntry(bareScope, bareFirst.record.id).body;
+assert.match(bareBody, /例外/);
+assert.match(bareBody, /precheck/);
+// 再拿最早那个标题存一次，也认得出来。
+const bareBack = store.upsert(bareScope, { title: '本地发布前先跑预检', summary: '推送前在本地过一遍预检脚本', body: '- 耗时：约 10 秒' });
+assert.equal(bareBack.merged, true);
+assert.equal(store.loadIndex(bareScope).entries.length, 1);
+// 不同主题照样新增，并报出最接近的一条。
+const bareNew = store.upsert(bareScope, { title: '开源自检清单', summary: '公开仓库前扫凭据与本机路径', body: '- 工具：ui-copy-lint' });
+assert.equal(bareNew.merged, false);
+assert.equal(store.loadIndex(bareScope).entries.length, 2);
+console.log('store: bare save resolves update vs new ok');

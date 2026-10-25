@@ -118,12 +118,16 @@ const SAVE_PARAMS = {
     when: { type: 'string', description: `前置条件或适用场景（「在哪台机器 / 哪个环境 / 什么情况下」），不超过 ${LIMITS.whenChars} 字。同一主题但前置条件不同，会存成两条，不合并` },
     kind: { type: 'string', enum: ['preference', 'convention', 'procedure', 'pointer', 'pitfall', 'credential_hint', 'note'], description: '条目类型' },
     tags: { type: 'array', items: { type: 'string' }, description: '最多 5 个标签' },
+    scope: { type: 'string', enum: ['project', 'global'], description: '存哪一层：默认 project（只在这个项目生效）；用户说「以后所有项目都这样」才用 global' },
   },
   required: ['title', 'summary'],
   additionalProperties: false,
 };
 
-const SUGGEST_PARAMS = SAVE_PARAMS;
+const SUGGEST_PARAMS = {
+  ...SAVE_PARAMS,
+  properties: Object.fromEntries(Object.entries(SAVE_PARAMS.properties).filter(([key]) => key !== 'scope')),
+};
 
 const SEARCH_PARAMS = {
   type: 'object',
@@ -158,7 +162,7 @@ export function apply(ctx) {
 
   ctx.effect(() => tools.register({
     name: 'memory_save',
-    description: `保存一条记忆。用户明确说「记住」时直接调用；用户自己的话已经是长期规则（「以后都这样」「别再 X」）时也直接调用，不要先问。用户点了「保留」或发「保留记忆「X」」时，用那条建议的内容调用。更新已知主题时先 memory_read 旧正文再写：标题相同、或标题与摘要高度相近、且前置条件一致时，会合并进原来那条（merges+1），旧要点保留，同键的新值覆盖。前置条件不同的同一主题是两条，不要硬合并。正文只写这次新增的要点。${NOTES}`,
+    description: `保存一条记忆。用户明确说「记住」时直接调用；用户自己的话已经是长期规则（「以后都这样」「别再 X」）时也直接调用，不要先问。用户点了「保留」或发「保留记忆「X」」时，用那条建议的内容调用。判重由工具自己做，不用先搜：同一层、同一前置条件下，标题或摘要够像、或撞上这条用过的旧标题，就更新原来那条（merges+1），旧要点保留，同键的新值覆盖，旧标题留作别名；跨主题才新增。前置条件不同的同一主题是两条。合并要补内容时先 memory_read 旧正文，正文只写这次新增的要点。${NOTES}`,
     parameters: SAVE_PARAMS,
     output: {
       schema: {
@@ -168,25 +172,26 @@ export function apply(ctx) {
           title: { type: 'string' },
           summary: { type: 'string' },
           merged: { type: 'boolean' },
+          similar: { type: 'string' },
         },
         required: ['id', 'title', 'summary', 'merged'],
         additionalProperties: false,
       },
       render: (value) => [{
         type: 'text',
-        text: `${value.merged ? 'memory · merged' : 'memory · saved'} "${value.title}"${value.summary ? ` — ${value.summary}` : ''}`,
+        text: `${value.merged ? 'memory · merged' : 'memory · saved'} "${value.title}"${value.summary ? ` — ${value.summary}` : ''}${value.similar ? ` · 相近：${value.similar}` : ''}`,
       }],
     },
     execute: async (args, execution) => {
       const scope = args.scope === 'global' ? globalScope() : scopeOf(cwdOf(execution));
       const saved = upsert(scope, args);
-      return { id: saved.record.id, title: saved.record.title, summary: saved.record.summary, merged: saved.merged };
+      return { id: saved.record.id, title: saved.record.title, summary: saved.record.summary, merged: saved.merged, ...(saved.similar ? { similar: saved.similar } : {}) };
     },
   }), 'lite-memory: memory_save');
 
   ctx.effect(() => tools.register({
     name: 'memory_suggest',
-    description: `对一条用户没说、但跨会话还有用的经验提出保存建议。调用后对话里出现一个「保留」按钮，用户点了才保存。不要用问句征询「要不要记」，那要用户打字；按钮不打扰对话。一次对话最多建议一条，问自己「下次会话还得靠它吗」，不确定就别建议。${NOTES}`,
+    description: `对一条用户没说、但跨会话还有用的经验提出保存建议。调用后对话里出现一个「保留」按钮，用户点了才保存。不要用问句征询「要不要记」，那要用户打字；按钮不打扰对话。一次对话最多建议一条，问自己「下次会话还得靠它吗」，不确定就别建议。返回已有相近条目时，改用 memory_save 更新，不要再建议。${NOTES}`,
     parameters: SUGGEST_PARAMS,
     output: {
       schema: {
@@ -209,7 +214,7 @@ export function apply(ctx) {
     },
     execute: async (args, execution) => {
       const scope = scopeOf(cwdOf(execution));
-      const gate = suggestionGate(scope, args.title);
+      const gate = suggestionGate(scope, args);
       const summary = String(args.summary ?? '');
       if (!gate.ok) return { asked: false, title: String(args.title ?? ''), summary, reason: gate.reason };
       noteSuggestion(scope, args, 'asked');
