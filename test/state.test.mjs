@@ -291,5 +291,68 @@ test('validateState 拦坏结构，不拦合法的一条', () => {
   assert.throws(() => validateState(bad), (error) => error instanceof StateError);
 });
 
+
+// ── 彻底忘掉：屏障、断点、旧副本 ─────────────────────────────────────────────
+test('purge 删条目不回吐标题，轮换 epoch，prev 也是清过的', () => {
+  const scope = fresh('purge');
+  transact(scope, { expectCreate: true }, addNote('要忘掉的事', '旧正文-哨兵'));
+  transact(scope, { expected: { generation: 1 } }, addNote('要留下的事', '留下的正文'));
+  const before = load(scope).state;
+  const result = state.purge(scope, { ids: ['mem_000000000001'], operationId: 'op_purge_test' });
+  assert.equal(result.ok, true);
+  assert.equal(result.operationId, 'op_purge_test');
+  assert.equal(JSON.stringify(result).includes('要忘掉的事'), false);
+  const after = load(scope).state;
+  assert.equal(after.entries.some((entry) => entry.id === 'mem_000000000001'), false);
+  assert.equal(after.entries.some((entry) => entry.id === 'mem_000000000002'), true);
+  assert.notEqual(after.epoch, before.epoch);
+  assert.equal(after.receipts.length, 1);
+  assert.equal(after.receipts[0].kind, 'purge');
+  assert.equal(JSON.stringify(after.receipts).includes('要忘掉的事'), false);
+  const row = after.suppressions.find((item) => item.reason === 'forgotten_source');
+  assert.ok(row);
+  assert.equal(row.expiresAt, null);
+  assert.equal(fs.existsSync(path.join(scope.dir, 'bodies', 'mem_000000000001.md')), false);
+  const prev = JSON.parse(fs.readFileSync(path.join(scope.dir, 'state.prev.json'), 'utf8')).payload;
+  assert.equal(prev.entries.some((entry) => entry.id === 'mem_000000000001'), false);
+  assert.equal(fs.existsSync(path.join(scope.dir, 'purge.intent.json')), false);
+  // 同一个 id 不会再被当成活条目
+  assert.throws(() => transact(scope, {}, addNote('要忘掉的事', '冒充')), (error) => error instanceof StateError);
+});
+
+test('purge 断点：有 intent 时普通读取被拦住，重启后收尾', () => {
+  const scope = fresh('purge-resume');
+  transact(scope, { expectCreate: true }, addNote('断点里的事', '断点正文-哨兵'));
+  const loaded = load(scope);
+  const intent = {
+    operationId: 'op_resume_test',
+    scopeKey: scope.key,
+    storeId: loaded.state.storeId,
+    fromEpoch: loaded.state.epoch,
+    toEpoch: '00000000-0000-4000-8000-000000000001',
+    ids: ['mem_000000000001'],
+    phase: 'planned',
+    at: new Date().toISOString(),
+  };
+  fs.writeFileSync(path.join(scope.dir, 'purge.intent.json'), `${JSON.stringify(intent, null, 2)}\n`);
+  assert.throws(() => load(scope), (error) => error instanceof StateError && error.code === 'purge_pending');
+  assert.throws(() => state.purge(scope, { ids: ['mem_000000000001'] }), (error) => error.code === 'purge_pending');
+  const resumed = state.resumePurge(scope);
+  assert.equal(resumed.epoch, intent.toEpoch);
+  assert.equal(fs.existsSync(path.join(scope.dir, 'purge.intent.json')), false);
+  assert.equal(load(scope).state.entries.length, 0);
+  assert.equal(JSON.stringify(resumed).includes('断点里的事'), false);
+});
+
+test('purge 之后再碰同一个 id 返回 missing，不复活', () => {
+  const scope = fresh('purge-missing');
+  transact(scope, { expectCreate: true }, addNote('删一次', '正文'));
+  state.purge(scope, { ids: ['mem_000000000001'] });
+  const again = state.purge(scope, { ids: ['mem_000000000001'] });
+  assert.equal(again.ok, true);
+  assert.equal(again.missing, true);
+  assert.equal(load(scope).state.entries.length, 0);
+});
+
 for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
 console.log(`state.test.mjs: ${passed} passed`);

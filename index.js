@@ -5,6 +5,7 @@ import {
   peek,
   search,
   readEntry,
+  readLinks,
   forget,
   undoChange,
   locate,
@@ -19,6 +20,8 @@ import {
   readCitationBody,
   LIMITS,
 } from './store.js';
+import * as view from './view.js';
+import * as state from './state.js';
 
 /** Only the tool registry is required; everything else is optional. */
 export const inject = ['tools'];
@@ -196,6 +199,50 @@ const SAVE_PARAMS = {
       description: '明确表示「这确实是另一条」。返回 needsResolution 时，只有确认不是同一件事才带上它再存一次',
     },
     scope: { type: 'string', enum: ['project', 'global'], description: '存哪一层：默认 project（只在这个项目生效）；用户说「以后所有项目都这样」才用 global' },
+    mode: {
+      type: 'string',
+      enum: ['patch', 'replace_current'],
+      description: '默认 patch：没给的字段保持原值。要整条换掉时用 replace_current，并把 title/summary/when/body/kind/tags 全部显式给出（空值也要写），不继承旧值',
+    },
+    applicability: {
+      type: 'string',
+      enum: view.APPLICABILITY,
+      description: '适用范围：all_in_scope 普遍适用；conditional 条件适用（必须给 conditions）；unresolved 还没定（有 when 但没结构化条件时默认这个）。不给就按字段推断',
+    },
+    conditions: {
+      type: 'array',
+      description: '条件适用的具体条件，最多 8 条；给了空数组就是清空',
+      items: {
+        type: 'object',
+        properties: {
+          key: { type: 'string', enum: view.CONDITION_KEYS },
+          value: { type: 'string' },
+        },
+        required: ['key', 'value'],
+        additionalProperties: false,
+      },
+    },
+    selection: {
+      type: ['object', 'null'],
+      description: '只对某个产物成立的规则：complete 表示清单完整（必须给 artifactKey），examples 只是举例',
+      properties: {
+        mode: { type: 'string', enum: view.SELECTION_MODES },
+        artifactKey: { type: 'string' },
+      },
+      required: ['mode'],
+      additionalProperties: false,
+    },
+    links: {
+      type: 'array',
+      items: { type: 'string' },
+      description: '相关记忆的 id，最多 3 条，只表示同类相关；目标必须当前存在。给空数组就是清空',
+    },
+    triggers: {
+      type: 'array',
+      items: { type: 'string' },
+      description: '自动召回用的固定触发词，最多 4 个；给空数组就是清空',
+    },
+    topicKey: { type: 'string', description: '主题槽位，用来判断同一件事避免重复；不给就保持原值，null 表示清空' },
   },
   required: ['title', 'summary'],
   additionalProperties: false,
@@ -218,7 +265,10 @@ const SEARCH_PARAMS = {
 
 const READ_PARAMS = {
   type: 'object',
-  properties: { id: { type: 'string', description: '记忆 id，来自搜索结果' } },
+  properties: {
+    id: { type: 'string', description: '记忆 id，来自搜索结果' },
+    view: { type: 'string', enum: ['full', 'links'], description: '默认 full 读正文；links 只看直接相关的记忆清单，不取正文' },
+  },
   required: ['id'],
   additionalProperties: false,
 };
@@ -226,7 +276,12 @@ const READ_PARAMS = {
 const FORGET_PARAMS = {
   type: 'object',
   properties: {
-    id: { type: 'string', description: '要移入归档的记忆 id' },
+    id: { type: 'string', description: '要忘掉的记忆 id' },
+    mode: {
+      type: 'string',
+      enum: ['archive', 'purge'],
+      description: 'archive 移入归档可找回（只是不想再提）；purge 彻底忘掉，正文与受管副本清除且不可复活。没点明是哪种就两种都别做，先问用户',
+    },
   },
   required: ['id'],
   additionalProperties: false,
@@ -278,6 +333,7 @@ export function apply(ctx) {
     description: `保存一条记忆。用户明确说「记住」时直接调用；用户自己的话已经是长期规则（「以后都这样」「别再 X」）时也直接调用，不要先问。更新同一件事时带 id：身份只看标题、旧标题和前置条件，像不像不授权覆盖。文本相近但标题不同时先不写，返回 needsResolution 与 1–2 条相近条目：确实是同一条就用那个 id 更新，确实是另一条才带 resolution="distinct" 再存。带 id 更新时没给的字段保持原值，正文整段替换，旧版本留在 versions 里（每字都留，不截断）。条数到硬上限时把同层最久没被读的一条移进归档，结果里写明动了哪条，不拒绝新记忆；单条正文超限只报错、不截断。前置条件不同的同一标题是两条。${NOTES}`,
     parameters: SAVE_PARAMS,
     output: {
+      presentationMeta: (_args, value) => ({ kind: 'memory-save', id: value.id, scope: value.scope, revision: value.revision, changed: value.changed }),
       schema: {
         type: 'object',
         properties: {
@@ -308,7 +364,7 @@ export function apply(ctx) {
     },
     execute: async (args, execution) => {
       const scope = args.scope === 'global' ? globalScope() : scopeOf(cwdOf(execution));
-      const saved = upsert(scope, args);
+      const saved = upsert(scope, { ...args, writeMode: args.mode || 'patch' });
       if (saved.needsResolution) {
         return {
           id: '',
@@ -348,6 +404,7 @@ export function apply(ctx) {
     description: `对一条用户没说、但跨会话还有用的经验提出保存建议。调用后对话里出现一个「保留」按钮，用户点了才进正式记忆。不要用问句征询「要不要记」，那要用户打字。一次对话最多建议一条，48 小时内每个项目一条。建议草稿与正式保存走同一套校验，凭据不会落盘；待确认草稿 48 小时过期，确认前就落盘所以撤回/过期都查得到。已有同一条时不再建议；相近的另一条会记成「更新候选」，保留后改的是那条，不会另建。${NOTES}`,
     parameters: SUGGEST_PARAMS,
     output: {
+      presentationMeta: (_args, value) => ({ kind: 'memory-suggest', id: value.id || '', asked: value.asked }),
       schema: {
         type: 'object',
         properties: {
@@ -387,6 +444,7 @@ export function apply(ctx) {
     description: `按需检索已有记忆：先搜，命中再 memory_read 读正文。用户提到「记住了什么 / 上次 / 规范 / 约定 / 路径 / 凭据怎么取」，或者眼前反复出现的报错、弹窗、异常时，先查这里有没有记过解法。跨项目的通用条目以 [全局] 开头。中文长句可以直接当查询。每行带 id 与版次，更新时把 id 传回 memory_save。`,
     parameters: SEARCH_PARAMS,
     output: {
+      presentationMeta: (_args, value) => ({ kind: 'memory-search', count: value.count }),
       schema: {
         type: 'object',
         properties: {
@@ -406,9 +464,11 @@ export function apply(ctx) {
     },
     execute: async (args, execution) => {
       const scope = scopeOf(cwdOf(execution));
-      const hits = search(scope, args.query, args.limit ?? 4);
+      const context = view.trustedContext(scope, {});
+      const hits = search(scope, args.query, args.limit ?? 4, { context });
       recordCitations(scope, sessionIdOf(execution), hits);
-      const rendered = renderIndex(hits);
+      const shown = hits.map((item) => view.toModelView(item, 'search'));
+      const rendered = renderIndex(shown);
       return { count: hits.length, chars: rendered.chars, text: rendered.text };
     },
   }), 'lite-memory: memory_search');
@@ -426,19 +486,33 @@ export function apply(ctx) {
           when: { type: 'string' },
           revision: { type: 'integer' },
           scope: { type: 'string' },
+          status: { type: 'string', enum: ['ok', 'needs_context', 'not_applicable', 'gone'] },
           body: { type: 'string' },
+          links: { type: 'string' },
         },
-        required: ['id', 'title', 'when', 'revision', 'scope', 'body'],
+        required: ['id', 'scope', 'status'],
         additionalProperties: false,
       },
       render: (_args, value) => [{
         type: 'text',
-        text: `memory · 「${value.title}」${value.when ? `（${value.when}）` : ''} · ${value.id} · 第 ${value.revision} 版${scopeLabel(value)}\n${value.body}`,
+        text: value.body
+          ? `memory · 「${value.title}」${value.when ? `（${value.when}）` : ''} · ${value.id} · 第 ${value.revision} 版${scopeLabel(value)}${value.status !== 'ok' ? ` · ${value.status}` : ''}\n${value.body}`
+          : `memory · 「${value.title}」的相关记忆\n${value.links || '(无)'}`,
       }],
+      presentationMeta: (_args, value) => ({ kind: 'memory-read', id: value.id, scope: value.scope, revision: value.revision }),
     },
     execute: async (args, execution) => {
       const scope = scopeOf(cwdOf(execution));
-      const record = readEntry(scope, args.id);
+      const context = view.trustedContext(scope, {});
+      if (args.view === 'links') {
+        const found = readLinks(scope, args.id, { context });
+        if (!found) throw new Error(`没有 ${args.id} 这条记忆`);
+        const rows = found.links.map((link) => (link.status === 'invalid'
+          ? `- ${link.id} · 已失效`
+          : `- 「${link.title}」${link.scope === 'global' ? ' [全局]' : ''} · ${link.id} · 第 ${link.revision} 版`));
+        return { id: found.id, scope: found.scope, status: found.status, links: rows.join('\n') || '(无)' };
+      }
+      const record = readEntry(scope, args.id, { context });
       if (!record) throw new Error(`没有 ${args.id} 这条记忆`);
       recordCitations(scope, sessionIdOf(execution), [record]);
       return {
@@ -447,6 +521,7 @@ export function apply(ctx) {
         when: record.when || '',
         revision: record.revision || 1,
         scope: record.scope,
+        status: record.status,
         body: record.body,
       };
     },
@@ -463,19 +538,53 @@ export function apply(ctx) {
           id: { type: 'string' },
           title: { type: 'string' },
           scope: { type: 'string' },
+          mode: { type: 'string', enum: ['archive', 'purged', 'needs_resolution', 'purge_pending'] },
         },
-        required: ['id', 'title', 'scope'],
+        required: ['id', 'mode'],
         additionalProperties: false,
       },
-      render: (_args, value) => [{ type: 'text', text: `memory · archived${scopeLabel(value)} "${value.title}" · ${value.id}` }],
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.mode === 'purged'
+          ? `memory · forgotten "${value.title}" · ${value.id}`
+          : value.mode === 'purge_pending'
+            ? `memory · 清除未完成 · ${value.id}，重启后会继续`
+            : value.mode === 'needs_resolution'
+              ? `memory · 先确认是归档还是彻底忘掉 · ${value.id}`
+              : `memory · archived${scopeLabel(value)} "${value.title}" · ${value.id}，可找回`,
+      }],
+      presentationMeta: (_args, value) => ({ kind: 'memory-forget', id: value.id, mode: value.mode }),
     },
     execute: async (args, execution) => {
       const scope = scopeOf(cwdOf(execution));
       const found = locate(scope, args.id);
       if (!found) throw new Error(`没有 ${args.id} 这条记忆`);
-      const dropped = forget(scope, args.id);
+      if (!args.mode) return { id: args.id, mode: 'needs_resolution', scope: found.scope.key === 'global' ? 'global' : 'project' };
+      let dropped;
+      try {
+        dropped = forget(scope, args.id, { mode: args.mode });
+      } catch (error) {
+        if (error && error.code === 'purge_pending') {
+          try {
+            state.resumePurge(scope);
+            dropped = forget(scope, args.id, { mode: args.mode });
+          } catch (again) {
+            if (again && again.code === 'purge_pending') {
+              return { id: args.id, title: found.title, mode: 'purge_pending', scope: found.scope.key === 'global' ? 'global' : 'project' };
+            }
+            throw again;
+          }
+        } else {
+          throw error;
+        }
+      }
       if (!dropped) throw new Error(`没有 ${args.id} 这条记忆`);
-      return { id: dropped.id, title: dropped.title, scope: found.scope.key === 'global' ? 'global' : 'project' };
+      return {
+        id: dropped.id,
+        title: dropped.title,
+        mode: dropped.mode,
+        scope: found.scope.key === 'global' ? 'global' : 'project',
+      };
     },
   }), 'lite-memory: memory_forget');
 

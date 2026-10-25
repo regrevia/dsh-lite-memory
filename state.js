@@ -29,6 +29,8 @@ export const LIMITS = {
   pendingBytes: 64 * 1024,
   receipts: 256,
   receiptTtlMs: 7 * 24 * 60 * 60 * 1000,
+  suppressions: 64,
+  suppressionTtlMs: 7 * 24 * 60 * 60 * 1000,
   citations: 20,
   citationSessions: 20,
   citationTtlMs: 30 * 24 * 60 * 60 * 1000,
@@ -145,6 +147,7 @@ const stateFile = (scope) => path.join(scope.dir, 'state.json');
 const prevFile = (scope) => path.join(scope.dir, 'state.prev.json');
 const lockFile = (scope) => path.join(scope.dir, '.lock');
 const migrationIntentFile = (scope) => path.join(scope.dir, 'migration.intent.json');
+const purgeIntentFile = (scope) => path.join(scope.dir, 'purge.intent.json');
 
 function sleepSync(ms) {
   try {
@@ -273,6 +276,14 @@ export function validateState(data) {
   for (const row of data.receipts) {
     if (!row || typeof row.operationId !== 'string' || !row.operationId) throw new StateError('invalid', '记忆回执缺少 operationId');
   }
+  for (const row of data.suppressions) {
+    if (!row || typeof row !== 'object' || typeof row.reason !== 'string' || !row.reason) {
+      throw new StateError('invalid', '记忆抑制规则缺少 reason');
+    }
+    if (row.expiresAt !== null && row.expiresAt !== undefined && typeof row.expiresAt !== 'string') {
+      throw new StateError('invalid', '记忆抑制规则的 expiresAt 不合法');
+    }
+  }
   return data;
 }
 
@@ -390,8 +401,24 @@ function countActive(state) {
 export function entryBytesOf(entry) {
   const current = entry.current || {};
   const body = typeof current.body === 'string' ? current.body : '';
-  const meta = [current.title || '', current.summary || '', Array.isArray(current.keywords) ? current.keywords.join(',') : ''].join('\n');
-  return Buffer.byteLength(body) + Buffer.byteLength(meta);
+  const meta = [current.title || '', current.summary || '', current.when || '',
+    Array.isArray(current.keywords) ? current.keywords.join(',') : ''].join('\n');
+  return Buffer.byteLength(body) + Buffer.byteLength(meta) + Buffer.byteLength(fieldsBytesOf(current));
+}
+
+/**
+ * 结构化字段也要计入预算：条件、清单、关联、触发词都占模型可见额度。
+ * 键顺序固定，state 与 store 两边算出来的数字必须一致。
+ */
+export function fieldsBytesOf(current) {
+  return JSON.stringify({
+    topicKey: current.topicKey || '',
+    triggers: Array.isArray(current.triggers) ? current.triggers : [],
+    applicability: current.applicability || 'all_in_scope',
+    conditions: Array.isArray(current.conditions) ? current.conditions : [],
+    selection: current.selection || null,
+    links: Array.isArray(current.links) ? current.links : [],
+  });
 }
 
 function activeBytesOf(state) {
@@ -485,15 +512,16 @@ function toStateEntry(legacy, body, status) {
       when: legacy.when || '',
       keywords: Array.isArray(legacy.tags) ? legacy.tags : [],
       topicKey: legacy.topicKey || '',
-      triggers: [],
-      applicability: 'all_in_scope',
-      conditions: [],
-      selection: null,
-      links: [],
+      triggers: Array.isArray(legacy.triggers) ? legacy.triggers : [],
+      /** 旧库只有一句 when 的条目不猜条件：先标 unresolved，第一次读取时让人确认。 */
+      applicability: legacy.applicability || (legacy.when ? 'unresolved' : 'all_in_scope'),
+      conditions: Array.isArray(legacy.conditions) ? legacy.conditions : [],
+      selection: legacy.selection || null,
+      links: Array.isArray(legacy.links) ? legacy.links : [],
       aliases: Array.isArray(legacy.aliases) ? legacy.aliases : [],
     },
     maintenance: {
-      reviewState: 'active',
+      reviewState: 'legacy_unreviewed',
       sourceRefs: [],
       retiredNames: Array.isArray(legacy.aliases) ? legacy.aliases : [],
       versions: Array.isArray(legacy.versions) ? legacy.versions : [],
@@ -571,6 +599,7 @@ function adoptableLegacy(scope) {
  */
 export function migrateLegacy(scope, options = {}) {
   return withScopeLock(scope, () => {
+    if (purgeIntent(scope)) throw new StateError('purge_pending', '这个记忆库正在彻底删除，迁移暂停；先调用 resumePurge 收尾');
     const report = migrationReport(scope);
     if (!report.required && !report.adoptable.length) return { migrated: false, report };
     const decisions = options.decisions || {};
@@ -667,7 +696,11 @@ export function migrateLegacy(scope, options = {}) {
  * 读当前状态：只有「完全没有」才算新库；坏文件、未知版本、迁移痕迹都报错，
  * 绝不用空库覆盖。
  */
-export function load(scope) {
+export function load(scope, options = {}) {
+  const intent = purgeIntent(scope);
+  if (intent && !options.allowPurge) {
+    throw new StateError('purge_pending', `这个记忆库正在彻底删除（${intent.operationId}），先调用 resumePurge 收尾；期间不提供内容读取`);
+  }
   const current = stateFile(scope);
   let data = null;
   try {
@@ -754,4 +787,233 @@ export function readEntryBody(scope, id) {
   const entry = loaded.state.entries.find((row) => row.id === id);
   if (!entry) return null;
   return { body: entry.current.body, entry };
+}
+
+
+/** 屏障只在 intent 存在期间生效：它不含标题与正文，只记身份与两个固定 epoch。 */
+export function purgeIntent(scope) {
+  const file = purgeIntentFile(scope);
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw new StateError('unavailable', `彻底删除的意图文件读不出来（${error.code || 'IO'}）：${file}`);
+  }
+  let row;
+  try {
+    row = JSON.parse(raw);
+  } catch {
+    throw new StateError('corrupt', `彻底删除的意图文件坏了，已停止读写：${file}`);
+  }
+  const ok = row && typeof row.operationId === 'string' && row.operationId
+    && typeof row.toEpoch === 'string' && row.toEpoch
+    && Array.isArray(row.ids) && row.ids.length > 0;
+  if (!ok) throw new StateError('corrupt', `彻底删除的意图文件缺字段，已停止读写：${file}`);
+  return row;
+}
+
+/** 精确指纹：标题 + 前置条件，不存原文，只用来挡住换个说法的重学。 */
+export function fingerprintOf(current) {
+  const text = [current && current.title, current && current.when]
+    .map((part) => String(part || '').replace(/\s+/g, ' ').trim().toLowerCase())
+    .join('\n');
+  return crypto.createHash('sha256').update(text).digest('hex').slice(0, 32);
+}
+
+/** 有限期抑制可以过期清掉；forgotten_source 永不过期，也不静默淘汰。 */
+function pruneSuppressions(rows) {
+  const now = Date.now();
+  const alive = [];
+  const shortLived = [];
+  for (const row of rows || []) {
+    if (!row || typeof row.reason !== 'string') continue;
+    if (row.reason === 'forgotten_source') {
+      alive.push(row);
+      continue;
+    }
+    const expires = Date.parse(row.expiresAt || '');
+    if (Number.isFinite(expires) && expires > now) shortLived.push(row);
+  }
+  const room = Math.max(0, LIMITS.suppressions - alive.length);
+  return [...alive, ...shortLived.slice(-room)];
+}
+
+function sentinelsOf(entry) {
+  const current = entry.current || {};
+  const out = new Set();
+  const push = (value) => {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    if (text.length >= 4) out.add(text);
+  };
+  push(current.title);
+  push(current.summary);
+  push(current.body);
+  push(current.when);
+  for (const name of current.aliases || []) push(name);
+  for (const version of (entry.maintenance && entry.maintenance.versions) || []) {
+    push(version.title);
+    push(version.summary);
+    push(version.body);
+    push(version.when);
+  }
+  return [...out];
+}
+
+const PURGE_KEEP = new Set(['state.json', 'state.prev.json', '.lock', 'purge.intent.json']);
+
+/** 受管副本一次性清掉：旧版目录、md 正文、旧归档、失败提交残留、缓存文件。 */
+function cleanupManaged(scope) {
+  for (const name of ['entries', 'archive', 'legacy']) {
+    fs.rmSync(path.join(scope.dir, name), { recursive: true, force: true });
+  }
+  for (const name of ['index.json', 'migration.intent.json']) {
+    fs.rmSync(path.join(scope.dir, name), { force: true });
+  }
+  let names = [];
+  try {
+    names = fs.readdirSync(scope.dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (PURGE_KEEP.has(name)) continue;
+    if (name.includes('.tmp')) fs.rmSync(path.join(scope.dir, name), { force: true });
+  }
+}
+
+function fileContains(file, sentinels) {
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch {
+    return false;
+  }
+  for (const sentinel of sentinels) {
+    if (raw.includes(sentinel)) return true;
+    const escaped = JSON.stringify(sentinel).slice(1, -1);
+    if (escaped !== sentinel && raw.includes(escaped)) return true;
+    const lines = sentinel.split('\n').map((line) => line.trim()).filter((line) => line.length >= 4);
+    for (const line of lines) {
+      if (raw.includes(line) || raw.includes(JSON.stringify(line).slice(1, -1))) return true;
+    }
+  }
+  return false;
+}
+
+/** 清理后自检：还有受管副本就留在 purge_pending，不提前报成功。 */
+function leftoversIn(scope, sentinels) {
+  if (!sentinels.length) return [];
+  const hits = [];
+  const walk = (dir) => {
+    let names = [];
+    try {
+      names = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const dirent of names) {
+      const file = path.join(dir, dirent.name);
+      if (dirent.isDirectory()) walk(file);
+      else if (dirent.name !== '.lock' && fileContains(file, sentinels)) hits.push(dirent.name);
+    }
+  };
+  walk(scope.dir);
+  return hits;
+}
+
+/**
+ * 彻底删除：锁内先落 intent 当屏障，再整份发布删除后的状态并旋转 epoch，
+ * 然后把 prev 覆盖成删除后的状态、清掉受管旧副本，自检通过才移除 intent。
+ * 任何一步中断都停在 purge_pending，重启后由 resumePurge 续做。
+ */
+export function purge(scope, options = {}) {
+  return withScopeLock(scope, () => {
+    const existing = purgeIntent(scope);
+    if (existing && options.resume !== true) {
+      throw new StateError('purge_pending', `上一次彻底删除没做完（${existing.operationId}），先调用 resumePurge 收尾`);
+    }
+    let loaded = load(scope, { allowPurge: true });
+    let intent = existing;
+    if (!intent) {
+      const ids = [...new Set((Array.isArray(options.ids) ? options.ids : [])
+        .filter((id) => typeof id === 'string' && /^mem_[a-z0-9]{6,}$/.test(id)))];
+      if (!ids.length) throw new StateError('invalid', '没有要彻底删除的条目');
+      intent = {
+        operationId: typeof options.operationId === 'string' && options.operationId
+          ? options.operationId
+          : `purge_${crypto.randomBytes(6).toString('hex')}`,
+        scopeKey: scope.key,
+        storeId: loaded.state.storeId,
+        fromEpoch: loaded.state.epoch,
+        toEpoch: crypto.randomUUID(),
+        ids,
+        phase: 'planned',
+        at: new Date().toISOString(),
+      };
+      writeDurable(purgeIntentFile(scope), `${JSON.stringify(intent, null, 2)}\n`);
+      loaded = load(scope, { allowPurge: true });
+    }
+    const ids = new Set(intent.ids);
+    const removed = loaded.state.entries.filter((entry) => ids.has(entry.id));
+    const alreadyPublished = loaded.state.epoch === intent.toEpoch;
+    if (alreadyPublished) {
+      writeDurable(prevFile(scope), encodeState(loaded.state));
+      cleanupManaged(scope);
+      fs.rmSync(purgeIntentFile(scope), { force: true });
+      return { ok: true, replay: true, ids: [...ids], operationId: intent.operationId, epoch: loaded.state.epoch, generation: loaded.state.generation, scopeKey: scope.key };
+    }
+    if (!removed.length) {
+      fs.rmSync(purgeIntentFile(scope), { force: true });
+      return { ok: true, missing: true, ids: [...ids], operationId: intent.operationId, epoch: loaded.state.epoch, generation: loaded.state.generation, scopeKey: scope.key };
+    }
+    const draft = JSON.parse(JSON.stringify(loaded.state));
+    const sentinels = [];
+    for (const entry of removed) sentinels.push(...sentinelsOf(entry));
+    draft.entries = draft.entries.filter((entry) => !ids.has(entry.id));
+    draft.candidates = (draft.candidates || []).filter((row) => !ids.has(row.targetId)
+      && !ids.has(row.draft && row.draft.targetId));
+    const now = new Date().toISOString();
+    for (const entry of removed) {
+      draft.suppressions.push({
+        fingerprint: fingerprintOf(entry.current),
+        sourceIds: Array.isArray(entry.maintenance && entry.maintenance.sourceRefs) ? [...entry.maintenance.sourceRefs] : [],
+        reason: 'forgotten_source',
+        at: now,
+        expiresAt: null,
+      });
+    }
+    draft.suppressions = pruneSuppressions(draft.suppressions);
+    draft.receipts = [{
+      operationId: intent.operationId,
+      changed: true,
+      revisionAfter: loaded.state.generation + 1,
+      kind: 'purge',
+      at: now,
+    }];
+    draft.epoch = intent.toEpoch;
+    draft.generation = loaded.state.generation + 1;
+    draft.updatedAt = now;
+    validateState(draft);
+    publish(scope, draft, loaded.exists);
+    writeDurable(prevFile(scope), encodeState(draft));
+    cleanupManaged(scope);
+    const leftovers = leftoversIn(scope, sentinels);
+    if (leftovers.length) {
+      throw new StateError('purge_pending', `还有受管副本没清掉（${leftovers.join('、')}），重试继续清理`);
+    }
+    fs.rmSync(purgeIntentFile(scope), { force: true });
+    return {
+      ok: true,
+      ids: [...ids],
+      operationId: intent.operationId,
+      epoch: draft.epoch,
+      generation: draft.generation,
+      scopeKey: scope.key,
+    };
+  });
+}
+
+export function resumePurge(scope) {
+  return purge(scope, { resume: true });
 }

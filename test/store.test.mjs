@@ -201,17 +201,16 @@ test('archived or 90-day-stale entries render without a summary', () => {
   assert.equal(rendered.text.split('\n')[0].includes(item.record.id), true);
 });
 
-test('search bumps hits and lastUsed', () => {
+test('search and read leave hits and lastUsed alone', () => {
   const scope = fresh('hits');
   const item = upsert(scope, { title: '常用条目', summary: '经常被翻出来的条目', body: 'x' });
+  const before = loadIndex(scope).entries.find((entry) => entry.id === item.record.id);
   search(scope, '常用条目');
-  const record = loadIndex(scope).entries.find((entry) => entry.id === item.record.id);
-  assert.equal(record.hits, 1);
-  assert.ok(Date.parse(record.lastUsed) >= Date.parse(item.record.created));
-  assert.ok(record.lastUsed.endsWith('Z'));
-  const generation = loadIndex(scope).generation;
-  store.saveIndex(scope, loadIndex(scope));
-  assert.equal(loadIndex(scope).generation, generation);
+  readEntry(scope, item.record.id);
+  const after = loadIndex(scope).entries.find((entry) => entry.id === item.record.id);
+  assert.equal(after.hits, before.hits);
+  assert.equal(after.lastUsed, before.lastUsed);
+  assert.equal(loadIndex(scope).generation, before.generation ?? loadIndex(scope).generation);
 });
 
 test('readEntry returns the body from state, unknown ids are null', () => {
@@ -237,7 +236,7 @@ test('forget archives both body and record; undo restores the previous version',
   const archived = loadIndex(scope).archived.find((item) => item.id === first.record.id);
   assert.equal(archived.status, 'archived');
   assert.equal(archived.body, '第一版正文');
-  assert.equal(forget(scope, first.record.id), null);
+  assert.equal(forget(scope, first.record.id, { mode: 'archive' }), null);
 });
 
 test('suggestion gate, keep, replay and reject', () => {
@@ -407,7 +406,7 @@ test('projects and the global layer stay separate', () => {
   assert.equal(global[0].scope, 'global');
   const rendered = renderIndex(global);
   assert.match(rendered.text, /^- \[全局\] mem_/);
-  const removed = forget(b, 'mem_000000000000');
+  const removed = forget(b, 'mem_000000000000', { mode: 'archive' });
   assert.equal(removed, null);
 });
 

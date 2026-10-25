@@ -72,6 +72,13 @@ for (const name of names) {
 }
 
 const saveParams = defs.get('memory_save').parameters.properties;
+/** 来源只能由服务端判定：参数里不存在可伪造成「用户明确要求」的字段。 */
+for (const key of ['source', 'origin', 'confirmed', 'force', 'autoRecall']) {
+  assert.equal(key in saveParams, false, `memory_save 不该接受 ${key}`);
+}
+assert.equal(saveParams.mode.enum.includes('replace_current'), true);
+assert.equal(JSON.stringify(saveParams.applicability.enum), JSON.stringify(['all_in_scope', 'conditional', 'unresolved']));
+
 assert.deepEqual(saveParams.resolution.enum, ['distinct']);
 assert.equal(saveParams.id.type, 'string');
 assert.deepEqual(saveParams.scope.enum, ['project', 'global']);
@@ -84,6 +91,11 @@ assert.equal(saved.needsResolution, false);
 assert.equal(saved.merged, false);
 assert.equal(saved.changed, true);
 assert.equal(saved.scope, 'project');
+// 「以后都用」这种措辞不带 scope 时落在项目层，不会自动升级成全局偏好
+const phrased = await exec('memory_save', { title: '以后都用这个一次性脚本', summary: '这个脚本只跑一次', body: 'bash run.sh' });
+assert.equal(phrased.scope, 'project');
+assert.equal(store.loadIndex(store.globalScope()).entries.some((item) => item.title === '以后都用这个一次性脚本'), false);
+
 assert.equal(typeof saved.id, 'string');
 assert.match(render('memory_save', {}, saved), /^memory · saved "发布顺序" · mem_[a-z0-9]+ · 第 1 版$/);
 
@@ -135,9 +147,14 @@ assert.equal(read.body, '第一步\n第二步');
 assert.equal(read.revision, 3);
 assert.match(render('memory_read', {}, read), new RegExp(`^memory · 「发布顺序」（发版当天） · ${saved.id} · 第 3 版`));
 
-const archived = await exec('memory_forget', { id: distinct.id });
+// 没点明归档还是彻底忘掉时不动盘，先返回待确认
+const undecided = await exec('memory_forget', { id: distinct.id });
+assert.equal(undecided.mode, 'needs_resolution');
+assert.match(render('memory_forget', {}, undecided), new RegExp(`^memory · 先确认是归档还是彻底忘掉 · ${distinct.id}$`));
+assert.ok(store.locate(store.scopeOf(cwd), distinct.id));
+const archived = await exec('memory_forget', { id: distinct.id, mode: 'archive' });
 assert.equal(archived.id, distinct.id);
-assert.match(render('memory_forget', {}, archived), new RegExp(`^memory · archived "发布顺序是啥" · ${distinct.id}$`));
+assert.match(render('memory_forget', {}, archived), new RegExp(`^memory · archived "发布顺序是啥" · ${distinct.id}，可找回$`));
 assert.equal(await exec('memory_save', { title: '发布顺序是啥', summary: '发版前要按顺序做的事', body: '第三条' }).then((v) => v.merged), false);
 
 // ── suggestion → keep → replay → reject ──────────────────────────────────────
@@ -223,7 +240,9 @@ assert.notEqual((await call('/lite-memory/keep', { candidateId: 'sug_000000', cw
 assert.equal((await call('/lite-memory/citations', {}, { method: 'GET' })).status, 405);
 
 // ── 自动提示：只在这句话跟已有记忆有关时出现，且不改命中计数 ─────────────────
-const hinted = await exec('memory_save', { title: 'Chrome 弹钥匙串窗口要带 mock keychain', summary: '临时 profile 起 Chrome 会弹钥匙串窗口', when: '用 Chrome 抓页面时' });
+const hinted = await exec('memory_save', { title: 'Chrome 弹钥匙串窗口要带 mock keychain', summary: '临时 profile 起 Chrome 会弹钥匙串窗口' });
+// 只有一句 when、没有结构化条件的条目属于未解决，不自动注入
+await exec('memory_save', { title: '发布窗口在周四晚上', summary: '只在周四晚上发版', when: '周四晚上' });
 currentAgent = { id: 'session-contract', cwd };
 const preStep = subscriptions.get('agent/pre-step');
 assert.equal(typeof preStep, 'function');
@@ -237,7 +256,9 @@ assert.match(hintText, new RegExp(hinted.id));
 assert.match(hintText, /需要细节用 memory_read/);
 const hitsAfter = store.loadIndex(store.scopeOf(cwd)).entries.find((item) => item.id === hinted.id).hits;
 assert.equal(hitsAfter, hitsBefore);
-await preStep({ agent: currentAgent, messages: [{ role: 'user', content: [{ type: 'text', text: '把这个按钮的圆角改小一点' }] }], turn: 3, step: 0 }, pass);
+await preStep({ agent: currentAgent, messages: [{ role: 'user', content: [{ type: 'text', text: '周四晚上发版要注意什么' }] }], turn: 3, step: 0 }, pass);
+assert.equal(promptContexts[0].text().includes('发布窗口在周四晚上'), false);
+await preStep({ agent: currentAgent, messages: [{ role: 'user', content: [{ type: 'text', text: '把这个按钮的圆角改小一点' }] }], turn: 4, step: 0 }, pass);
 assert.equal(promptContexts[0].text(), '');
 assert.equal(subscriptions.has('agent/disposed'), true);
 
