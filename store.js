@@ -206,6 +206,27 @@ function textField(value, max, label) {
   return text;
 }
 
+/**
+ * 标题就是身份：不留分隔符、不留被拼进来的条件。
+ * 「名字｜条件」「名字 <条件开头>」这类拼接过的东西，存之前切回名字。
+ */
+function cleanTitle(value, when) {
+  let text = String(value ?? '').replace(/\s+/g, ' ').trim();
+  const cut = text.search(/[｜|]/);
+  if (cut >= 0) text = text.slice(0, cut).trim();
+  const hint = normalizeText(when, 200);
+  if (hint.length >= 4) {
+    const at = text.indexOf(hint.slice(0, 8));
+    if (at > 0) text = text.slice(0, at).trim();
+    const open = Math.max(text.lastIndexOf('（'), text.lastIndexOf('('));
+    if (open > 0) {
+      const inner = text.slice(open + 1).replace(/[）)]+$/u, '').trim();
+      if (inner.startsWith(hint.slice(0, 6))) text = text.slice(0, open).trim();
+    }
+  }
+  return text.replace(/[（(：:，,、；;]+$/u, '').trim();
+}
+
 export function validSummary(summary) {
   const text = String(summary ?? '').replace(/\s+/g, ' ').trim();
   if (!text) return { ok: false, reason: '摘要为空' };
@@ -222,7 +243,8 @@ export function validSummary(summary) {
 export function normalizeDraft(source, options = {}) {
   const draft = typeof source === 'string' ? { title: source } : source && typeof source === 'object' ? source : {};
   const has = (key) => Object.prototype.hasOwnProperty.call(draft, key) && draft[key] !== undefined;
-  const title = textField(draft.title, LIMITS.titleChars, '标题');
+  const when = has('when') ? textField(draft.when, LIMITS.whenChars, '前置条件') : '';
+  const title = textField(cleanTitle(draft.title, when), LIMITS.titleChars, '标题');
   if (!title) throw new Error('标题为空');
   let summary;
   const rawSummary = String(draft.summary ?? '').replace(/\s+/g, ' ').trim();
@@ -235,7 +257,6 @@ export function normalizeDraft(source, options = {}) {
   } else {
     throw new Error('摘要为空');
   }
-  const when = has('when') ? textField(draft.when, LIMITS.whenChars, '前置条件') : '';
   const body = String(draft.body ?? '').trim();
   const bodyBytes = Buffer.byteLength(body);
   if (bodyBytes > LIMITS.entryBytes) {
@@ -447,7 +468,7 @@ function applyDraft(scope, index, source, now) {
       return { record, merged: true, mergedFrom: null, similar: null, similarList, draft, noop: true, previousBody: oldBody };
     }
     const versions = snapshot(record, oldBody);
-    const titles = [...new Set([...(record.aliases || []), record.title])].slice(-5);
+    const titles = [...new Set([...(record.aliases || []), record.title].map((name) => cleanTitle(name)).filter(Boolean))].slice(-5);
     const nextRecord = {
       ...record,
       ...next,
