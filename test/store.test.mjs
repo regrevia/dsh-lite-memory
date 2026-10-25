@@ -390,6 +390,19 @@ test('citation body reads the entry and rejects a foreign path', () => {
   assert.equal(readCitationBody('session-escape', 'mem_111111111111'), null);
 });
 
+test('citation rows follow the current title and layer', () => {
+  const scope = fresh('cite-fresh');
+  const created = upsert(scope, { title: '旧标题', summary: '会被改名' }).record;
+  recordCitations(scope, 'session-fresh', [{ ...created, scope: 'project' }]);
+  assert.equal(listCitations('session-fresh').items[0].title, '旧标题');
+  upsert(scope, { id: created.id, title: '新标题', summary: '会被改名' });
+  assert.equal(listCitations('session-fresh').items[0].title, '新标题');
+
+  const global = upsert(globalScope(), { title: '跨项目规则', summary: '换个项目也成立' }).record;
+  recordCitations(scope, 'session-fresh', [{ ...global, scope: 'global' }]);
+  assert.equal(listCitations('session-fresh').items[0].scope, 'global');
+});
+
 test('old citation session files are pruned', () => {
   const scope = fresh('cite-prune');
   recordCitations(scope, 'session-old', [{ id: 'mem_000000000001', title: '旧的' }]);
