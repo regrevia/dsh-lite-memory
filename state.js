@@ -4,8 +4,68 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 
-export const STATE_VERSION = 2;
-export const STATE_FORMAT = 'dsh-lite-memory/state@2';
+export const STATE_VERSION = 3;
+export const STATE_FORMAT = 'dsh-lite-memory/state@3';
+/** 2 版状态照常读，下一次写入升到 3 版；旧程序看到 3 版会拒绝写，不会丢掉实验标记。 */
+export const LEGACY_STATE_FORMAT = 'dsh-lite-memory/state@2';
+export const LEGACY_STATE_VERSION = 2;
+
+/** 一期只有一个实验开关，策略版本不认时停止实验而不是猜测兼容。 */
+export const EVOLUTION_POLICY_VERSION = 1;
+
+function newEvolution() {
+  return { enabled: false, epoch: '', policyVersion: EVOLUTION_POLICY_VERSION, feedbackGeneration: 0 };
+}
+
+/** 缺字段即关闭；未知或不兼容版本一律按关闭处理，也不改写现场。 */
+export function evolutionOf(state) {
+  const raw = state && state.experimental && state.experimental.projectEvolution;
+  if (raw === undefined) {
+    return { enabled: false, epoch: '', policyVersion: EVOLUTION_POLICY_VERSION, feedbackGeneration: 0, compatible: true };
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { enabled: false, epoch: '', policyVersion: 0, feedbackGeneration: 0, compatible: false };
+  }
+  const policyVersion = Number.isInteger(raw.policyVersion) ? raw.policyVersion : 0;
+  const compatible = policyVersion === EVOLUTION_POLICY_VERSION;
+  return {
+    enabled: compatible && raw.enabled === true,
+    epoch: typeof raw.epoch === 'string' ? raw.epoch : '',
+    policyVersion,
+    feedbackGeneration: Number.isInteger(raw.feedbackGeneration) ? raw.feedbackGeneration : 0,
+    compatible,
+  };
+}
+
+/** 开关事务里的纯状态部分：旋转 epoch、推进反馈代次；关闭时把试用条目转暂停待复核。 */
+export function applyEvolution(draft, enabled) {
+  const now = new Date().toISOString();
+  const current = evolutionOf(draft);
+  if (!current.compatible) throw new StateError('invalid', '实验配置版本不认，先不要改动开关');
+  const next = Boolean(enabled);
+  if (current.enabled === next) return { changed: false, enabled: next };
+  const config = {
+    enabled: next,
+    epoch: crypto.randomUUID(),
+    policyVersion: EVOLUTION_POLICY_VERSION,
+    feedbackGeneration: current.feedbackGeneration + 1,
+    changedAt: now,
+  };
+  draft.experimental = { ...(draft.experimental || {}), projectEvolution: config };
+  if (!next) {
+    for (const entry of draft.entries) {
+      const learning = entry && entry.maintenance && entry.maintenance.learning;
+      if (learning && learning.state === 'trial') {
+        learning.state = 'paused';
+        learning.blockedReason = 'needs_revalidation';
+        learning.pausedAt = now;
+        learning.pausedBy = 'experiment_off';
+      }
+    }
+    draft.candidates = draft.candidates.filter((row) => !row || row.origin !== 'project_evolution');
+  }
+  return { changed: true, enabled: next, epoch: config.epoch };
+}
 
 /** 容量与预算都归这里管：写入路径只报「要写什么」，能不能落地由 state 决定。 */
 export const LIMITS = {
@@ -242,6 +302,7 @@ export function emptyState(scope) {
     candidates: [],
     receipts: [],
     suppressions: [],
+    experimental: { projectEvolution: newEvolution() },
   };
 }
 
@@ -294,6 +355,25 @@ export function validateState(data) {
       throw new StateError('invalid', '记忆抑制规则的 expiresAt 不合法');
     }
   }
+  if (data.experimental !== undefined) {
+    const box = data.experimental;
+    if (!box || typeof box !== 'object' || Array.isArray(box)) throw new StateError('invalid', '记忆状态 experimental 不是对象');
+    const evolution = box.projectEvolution;
+    if (evolution !== undefined) {
+      if (!evolution || typeof evolution !== 'object' || Array.isArray(evolution)) {
+        throw new StateError('invalid', '记忆状态实验配置不是对象');
+      }
+      if (typeof evolution.enabled !== 'boolean') throw new StateError('invalid', '记忆状态实验开关不是布尔值');
+      if (typeof evolution.epoch !== 'string' || (evolution.enabled && !evolution.epoch)) {
+        throw new StateError('invalid', '记忆状态实验配置缺少 epoch');
+      }
+      if (!Number.isInteger(evolution.policyVersion)) throw new StateError('invalid', '记忆状态实验策略版本不对');
+      if (evolution.feedbackGeneration !== undefined
+        && (!Number.isInteger(evolution.feedbackGeneration) || evolution.feedbackGeneration < 0)) {
+        throw new StateError('invalid', '记忆状态反馈代次不对');
+      }
+    }
+  }
   return data;
 }
 
@@ -312,10 +392,20 @@ function readEnvelope(file) {
   } catch {
     throw fail(file, '已损坏');
   }
-  if (!data || data.format !== STATE_FORMAT || !data.payload || typeof data.payload !== 'object') {
+  if (!data || (data.format !== STATE_FORMAT && data.format !== LEGACY_STATE_FORMAT)
+    || !data.payload || typeof data.payload !== 'object') {
     throw fail(file, '格式不认');
   }
   if (data.checksum !== checksumOf(data.payload)) throw fail(file, '校验和不一致');
+  if (data.format === LEGACY_STATE_FORMAT) {
+    if (data.payload.schemaVersion !== LEGACY_STATE_VERSION) throw fail(file, '版本对不上');
+    const upgraded = { ...data.payload, schemaVersion: STATE_VERSION };
+    if (upgraded.experimental === undefined) {
+      upgraded.experimental = { projectEvolution: { enabled: false, epoch: '', policyVersion: EVOLUTION_POLICY_VERSION, feedbackGeneration: 0 } };
+    }
+    validateState(upgraded);
+    return upgraded;
+  }
   validateState(data.payload);
   return data.payload;
 }

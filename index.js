@@ -22,6 +22,8 @@ import {
   recordCitations,
   listCitations,
   readCitationBody,
+  evolutionStatus,
+  setEvolution,
   LIMITS,
 } from './store.js';
 import path from 'node:path';
@@ -105,7 +107,7 @@ function sameSurface(origin, selfOrigin) {
  * 「保留」「✕」的唯一入口。定位只认 id / candidateId，作用域由服务端按 id 查，
  * 不再从展示文案里解析标题或 [全局]。已处理的候选重放返回原回执。
  */
-function keepHandler(webServer) {
+function keepHandler(webServer, cwdForSession) {
   return async (req, res) => {
     if (req.method !== 'POST') return sendJson(res, 405, { ok: false, reason: '只接受 POST' });
     const origin = req.headers.origin;
@@ -119,7 +121,8 @@ function keepHandler(webServer) {
           : pathname === REMOTE_PATH + '/citations' ? 'citations'
             : pathname === REMOTE_PATH + '/body' ? 'body'
               : pathname === REMOTE_PATH + '/move' ? 'move'
-                : pathname === REMOTE_PATH + '/resume-move' ? 'resume-move' : '';
+                : pathname === REMOTE_PATH + '/evolution' ? 'evolution'
+                  : pathname === REMOTE_PATH + '/resume-move' ? 'resume-move' : '';
     if (!action) return sendJson(res, 404, { ok: false, reason: '未知操作' });
     let body;
     try {
@@ -170,6 +173,33 @@ function keepHandler(webServer) {
         revision: found.revision,
         body: found.body,
       });
+    }
+
+    /**
+     * 项目实验开关：作用域只由服务端按 cwd 判，身份不确定就不写。
+     * 不传 enabled 是查状态；传布尔才是切换，切换在项目锁里旋转 epoch。
+     */
+    if (action === 'evolution') {
+      const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
+      if (!sessionId) return sendJson(res, 400, { ok: false, reason: '缺少 sessionId' });
+      const cwd = typeof cwdForSession === 'function' ? cwdForSession(sessionId) : '';
+      if (!cwd) return sendJson(res, 409, { ok: false, confirmed: false, reason: '这个会话还没有项目目录' });
+      const scope = scopeOf(cwd);
+      if (!scope.confirmed) {
+        return sendJson(res, 409, { ok: false, confirmed: false, reason: '项目根还没确认，先重新打开这个项目' });
+      }
+      const operationId = typeof body.operationId === 'string' ? body.operationId : '';
+      try {
+        const result = typeof body.enabled === 'boolean'
+          ? setEvolution(scope, body.enabled, { operationId })
+          : { ok: true, ...evolutionStatus(scope) };
+        return sendJson(res, result.ok === false ? 409 : 200, {
+          ...result,
+          project: path.basename(scope.cwd || '') || scope.key,
+        });
+      } catch (error) {
+        return sendJson(res, 409, { ok: false, reason: error instanceof Error ? error.message : '实验开关没有改动' });
+      }
     }
 
     if (action === 'citations') {
@@ -249,6 +279,7 @@ function refsOf(hits) {
     scope: item.scope || 'project',
     revision: item.revision || 1,
     status: item.status || 'ok',
+    origin: item.origin === 'project_evolution' ? 'project_evolution' : 'user_explicit',
   }));
 }
 
@@ -1020,7 +1051,17 @@ export function apply(ctx, config) {
   const mountRoute = (holder) => {
     const webServer = holder.webServer ?? holder;
     if (!webServer || typeof webServer.register !== 'function' || typeof webServer.getOrigin !== 'function') return;
-    holder.effect(() => webServer.register({ kind: 'prefix', path: REMOTE_PATH, handler: keepHandler(webServer) }), 'lite-memory: keep route');
+    const cwdForSession = (sessionId) => {
+      const sessions = getService('sessions');
+      if (!sessions || typeof sessions.get !== 'function') return '';
+      try {
+        const cwd = sessions.get(sessionId)?.header?.cwd;
+        return typeof cwd === 'string' ? cwd : '';
+      } catch {
+        return '';
+      }
+    };
+    holder.effect(() => webServer.register({ kind: 'prefix', path: REMOTE_PATH, handler: keepHandler(webServer, cwdForSession) }), 'lite-memory: keep route');
   };
   if (typeof ctx.inject === 'function') ctx.inject(['webServer'], (scope) => mountRoute(scope));
   else mountRoute(ctx);

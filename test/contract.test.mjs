@@ -15,6 +15,7 @@ let route = null;
 const webServer = { getOrigin: () => ORIGIN, register: (entry) => { route = entry; return () => {}; } };
 const effect = (fn) => { const dispose = fn(); return typeof dispose === 'function' ? dispose : () => {}; };
 let currentAgent = null;
+const sessionCwds = new Map();
 const subscriptions = new Map();
 const promptContexts = [];
 const ctx = {
@@ -24,6 +25,7 @@ const ctx = {
   get: (name) => {
     if (name === 'systemPrompt') return { context: (entry) => { promptContexts.push(entry); return () => {}; } };
     if (name === 'agents') return { currentInitiator: () => currentAgent };
+    if (name === 'sessions') return { get: (id) => (sessionCwds.has(id) ? { header: { cwd: sessionCwds.get(id) } } : undefined) };
     return undefined;
   },
   on: (event, handler) => { subscriptions.set(event, handler); return () => {}; },
@@ -262,6 +264,49 @@ assert.notEqual((await call('/lite-memory/citations', { sessionId: 'session-cont
 assert.notEqual((await call('/lite-memory/keep', { candidateId: 'sug_000000', cwd }, { origin: 'dsh-app://app' })).status, 403);
 assert.equal((await call('/lite-memory/citations', {}, { method: 'GET' })).status, 405);
 
+// ── 项目实验开关：每个项目各自一份，默认关闭，切换不碰别的项目 ─────────────────
+const evoCwd = path.join(os.tmpdir(), 'lite-memory-contract-evolution');
+const evoOther = path.join(os.tmpdir(), 'lite-memory-contract-evolution-other');
+fs.mkdirSync(evoCwd, { recursive: true });
+fs.mkdirSync(evoOther, { recursive: true });
+sessionCwds.set('session-evo', evoCwd);
+sessionCwds.set('session-evo-other', evoOther);
+const evoOff = await call('/lite-memory/evolution', { sessionId: 'session-evo' });
+assert.equal(evoOff.status, 200);
+assert.equal(evoOff.body.ok, true);
+assert.equal(evoOff.body.enabled, false);
+assert.equal(evoOff.body.compatible, true);
+assert.equal(evoOff.body.project, path.basename(evoCwd));
+const evoOn = await call('/lite-memory/evolution', { sessionId: 'session-evo', enabled: true, operationId: 'op_evo_on' });
+assert.equal(evoOn.status, 200);
+assert.equal(evoOn.body.enabled, true);
+assert.equal(evoOn.body.changed, true);
+assert.notEqual(evoOn.body.epoch, evoOff.body.epoch);
+const evoStatus = await call('/lite-memory/evolution', { sessionId: 'session-evo' });
+assert.equal(evoStatus.body.enabled, true);
+const evoOtherStatus = await call('/lite-memory/evolution', { sessionId: 'session-evo-other' });
+assert.equal(evoOtherStatus.body.enabled, false);
+const evoStateFile = path.join(store.scopeOf(evoCwd).dir, 'state.json');
+const evoDisk = JSON.parse(fs.readFileSync(evoStateFile, 'utf8'));
+assert.equal(evoDisk.format, 'dsh-lite-memory/state@3');
+assert.equal(evoDisk.payload.experimental.projectEvolution.enabled, true);
+const evoOffAgain = await call('/lite-memory/evolution', { sessionId: 'session-evo', enabled: false });
+assert.equal(evoOffAgain.body.enabled, false);
+assert.equal(evoOffAgain.body.compatible, true);
+assert.equal((await call('/lite-memory/evolution', {})).status, 400);
+assert.equal((await call('/lite-memory/evolution', { sessionId: 'session-evo' }, { origin: 'http://evil.example' })).status, 403);
+// 身份拿不准时拒绝写，也不拿进程 cwd 顶替
+const evoUnknown = path.join(os.tmpdir(), 'lite-memory-contract-evolution-unknown');
+fs.mkdirSync(evoUnknown, { recursive: true });
+const savedPath = process.env.PATH;
+process.env.PATH = '';
+sessionCwds.set('session-evo-unknown', evoUnknown);
+const evoUnconfirmed = await call('/lite-memory/evolution', { sessionId: 'session-evo-unknown', enabled: true });
+process.env.PATH = savedPath;
+assert.equal(evoUnconfirmed.status, 409);
+assert.equal(evoUnconfirmed.body.confirmed, false);
+assert.equal(fs.existsSync(path.join(store.scopeOf(evoUnknown).dir, 'state.json')), false);
+
 // ── 自动召回：只在这句话跟已有记忆有关时出现，且不改命中计数 ─────────────────
 const hinted = await exec('memory_save', { title: 'Chrome 弹钥匙串窗口要带 mock keychain', summary: '临时 profile 起 Chrome 会弹钥匙串窗口' });
 // 只有一句 when、没有结构化条件的条目属于未解决，不自动注入
@@ -308,7 +353,7 @@ assert.equal(savedMeta.changed, true);
 assert.ok(['created', 'updated'].includes(savedMeta.mode));
 assert.equal('path' in savedMeta, false);
 const searchMeta = metaOf('memory_search', {}, globalSearch);
-assert.deepEqual(Object.keys(searchMeta.refs[0]).sort(), ['id', 'revision', 'scope', 'status', 'title']);
+assert.deepEqual(Object.keys(searchMeta.refs[0]).sort(), ['id', 'origin', 'revision', 'scope', 'status', 'title']);
 assert.equal(searchMeta.refs[0].id, global.id);
 const readValue = await exec('memory_read', { id: global.id });
 const readMeta = metaOf('memory_read', {}, readValue);
