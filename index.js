@@ -2,7 +2,6 @@ import {
   scopeOf,
   globalScope,
   upsert,
-  peek,
   search,
   readEntry,
   readLinks,
@@ -291,19 +290,163 @@ function scopeLabel(value) {
   return value.scope === 'global' ? ' [全局]' : '';
 }
 
-/** 自动提示只在用户这句话跟已有记忆真有关时出现；整条索引不常驻。 */
-const HINT_QUERY_CHARS = 400;
-const HINT_TTL_MS = 20 * 60 * 1000;
-/** 这些是宿主自己合成的「用户消息」，不是用户说的话，不能拿来当查询。 */
-const hintState = new Map();
+/**
+ * 自动召回：用户这句话真跟已有记忆有关才给一张短卡，整条索引不常驻。
+ * 策略、预算与冻结快照都在 apply 内部，provider 只读内存。
+ */
+export const RECALL_MODES = ['adaptive', 'tool_only', 'off'];
+const RECALL_QUERY_CHARS = 400;
+const RECALL_DEADLINE_MS = 150;
+const RECALL_HEADER = '已有记忆可能相关（需要细节用 memory_read 取正文，别凭标题猜）：';
 
-function renderHint(items) {
-  const rows = items.slice(0, 3).map((item) => `- 「${item.title}」${item.scope === 'global' ? ' [全局]' : ''} · ${item.id}`);
-  return `已有记忆可能相关（需要细节用 memory_read 取正文，别凭标题猜）：\n${rows.join('\n')}`;
+/** 卡片只放够判断要不要读的几行；必要前提整条在场，装不下就整卡省略。 */
+function renderRecallCard(card) {
+  const parts = [`- 「${card.title}」${card.scope === 'global' ? ' [全局]' : ''} · ${card.id} · 第 ${card.revision} 版`];
+  if (card.summary) parts.push(`｜${card.summary}`);
+  if (card.conditions && card.conditions.length) parts.push(`｜前提：${card.conditions.join('、')}`);
+  if (card.selection) parts.push(`｜只适用于 ${card.selection}`);
+  if (card.related) parts.push(`｜关联 ${card.related} 条`);
+  return parts.join('');
 }
 
-export function apply(ctx) {
+export function apply(ctx, config) {
   const tools = ctx.tools;
+  const getService = (name) => (typeof ctx.get === 'function' ? ctx.get(name) : undefined);
+
+  /* ---------------- 自动召回：策略、冻结快照、任务窗口与请求预算 ---------------- */
+
+  /** 升级不覆盖用户的选择：默认 adaptive，别的模式只由明确配置切换。 */
+  const recallMode = () => (RECALL_MODES.includes(config?.mode) ? config.mode : 'adaptive');
+  /** 已准备好的快照只挂在 Agent 上，弱引用随手回收，不跨会话串。 */
+  const prepared = new WeakMap();
+  const generations = new WeakMap();
+  /** 同一真人请求共用一个额度窗口；provider 只读，不记账。 */
+  const windows = new Map();
+  const abortCleanups = new Map();
+  /** 哪些用户消息已经建立过窗口；工具续步不重复开窗。 */
+  const seenHumans = new Map();
+
+  const agentKey = (agent) => String(agent?.id ?? '');
+
+  const clearPrepared = (agent) => {
+    if (!agent) return;
+    prepared.delete(agent);
+    const key = agentKey(agent);
+    const cleanup = key ? abortCleanups.get(key) : null;
+    if (cleanup) {
+      abortCleanups.delete(key);
+      try { cleanup(); } catch { /* listener already gone */ }
+    }
+  };
+
+  const windowOf = (agent) => windows.get(agentKey(agent)) || null;
+
+  function affordable(win, bytes, bodies = 0) {
+    if (!win) return true;
+    if (win.reads >= view.REQUEST_LIMITS.reads) return false;
+    if (bodies && win.bodies + bodies > view.REQUEST_LIMITS.bodies) return false;
+    return win.bytes + bytes <= view.REQUEST_BYTES;
+  }
+
+  function openWindow(agent, { sessionId, turn, messageIds }) {
+    const key = agentKey(agent);
+    if (!key) return null;
+    const signature = `${sessionId}\u0000${turn}\u0000${messageIds.join(',')}`;
+    const existing = windows.get(key);
+    if (existing && existing.signature === signature) return existing;
+    const next = {
+      signature, sessionId, turn, messageIds,
+      bytes: 0, bodies: 0, reads: 0,
+      provided: new Map(), readBodies: new Map(), at: Date.now(),
+    };
+    windows.set(key, next);
+    return next;
+  }
+
+  /** 新消息才会建立新窗口；同一批消息在同一 turn 里只开一次。 */
+  function freshHumans(sessionId, humans) {
+    if (!humans.length) return [];
+    const seen = seenHumans.get(sessionId) || new Set();
+    const fresh = humans.filter((message) => {
+      const id = String(message?.id ?? '');
+      return id && !seen.has(id);
+    });
+    for (const message of humans) {
+      const id = String(message?.id ?? '');
+      if (id) seen.add(id);
+    }
+    while (seen.size > 400) seen.delete(seen.values().next().value);
+    seenHumans.set(sessionId, seen);
+    while (seenHumans.size > 64) seenHumans.delete(seenHumans.keys().next().value);
+    return fresh;
+  }
+
+  function fingerprintOf(scope) {
+    try {
+      const index = loadIndex(scope);
+      return `${index.scope}:${index.generation}:${index.epoch}`;
+    } catch {
+      return '';
+    }
+  }
+
+  /** 纯内存：读两层当前投影，先判适用再排序，整卡装预算。 */
+  function projectRecall(scope, query, context, win) {
+    const records = [];
+    const layerOf = new Map();
+    for (const source of [scope, globalScope()]) {
+      let index;
+      try { index = loadIndex(source); } catch { continue; }
+      for (const item of index.entries) {
+        if (!item || !item.title || item.status === 'archived') continue;
+        if (layerOf.has(item.id)) continue;
+        layerOf.set(item.id, source.key === 'global' ? 'global' : 'project');
+        records.push(item);
+      }
+    }
+    const ranked = view.rank(records, query, { limit: 8, requireApplicable: true, context });
+    let used = Buffer.byteLength(RECALL_HEADER);
+    const lines = [];
+    const cards = [];
+    for (const row of ranked) {
+      if (cards.length >= view.CARD.max) break;
+      const card = view.cardOf(row.record, layerOf.get(row.record.id));
+      const line = renderRecallCard(card);
+      const size = Buffer.byteLength(`\n${line}`);
+      if (used + size > view.CARD.bytes) continue;
+      const revision = card.revision || 1;
+      const already = win ? win.provided.get(card.id) === revision : false;
+      if (win && !already) {
+        if (!affordable(win, size)) continue;
+        win.bytes += size;
+        win.provided.set(card.id, revision);
+      }
+      used += size;
+      lines.push(line);
+      cards.push({ id: card.id, revision, scope: card.scope, title: card.title });
+    }
+    if (!cards.length) return null;
+    return { text: `${RECALL_HEADER}\n${lines.join('\n')}`, cards, bytes: used, query };
+  }
+
+  /** provider 只读内存快照：不查盘、不搜索、不写 hits、不动 lastUsed。 */
+  function recallText(holder) {
+    try {
+      const agent = holder?.agent ?? getService('agents')?.currentInitiator?.();
+      if (!agent) return '';
+      const state = prepared.get(agent);
+      if (!state) return '';
+      const signal = holder?.signal;
+      if (signal?.aborted) return '';
+      if (state.signal && signal && state.signal !== signal) return '';
+      const sessionId = agent?.session?.id;
+      if (state.sessionId !== (typeof sessionId === 'string' ? sessionId : '')) return '';
+      return state.text;
+    } catch {
+      return '';
+    }
+  }
+
 
   ctx.effect(() => tools.register({
     name: 'memory_save',
@@ -421,31 +564,54 @@ export function apply(ctx) {
     description: `按需检索已有记忆：先搜，命中再 memory_read 读正文。用户提到「记住了什么 / 上次 / 规范 / 约定 / 路径 / 凭据怎么取」，或者眼前反复出现的报错、弹窗、异常时，先查这里有没有记过解法。跨项目的通用条目以 [全局] 开头。中文长句可以直接当查询。每行带 id 与版次，更新时把 id 传回 memory_save。`,
     parameters: SEARCH_PARAMS,
     output: {
-      presentationMeta: (_args, value) => ({ kind: 'memory-search', count: value.count }),
+      presentationMeta: (_args, value) => ({ kind: 'memory-search', count: value.count, status: value.status || 'ok' }),
       schema: {
         type: 'object',
         properties: {
           count: { type: 'integer' },
           chars: { type: 'integer' },
           text: { type: 'string' },
+          status: { type: 'string', enum: ['ok', 'budget_exhausted', 'memory_disabled'] },
         },
         required: ['count', 'chars', 'text'],
         additionalProperties: false,
       },
       render: (_args, value) => [{
         type: 'text',
-        text: value.count > 0
-          ? `memory · 命中 ${value.count} 条 · 引用 ${value.chars} 字\n${value.text}`
-          : 'memory · 没有命中',
+        text: value.status === 'budget_exhausted'
+          ? 'memory · 本请求的记忆额度已用完'
+          : value.status === 'memory_disabled'
+            ? 'memory · 记忆检索已关闭'
+            : value.count > 0
+              ? `memory · 命中 ${value.count} 条 · 引用 ${value.chars} 字\n${value.text}`
+              : 'memory · 没有命中',
       }],
     },
     execute: async (args, execution) => {
+      if (recallMode() === 'off') return { count: 0, chars: 0, text: '', status: 'memory_disabled' };
+      const agent = execution?.agent;
+      const win = windowOf(agent);
+      if (win && !affordable(win, 0)) return { count: 0, chars: 0, text: '', status: 'budget_exhausted' };
       const scope = scopeOf(cwdOf(execution));
       const context = view.trustedContext(scope, {});
       const hits = search(scope, args.query, args.limit ?? 3, { context });
-      recordCitations(scope, sessionIdOf(execution), hits);
       const shown = hits.map((item) => view.toModelView(item, 'search'));
-      const rendered = renderIndex(shown);
+      let rendered = renderIndex(shown);
+      if (win) {
+        const header = `memory · 命中 ${shown.length} 条 · 引用 0 字\n`;
+        let kept = shown.length;
+        while (kept > 0 && !affordable(win, Buffer.byteLength(header) + rendered.chars)) {
+          kept -= 1;
+          rendered = renderIndex(shown.slice(0, kept));
+        }
+        if (kept === 0) return { count: 0, chars: 0, text: '', status: 'budget_exhausted' };
+        if (kept < shown.length) rendered = renderIndex(shown.slice(0, kept));
+        win.bytes += Buffer.byteLength(`memory · 命中 ${kept} 条 · 引用 ${rendered.chars} 字\n${rendered.text}`);
+        win.reads += 1;
+        recordCitations(scope, sessionIdOf(execution), hits.slice(0, kept));
+        return { count: kept, chars: rendered.chars, text: rendered.text };
+      }
+      recordCitations(scope, sessionIdOf(execution), hits);
       return { count: hits.length, chars: rendered.chars, text: rendered.text };
     },
   }), 'lite-memory: memory_search');
@@ -463,43 +629,78 @@ export function apply(ctx) {
           when: { type: 'string' },
           revision: { type: 'integer' },
           scope: { type: 'string' },
-          status: { type: 'string', enum: ['ok', 'needs_context', 'not_applicable', 'gone'] },
+          status: { type: 'string', enum: ['ok', 'needs_context', 'not_applicable', 'gone', 'budget_exhausted', 'memory_disabled'] },
           body: { type: 'string' },
           links: { type: 'string' },
+          repeat: { type: 'boolean' },
         },
         required: ['id', 'scope', 'status'],
         additionalProperties: false,
       },
       render: (_args, value) => [{
         type: 'text',
-        text: value.body
-          ? `memory · 「${value.title}」${value.when ? `（${value.when}）` : ''} · ${value.id} · 第 ${value.revision} 版${scopeLabel(value)}${value.status !== 'ok' ? ` · ${value.status}` : ''}\n${value.body}`
-          : `memory · 「${value.title}」的相关记忆\n${value.links || '(无)'}`,
+        text: value.status === 'budget_exhausted'
+          ? 'memory · 本请求的记忆额度已用完'
+          : value.status === 'memory_disabled'
+            ? 'memory · 记忆检索已关闭'
+            : value.repeat
+              ? `memory · 本请求已读过「${value.title}」 · ${value.id} · 第 ${value.revision} 版`
+              : value.body
+                ? `memory · 「${value.title}」${value.when ? `（${value.when}）` : ''} · ${value.id} · 第 ${value.revision} 版${scopeLabel(value)}${value.status !== 'ok' ? ` · ${value.status}` : ''}\n${value.body}`
+                : `memory · 「${value.title}」的相关记忆\n${value.links || '(无)'}`,
       }],
-      presentationMeta: (_args, value) => ({ kind: 'memory-read', id: value.id, scope: value.scope, revision: value.revision }),
+      presentationMeta: (_args, value) => ({ kind: 'memory-read', id: value.id, scope: value.scope, revision: value.revision, status: value.status }),
     },
     execute: async (args, execution) => {
+      if (recallMode() === 'off') return { id: '', scope: '', status: 'memory_disabled' };
       const scope = scopeOf(cwdOf(execution));
       const context = view.trustedContext(scope, {});
+      const agent = execution?.agent;
+      const win = windowOf(agent);
       if (args.view === 'links') {
         const found = readLinks(scope, args.id, { context });
         if (!found) throw new Error(`没有 ${args.id} 这条记忆`);
         const rows = found.links.map((link) => (link.status === 'invalid'
           ? `- ${link.id} · 已失效`
           : `- 「${link.title}」${link.scope === 'global' ? ' [全局]' : ''} · ${link.id} · 第 ${link.revision} 版`));
-        return { id: found.id, scope: found.scope, status: found.status, links: rows.join('\n') || '(无)' };
+        const text = rows.join('\n') || '(无)';
+        if (win) {
+          if (!affordable(win, Buffer.byteLength(text))) return { id: '', scope: '', status: 'budget_exhausted' };
+          win.bytes += Buffer.byteLength(text);
+          win.reads += 1;
+        }
+        return { id: found.id, scope: found.scope, status: found.status, links: text };
       }
       const record = readEntry(scope, args.id, { context });
       if (!record) throw new Error(`没有 ${args.id} 这条记忆`);
+      const revision = record.revision || 1;
+      const body = String(record.body ?? '');
+      if (win) {
+        if (!affordable(win, 0)) return { id: '', scope: '', status: 'budget_exhausted' };
+        const seenRevision = win.readBodies.get(record.id);
+        if (seenRevision === revision) {
+          const receipt = Buffer.byteLength(`memory · 本请求已读过「${record.title}」 · ${record.id} · 第 ${revision} 版`);
+          if (!affordable(win, receipt)) return { id: '', scope: '', status: 'budget_exhausted' };
+          win.bytes += receipt;
+          win.reads += 1;
+          return { id: record.id, title: record.title, when: record.when || '', revision, scope: record.scope, status: record.status, body: '', repeat: true };
+        }
+        const payload = Buffer.byteLength(body) + Buffer.byteLength(record.title) + Buffer.byteLength(record.when || '');
+        if (!affordable(win, payload, 1)) return { id: '', scope: '', status: 'budget_exhausted' };
+        win.bytes += payload;
+        win.bodies += 1;
+        win.reads += 1;
+        win.readBodies.set(record.id, revision);
+      }
       recordCitations(scope, sessionIdOf(execution), [record]);
       return {
         id: record.id,
         title: record.title,
         when: record.when || '',
-        revision: record.revision || 1,
+        revision,
         scope: record.scope,
         status: record.status,
-        body: record.body,
+        body,
       };
     },
   }), 'lite-memory: memory_read');
@@ -575,57 +776,157 @@ export function apply(ctx) {
   else mountRoute(ctx);
 
   /**
-   * 命中才提示：用户消息进来时只查一次（只读，不动 hits），命中就把标题挂到本步的
-   * 运行时上下文里；模型要看正文仍然自己调 memory_read。没命中时这段是空字符串。
+   * 自动召回：provider 在加载时注册一次，pre-step 拿到这次请求的准备结果后填充。
+   * provider 只读内存快照；没准备好就返回空字符串，不注入任何东西。
    */
-  const getService = (name) => (typeof ctx.get === 'function' ? ctx.get(name) : undefined);
   const prompt = getService('systemPrompt');
   if (prompt && typeof prompt.context === 'function') {
     ctx.effect(() => prompt.context({
-      name: 'lite-memory:hint',
-      order: 30,
+      name: 'lite-memory:recall',
+      order: 60,
       interpolate: false,
-      text: () => {
-        try {
-          if (hintState.size === 0) return '';
-          const agents = getService('agents');
-          const agent = typeof agents?.currentInitiator === 'function' ? agents.currentInitiator() : undefined;
-          const state = hintState.get(String(agent?.id ?? ''));
-          if (!state || !state.items.length) return '';
-          if (Date.now() - state.at > HINT_TTL_MS) return '';
-          return renderHint(state.items);
-        } catch {
-          return '';
-        }
-      },
-    }), 'lite-memory: hint context');
+      required: false,
+      text: (holder) => recallText(holder),
+    }), 'lite-memory: recall context');
   }
 
   if (typeof ctx.on === 'function') ctx.on('agent/pre-step', async (payload, next) => {
-    const decision = await next();
+    const startedAt = Date.now();
+    const agent = payload?.agent;
+    let decision;
     try {
-      const sessionId = String(payload?.agent?.id ?? '');
-      const text = view.newestUserQuery(payload?.messages).slice(0, HINT_QUERY_CHARS);
-      if (!sessionId || !text) return decision;
-      const previous = hintState.get(sessionId);
-      if (previous && previous.text === text) return decision;
-      const items = peek(scopeOf(cwdOf({ agent: payload.agent })), text, 3);
-      if (items.length === 0) {
-        hintState.delete(sessionId);
-      } else {
-        hintState.set(sessionId, { text, items, at: Date.now() });
-        console.log(`[lite-memory] hint ${items.map((item) => item.id).join(',')}`);
+      decision = await next();
+    } catch (error) {
+      clearPrepared(agent);
+      throw error;
+    }
+    try {
+      if (!agent || decision?.kind !== 'enter') {
+        clearPrepared(agent);
+        return decision;
+      }
+      const signal = payload?.signal;
+      if (signal?.aborted) {
+        clearPrepared(agent);
+        return decision;
+      }
+      const sessionId = String(agent?.session?.id ?? '');
+      if (!sessionId) {
+        clearPrepared(agent);
+        return decision;
+      }
+      const generation = (generations.get(agent) || 0) + 1;
+      generations.set(agent, generation);
+      const turn = String(payload?.turn ?? payload?.step?.turn ?? payload?.turnIndex ?? '');
+      const humans = (Array.isArray(decision.messages) ? decision.messages : [])
+        .filter((message) => message?.source?.kind === 'user');
+      const fresh = freshHumans(sessionId, humans);
+      const previous = prepared.get(agent);
+      const sameSession = previous && previous.sessionId === sessionId;
+
+      if (fresh.length === 0) {
+        /** 工具续步：内容冻结，只把快照绑到本步的 signal；盘上版本变了才重投影。 */
+        const turnChanged = !!(turn && previous?.turn && turn !== previous.turn);
+        if (!sameSession || turnChanged) {
+          clearPrepared(agent);
+          return decision;
+        }
+        previous.signal = signal;
+        const scope = scopeOf(cwdOf({ agent }));
+        const fingerprint = fingerprintOf(scope);
+        if (fingerprint && fingerprint !== previous.fingerprint) {
+          const win = windowOf(agent);
+          const snapshot = projectRecall(scope, previous.query, view.trustedContext(scope, {}), win);
+          if (generation === generations.get(agent) && !signal?.aborted) {
+            if (snapshot) {
+              previous.text = snapshot.text;
+              previous.cards = snapshot.cards;
+              previous.fingerprint = fingerprint;
+            } else {
+              clearPrepared(agent);
+            }
+          }
+        }
+        return decision;
+      }
+
+      if (recallMode() !== 'adaptive') {
+        clearPrepared(agent);
+        return decision;
+      }
+
+      const query = view.newestUserQuery(fresh).slice(0, RECALL_QUERY_CHARS);
+      if (!query) {
+        clearPrepared(agent);
+        return decision;
+      }
+      const cwd = cwdOf({ agent });
+      if (typeof cwd !== 'string' || !cwd) {
+        clearPrepared(agent);
+        return decision;
+      }
+      const ids = fresh.map((message) => String(message?.id ?? '')).filter(Boolean).sort();
+      const win = openWindow(agent, { sessionId, turn, messageIds: ids });
+      const scope = scopeOf(cwd);
+      const context = view.trustedContext(scope, {});
+      const fingerprint = fingerprintOf(scope);
+      const snapshot = projectRecall(scope, query, context, win);
+      if (generation !== generations.get(agent) || signal?.aborted || Date.now() - startedAt > RECALL_DEADLINE_MS) {
+        return decision;
+      }
+      if (!snapshot) {
+        clearPrepared(agent);
+        return decision;
+      }
+      const state = {
+        text: snapshot.text,
+        cards: snapshot.cards,
+        query,
+        sessionId,
+        turn,
+        signal,
+        fingerprint,
+        at: Date.now(),
+      };
+      prepared.set(agent, state);
+      const key = agentKey(agent);
+      if (key && signal && typeof signal.addEventListener === 'function') {
+        const onAbort = () => clearPrepared(agent);
+        signal.addEventListener('abort', onAbort, { once: true });
+        abortCleanups.set(key, () => signal.removeEventListener('abort', onAbort));
       }
     } catch {
-      /* 提示只是锦上添花，坏了就当没命中 */
+      clearPrepared(agent);
     }
     return decision;
   });
 
   if (typeof ctx.on === 'function') ctx.on('agent/disposed', (payload) => {
-    const sessionId = String(payload?.agent?.id ?? '');
-    if (sessionId) hintState.delete(sessionId);
+    const agent = payload?.agent;
+    if (!agent) return;
+    clearPrepared(agent);
+    windows.delete(agentKey(agent));
+    const sessionId = String(agent?.session?.id ?? '');
+    if (sessionId) seenHumans.delete(sessionId);
   });
+
+  if (typeof ctx.on === 'function') ctx.on('agent/turn-end', (payload) => {
+    const agent = payload?.agent;
+    const state = agent ? prepared.get(agent) : null;
+    if (state && payload?.turn !== undefined && String(payload.turn) !== String(state.turn)) clearPrepared(agent);
+  });
+
+  /** 测试与排查用：只暴露只读查询，不提供改状态入口。 */
+  ctx.effect(() => {
+    globalThis.__liteMemoryRecall = {
+      mode: recallMode,
+      preparedOf: (agent) => prepared.get(agent) || null,
+      windowOf: (agent) => windowOf(agent),
+    };
+    return () => {
+      delete globalThis.__liteMemoryRecall;
+    };
+  }, 'lite-memory: recall debug');
 
   /** Read-only summary for the Client row: how big the store already is. */
   ctx.effect(() => {

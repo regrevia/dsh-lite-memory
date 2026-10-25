@@ -241,27 +241,40 @@ assert.notEqual((await call('/lite-memory/citations', { sessionId: 'session-cont
 assert.notEqual((await call('/lite-memory/keep', { candidateId: 'sug_000000', cwd }, { origin: 'dsh-app://app' })).status, 403);
 assert.equal((await call('/lite-memory/citations', {}, { method: 'GET' })).status, 405);
 
-// ── 自动提示：只在这句话跟已有记忆有关时出现，且不改命中计数 ─────────────────
+// ── 自动召回：只在这句话跟已有记忆有关时出现，且不改命中计数 ─────────────────
 const hinted = await exec('memory_save', { title: 'Chrome 弹钥匙串窗口要带 mock keychain', summary: '临时 profile 起 Chrome 会弹钥匙串窗口' });
 // 只有一句 when、没有结构化条件的条目属于未解决，不自动注入
 await exec('memory_save', { title: '发布窗口在周四晚上', summary: '只在周四晚上发版', when: '周四晚上' });
-currentAgent = { id: 'session-contract', cwd };
+const recallAgent = { id: 'session-contract', cwd, session: { id: 'session-recall', header: { cwd } } };
+currentAgent = recallAgent;
 const preStep = subscriptions.get('agent/pre-step');
 assert.equal(typeof preStep, 'function');
-const pass = async () => ({ kind: 'enter', messages: [] });
+const pass = (text, id) => async () => ({
+  kind: 'enter',
+  messages: [{ role: 'user', id, source: { kind: 'user' }, content: [{ type: 'text', text }] }],
+});
+const recall = promptContexts.find((entry) => entry.name === 'lite-memory:recall');
+assert.ok(recall, 'recall context registered');
+assert.equal(recall.order, 60);
+assert.equal(recall.interpolate, false);
+assert.equal(recall.required, false);
+
+const sig1 = new AbortController().signal;
 const hitsBefore = store.loadIndex(store.scopeOf(cwd)).entries.find((item) => item.id === hinted.id).hits;
-await preStep({ agent: currentAgent, messages: [{ role: 'user', content: [{ type: 'text', text: '又弹钥匙串窗口了，怎么弄' }] }], turn: 2, step: 0 }, pass);
-assert.equal(promptContexts.length, 1);
-assert.equal(promptContexts[0].name, 'lite-memory:hint');
-const hintText = promptContexts[0].text();
+await preStep({ agent: recallAgent, signal: sig1, turn: '2' }, pass('又弹钥匙串窗口了，怎么弄', 'h1'));
+const hintText = recall.text({ agent: recallAgent, signal: sig1 });
 assert.match(hintText, new RegExp(hinted.id));
 assert.match(hintText, /需要细节用 memory_read/);
 const hitsAfter = store.loadIndex(store.scopeOf(cwd)).entries.find((item) => item.id === hinted.id).hits;
 assert.equal(hitsAfter, hitsBefore);
-await preStep({ agent: currentAgent, messages: [{ role: 'user', content: [{ type: 'text', text: '周四晚上发版要注意什么' }] }], turn: 3, step: 0 }, pass);
-assert.equal(promptContexts[0].text().includes('发布窗口在周四晚上'), false);
-await preStep({ agent: currentAgent, messages: [{ role: 'user', content: [{ type: 'text', text: '把这个按钮的圆角改小一点' }] }], turn: 4, step: 0 }, pass);
-assert.equal(promptContexts[0].text(), '');
+
+const sig2 = new AbortController().signal;
+await preStep({ agent: recallAgent, signal: sig2, turn: '3' }, pass('周四晚上发版要注意什么', 'h2'));
+assert.equal(recall.text({ agent: recallAgent, signal: sig2 }).includes('发布窗口在周四晚上'), false);
+
+const sig3 = new AbortController().signal;
+await preStep({ agent: recallAgent, signal: sig3, turn: '4' }, pass('把这个按钮的圆角改小一点', 'h3'));
+assert.equal(recall.text({ agent: recallAgent, signal: sig3 }), '');
 assert.equal(subscriptions.has('agent/disposed'), true);
 
 console.log('contract.test.mjs: all passed');
