@@ -22,6 +22,7 @@ window.__ModuleLoader__.load({
     const KEEP_OFF = { ...KEEP_STYLE, opacity: 0.45, cursor: 'default' };
     const DROP = { flex: '0 0 auto', border: 'none', background: 'transparent', color: 'inherit', padding: '0 2px', fontSize: '12px', lineHeight: '18px', opacity: 0.55, cursor: 'pointer' };
     const DOCK = { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0, fontSize: '12px', lineHeight: '1.6' };
+    const TAIL = { ...DOCK, margin: '4px 0 2px', opacity: 0.9 };
     const CHIP = { alignSelf: 'flex-start', border: 'none', background: 'transparent', color: 'inherit', padding: 0, fontSize: '12px', lineHeight: '1.6', opacity: 0.6, cursor: 'pointer', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
     const ITEM = { alignSelf: 'flex-start', border: 'none', background: 'transparent', color: 'inherit', padding: 0, fontSize: '12px', lineHeight: '1.6', opacity: 0.75, cursor: 'pointer', textAlign: 'left', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
     const BODY = { margin: '2px 0 4px', padding: '4px 0 4px 8px', borderLeft: '1px solid currentColor', opacity: 0.7, whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '180px', overflowY: 'auto' };
@@ -47,6 +48,9 @@ window.__ModuleLoader__.load({
     };
 
     const newOperationId = () => `op_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+
+    /** 一行结果里读到的所有记忆 id。 */
+    const idsIn = (value) => (typeof value === 'string' ? (value.match(/\bmem_[a-z0-9]{6,}\b/g) || []) : []);
 
     /** 会话 id 可能落在不同字段上。 */
     const sessionKeyOf = (props) =>
@@ -76,38 +80,44 @@ window.__ModuleLoader__.load({
     /** 失败不装作成功：把服务端那一句原样放回行里。 */
     const failure = (result, fallback) => (result && result.body && typeof result.body.reason === 'string' && result.body.reason ? result.body.reason : fallback);
 
-    /** 「N 条记忆引用」只在本会话读过记忆时出现。 */
-    const watchers = new Map();
-    const bumpCitations = (sessionId) => {
-      if (typeof sessionId !== 'string' || !sessionId) return;
-      for (const notify of watchers.get(sessionId) || []) notify();
+    /** 引用按轮归属。 */
+    const pendingCites = new Map();
+    const assignedCites = new Map();
+    const tailCites = new Map();
+    const noteCites = (sessionId, text) => {
+      if (!sessionId) return;
+      const seen = assignedCites.get(sessionId) || new Set();
+      const queue = pendingCites.get(sessionId) || [];
+      for (const id of idsIn(text)) {
+        if (seen.has(id) || queue.includes(id)) continue;
+        queue.push(id);
+      }
+      pendingCites.set(sessionId, queue);
     };
-    const watchCitations = (sessionId, notify) => {
-      if (typeof sessionId !== 'string' || !sessionId) return () => {};
-      const bucket = watchers.get(sessionId) || new Set();
-      bucket.add(notify);
-      watchers.set(sessionId, bucket);
-      return () => {
-        bucket.delete(notify);
-        if (bucket.size === 0) watchers.delete(sessionId);
-      };
-    };
-
-    const useCitationBump = (phase, sessionId) => {
-      React.useEffect(() => {
-        if (phase === 'result') bumpCitations(sessionId);
-      }, [phase, sessionId]);
+    const takeCites = (sessionId, key) => {
+      if (!sessionId) return [];
+      const cached = tailCites.get(key);
+      if (cached) return cached;
+      const queue = pendingCites.get(sessionId) || [];
+      const taken = queue.slice();
+      pendingCites.set(sessionId, []);
+      const seen = assignedCites.get(sessionId) || new Set();
+      for (const id of taken) seen.add(id);
+      assignedCites.set(sessionId, seen);
+      tailCites.set(key, taken);
+      return taken;
     };
 
     const Row = (props) => {
-      useCitationBump(props.phase, sessionKeyOf(props));
       const line = props.phase === 'preparing' ? null : firstLine(settledText(props.block));
+      React.useEffect(() => {
+        if (props.phase === 'result') noteCites(sessionKeyOf(props), settledText(props.block));
+      }, [props.phase]);
       return h('div', { 'data-tool': props.toolName, style: ROW }, h('span', { style: DOT }, '·'), h('span', { style: LABEL }, line ?? RUNNING[props.toolName] ?? 'memory'));
     };
 
     /** 建议行：一个「keep」按钮，按 candidateId 确认。 */
     const SuggestRow = (props) => {
-      useCitationBump(props.phase, sessionKeyOf(props));
       const [state, setState] = React.useState('idle');
       const [note, setNote] = React.useState('');
       const operationId = React.useRef('');
@@ -123,7 +133,6 @@ window.__ModuleLoader__.load({
         post('/lite-memory/keep', { op: 'keep', candidateId, operationId: operationId.current, cwd }).then((result) => {
           if (result.ok) {
             setState('saved');
-            bumpCitations(sessionKeyOf(props));
             return;
           }
           setNote(failure(result, '没有保存'));
@@ -139,7 +148,6 @@ window.__ModuleLoader__.load({
 
     /** 自动写入行：一个「✕」，有旧版本就还原成新一版，没有就归档。 */
     const SavedRow = (props) => {
-      useCitationBump(props.phase, sessionKeyOf(props));
       const [state, setState] = React.useState('idle');
       const [note, setNote] = React.useState('');
       const text = props.phase === 'preparing' ? null : settledText(props.block);
@@ -166,28 +174,30 @@ window.__ModuleLoader__.load({
       return h('div', { 'data-tool': props.toolName, style: ROW }, h('span', { style: DOT }, '·'), h('span', { style: LABEL }, label), button);
     };
 
-    /** 输入框下面的那一条：引用了几条。 */
+    /** 本轮引用了几条：点开是标题，再点看正文。 */
     const Citations = (props) => {
-      const sessionId = sessionKeyOf(props);
+      const sessionId = typeof props.sessionId === 'string' ? props.sessionId : '';
+      const ids = Array.isArray(props.ids) ? props.ids : [];
+      const idsKey = ids.join(',');
       const [items, setItems] = React.useState([]);
       const [open, setOpen] = React.useState(false);
       const [shown, setShown] = React.useState(null);
       const [note, setNote] = React.useState('');
-      const [tick, setTick] = React.useState(0);
 
-      React.useEffect(() => watchCitations(sessionId, () => setTick((n) => n + 1)), [sessionId]);
       React.useEffect(() => {
         let stopped = false;
-        if (!sessionId) {
+        if (!sessionId || ids.length === 0) {
           setItems([]);
           return () => { stopped = true; };
         }
         post('/lite-memory/citations', { sessionId }).then((result) => {
           if (stopped) return;
-          setItems(result.ok && result.body && Array.isArray(result.body.items) ? result.body.items : []);
+          const all = result.ok && result.body && Array.isArray(result.body.items) ? result.body.items : [];
+          const byId = new Map(all.map((item) => [item.id, item]));
+          setItems(ids.map((id) => byId.get(id)).filter(Boolean));
         });
         return () => { stopped = true; };
-      }, [sessionId, tick]);
+      }, [sessionId, idsKey]);
 
       if (items.length === 0) return null;
 
@@ -224,6 +234,19 @@ window.__ModuleLoader__.load({
       );
     };
 
+    /** 输出末尾的那一条：只算本轮读到的。 */
+    const TurnCites = (props) => {
+      const sessionId = sessionKeyOf(props);
+      const turn = props.turn && props.turn.id !== undefined ? String(props.turn.id) : String(props.seq ?? '');
+      const key = `${sessionId}|${turn}`;
+      const [ids, setIds] = React.useState([]);
+      React.useEffect(() => {
+        setIds(takeCites(sessionId, key));
+      }, [key, sessionId]);
+      if (!sessionId || ids.length === 0) return null;
+      return h('div', { style: TAIL }, h(Citations, { sessionId, ids }));
+    };
+
     return {
       inject: ['slots'],
       apply(ctx) {
@@ -232,9 +255,9 @@ window.__ModuleLoader__.load({
         }
         ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({ name: 'tool.call.toolview', key: 'memory_suggest' }, SuggestRow));
         ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({ name: 'tool.call.toolview', key: 'memory_save' }, SavedRow));
-        ctx.slots.inject('conversation.composer.dock', () => {
+        ctx.slots.inject('conversation.chat.turnTail', () => {
           try {
-            return ctx.slots.register({ name: 'conversation.composer.dock', id: 'lite-memory', order: 2 }, Citations);
+            return ctx.slots.register({ name: 'conversation.chat.turnTail', id: 'lite-memory', order: 30 }, TurnCites);
           } catch {
             return () => {};
           }
