@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const DOCK = { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0, fontSize: '12px', lineHeight: '1.6' };
     const TAIL = { ...DOCK, margin: '4px 0 2px', opacity: 0.9 };
     const CHIP = { alignSelf: 'flex-start', border: 'none', background: 'transparent', color: 'inherit', padding: 0, fontSize: '12px', lineHeight: '1.6', opacity: 0.6, cursor: 'pointer', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
-    const ITEM = { alignSelf: 'flex-start', border: 'none', background: 'transparent', color: 'inherit', padding: 0, fontSize: '12px', lineHeight: '1.6', opacity: 0.75, cursor: 'pointer', textAlign: 'left', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
+    const ITEM = { alignSelf: 'flex-start', border: 'none', background: 'transparent', color: 'inherit', padding: 0, fontSize: '12px', lineHeight: '1.6', opacity: 0.75, cursor: 'pointer', textAlign: 'left', width: '100%', minWidth: 0, maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
     const BODY = { margin: '2px 0 4px', padding: '4px 0 4px 8px', borderLeft: '1px solid currentColor', opacity: 0.7, whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '180px', overflowY: 'auto' };
 
     const settledText = (block) => {
@@ -217,7 +217,11 @@ window.__ModuleLoader__.load({
         });
       };
 
-      const titleOf = (item) => `${item.scope === 'global' ? '[全局] ' : ''}${item.title}`;
+      /** 引用只给名字：标题里被拼进来的条件不带来。 */
+      const titleOf = (item) => {
+        const raw = String(item.title || '').split(/\s*[｜|]\s*/)[0].trim().replace(/[（(]$/u, '').trim();
+        return `${item.scope === 'global' ? '[全局] ' : ''}${raw || '记忆'}`;
+      };
       const rows = open ? items.map((item) => h('button', { key: item.id, type: 'button', onClick: () => showBody(item), 'aria-label': `查看记忆 ${item.title}`, style: ITEM }, titleOf(item))) : [];
 
       const toggle = () => {
