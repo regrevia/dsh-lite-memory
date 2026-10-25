@@ -12,6 +12,7 @@ export const LIMITS = {
   entryBytes: 4096,
   totalBytes: 512 * 1024,
   titleChars: 40,
+  whenChars: 60,
   summaryChars: 60,
   suggestionWindowMs: 48 * 60 * 60 * 1000,
 };
@@ -147,11 +148,15 @@ function similarity(a, b) {
   return shared / (left.size + right.size - shared);
 }
 
-/** 同标题必合并；否则标题或摘要够像，也当作同一主题的又一次记录。 */
-function mergeCandidate(entries, title, summary) {
+/**
+ * 同一主题的判定。前置条件必须一致：同一件事在不同场景下是两条记忆，
+ * 哪怕正文互相看不上眼，也不能合并成一条。
+ */
+function mergeCandidate(entries, title, summary, when) {
   let best = null;
   let bestScore = 0;
   for (const item of entries) {
+    if ((item.when || '') !== when) continue;
     if (item.title === title) return item;
     const titleScore = similarity(item.title, title);
     const summaryScore = similarity(item.summary, summary);
@@ -165,10 +170,29 @@ function mergeCandidate(entries, title, summary) {
   return best;
 }
 
-/**
- * Save or merge one memory. A repeat of an existing topic updates it and counts
- * the merge instead of adding a row, which is what keeps a long-lived store tidy.
- */
+/** 合并只做增添：旧要点全留下；同一个键（`- 键：值`）的新值覆盖旧值。 */
+export function mergeBody(oldBody, incoming) {
+  const keyOf = (line) => {
+    const match = /^\s*[-*]\s*([^：:]{1,20})[：:]/.exec(line);
+    return match ? match[1].trim() : null;
+  };
+  const flat = (line) => line.replace(/\s+/g, ' ').trim();
+  const out = String(oldBody || '').split('\n').filter((line) => line.trim());
+  for (const raw of String(incoming || '').split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    const key = keyOf(line);
+    if (key) {
+      const at = out.findIndex((item) => keyOf(item) === key);
+      if (at >= 0) out[at] = line;
+      else out.push(line);
+      continue;
+    }
+    if (!out.some((item) => flat(item) === flat(line))) out.push(line);
+  }
+  return out.join('\n');
+}
+
 export function upsert(scope, draft) {
   const title = normalizeText(draft.title, LIMITS.titleChars);
   if (!title) throw new Error('标题为空');
@@ -179,13 +203,18 @@ export function upsert(scope, draft) {
   const asSecret = detectSecret(`${title}\n${summary.text}\n${body}`);
   if (asSecret) throw new Error(`检出疑似凭据，未保存（${asSecret}）。凭据只记位置与调用方式`);
 
+  const when = normalizeText(draft.when ?? '', LIMITS.whenChars);
   const index = loadIndex(scope);
   const now = new Date().toISOString();
-  const existing = mergeCandidate(index.entries, title, summary.text);
+  const existing = mergeCandidate(index.entries, title, summary.text, when);
   const id = existing ? existing.id : `mem_${Date.now().toString(36)}${crypto.randomBytes(2).toString('hex')}`;
+  const stated = existing ? fs.readFileSync(entryFile(scope, id), 'utf8') : '';
+  const mergedBody = existing ? mergeBody(stated, body) : body;
+  if (Buffer.byteLength(mergedBody, 'utf8') > LIMITS.entryBytes) throw new Error(`合并后超过 ${LIMITS.entryBytes} 字：只写这次新增的要点，或先归档旧条目`);
   const record = {
     id,
-    title,
+    title: existing ? existing.title : when ? `${title}｜${when}`.slice(0, LIMITS.titleChars) : title,
+    when,
     summary: summary.text,
     kind: draft.kind || 'note',
     tags: Array.isArray(draft.tags) ? draft.tags.map((tag) => normalizeText(tag, 20)).filter(Boolean).slice(0, 5) : [],
@@ -194,9 +223,9 @@ export function upsert(scope, draft) {
     lastUsed: now,
     hits: existing ? existing.hits || 0 : 0,
     merges: existing ? (existing.merges || 0) + 1 : 0,
-    bytes: Buffer.byteLength(body, 'utf8'),
+    bytes: Buffer.byteLength(mergedBody, 'utf8'),
   };
-  writeAtomic(entryFile(scope, id), body);
+  writeAtomic(entryFile(scope, id), mergedBody);
   if (existing) index.entries = index.entries.map((item) => (item.id === id ? record : item));
   else index.entries.push(record);
   index.suggestions = (index.suggestions || []).filter((item) => item.title !== title).slice(-19);
@@ -212,7 +241,7 @@ export function search(scope, query, limit = 4) {
     .split(/[^\p{L}\p{N}]+/u)
     .filter((word) => word.length > 1);
   const scored = index.entries.map((item) => {
-    const hay = `${item.title} ${item.summary} ${(item.tags || []).join(' ')}`.toLowerCase();
+    const hay = `${item.title} ${item.summary} ${item.when || ''} ${(item.tags || []).join(' ')}`.toLowerCase();
     let score = 0;
     for (const term of terms) if (hay.includes(term)) score += term.length > 2 ? 2 : 1;
     if (terms.length > 0 && score === 0) score = similarity(item.title, query) > 0.5 ? 1 : 0;
@@ -297,7 +326,8 @@ export function renderIndex(entries, budget = 400) {
   for (const item of entries) {
     const last = Date.parse(item.lastUsed || item.updated || item.created || '') || now;
     const stale = now - last > staleMs;
-    const line = stale ? `- ${item.id} ${item.title}` : `- ${item.id} ${item.title}｜${item.summary}`;
+    const head = item.when ? `${item.title}（${item.when}）` : item.title;
+    const line = stale ? `- ${item.id} ${head}` : `- ${item.id} ${head}｜${item.summary}`;
     if (used + line.length > budget) break;
     lines.push(line);
     used += line.length + 1;
