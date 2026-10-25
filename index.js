@@ -287,19 +287,22 @@ export function apply(ctx) {
           when: { type: 'string' },
           revision: { type: 'integer' },
           merged: { type: 'boolean' },
+          changed: { type: 'boolean' },
           scope: { type: 'string' },
           needsResolution: { type: 'boolean' },
           similarIds: { type: 'string' },
           similar: { type: 'string' },
         },
-        required: ['id', 'title', 'summary', 'when', 'revision', 'merged', 'scope', 'needsResolution'],
+        required: ['id', 'title', 'summary', 'when', 'revision', 'merged', 'changed', 'scope', 'needsResolution'],
         additionalProperties: false,
       },
       render: (_args, value) => [{
         type: 'text',
         text: value.needsResolution
           ? `memory · 需要确认：「${value.title}」与已有条目相近\n${value.similar}\n要更新它，用 id 重存；确实是另一条，加 resolution="distinct"`
-          : `memory · ${value.merged ? 'merged' : 'saved'}${scopeLabel(value)} "${value.title}"${value.when ? `（${value.when}）` : ''} · ${value.id} · 第 ${value.revision} 版${value.similar ? ` · 相近：${value.similar}` : ''}`,
+          : value.changed === false
+            ? `memory · unchanged${scopeLabel(value)} "${value.title}" · ${value.id} · 第 ${value.revision} 版`
+            : `memory · ${value.merged ? 'merged' : 'saved'}${scopeLabel(value)} "${value.title}"${value.when ? `（${value.when}）` : ''} · ${value.id} · 第 ${value.revision} 版${value.similar ? ` · 相近：${value.similar}` : ''}`,
       }],
     },
     execute: async (args, execution) => {
@@ -313,6 +316,7 @@ export function apply(ctx) {
           when: saved.draft.when,
           revision: 0,
           merged: false,
+          changed: false,
           scope: scope.key === 'global' ? 'global' : 'project',
           needsResolution: true,
           similarIds: saved.similarList.map((item) => item.id).join('、'),
@@ -327,6 +331,7 @@ export function apply(ctx) {
         when: saved.record.when || '',
         revision: saved.record.revision || 1,
         merged: saved.merged,
+        changed: !saved.noop,
         scope: scope.key === 'global' ? 'global' : 'project',
         needsResolution: false,
         similarIds: saved.similarList.map((item) => item.id).join('、'),

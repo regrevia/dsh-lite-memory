@@ -9,7 +9,7 @@ import crypto from 'node:crypto';
  */
 export const LIMITS = {
   entries: 200,
-  globalEntries: 40,
+  globalEntries: 200,
   entryBytes: 4096,
   recordBytes: 10 * 1024,
   totalBytes: 512 * 1024,
@@ -207,24 +207,11 @@ function textField(value, max, label) {
 }
 
 /**
- * 标题就是身份：不留分隔符、不留被拼进来的条件。
- * 「名字｜条件」「名字 <条件开头>」这类拼接过的东西，存之前切回名字。
+ * 标题就是身份，只做无损空白规范化：不切分隔符、不剥条件、不去标点。
+ * 超长在 textField 里直接报错，不截断；标题写坏了是调用方的输入问题，不能靠改名字掩盖。
  */
-function cleanTitle(value, when) {
-  let text = String(value ?? '').replace(/\s+/g, ' ').trim();
-  const cut = text.search(/[｜|]/);
-  if (cut >= 0) text = text.slice(0, cut).trim();
-  const hint = normalizeText(when, 200);
-  if (hint.length >= 4) {
-    const at = text.indexOf(hint.slice(0, 8));
-    if (at > 0) text = text.slice(0, at).trim();
-    const open = Math.max(text.lastIndexOf('（'), text.lastIndexOf('('));
-    if (open > 0) {
-      const inner = text.slice(open + 1).replace(/[）)]+$/u, '').trim();
-      if (inner.startsWith(hint.slice(0, 6))) text = text.slice(0, open).trim();
-    }
-  }
-  return text.replace(/[（(：:，,、；;]+$/u, '').trim();
+function cleanTitle(value) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim();
 }
 
 export function validSummary(summary) {
@@ -243,20 +230,23 @@ export function validSummary(summary) {
 export function normalizeDraft(source, options = {}) {
   const draft = typeof source === 'string' ? { title: source } : source && typeof source === 'object' ? source : {};
   const has = (key) => Object.prototype.hasOwnProperty.call(draft, key) && draft[key] !== undefined;
+  const id = typeof draft.id === 'string' && /^mem_[a-z0-9]+$/.test(draft.id) ? draft.id : '';
+  if (has('id') && !id) throw new Error('id 格式不对');
   const when = has('when') ? textField(draft.when, LIMITS.whenChars, '前置条件') : '';
-  const title = textField(cleanTitle(draft.title, when), LIMITS.titleChars, '标题');
+  const title = textField(cleanTitle(draft.title), LIMITS.titleChars, '标题');
   if (!title) throw new Error('标题为空');
-  let summary;
+  let summary = '';
   const rawSummary = String(draft.summary ?? '').replace(/\s+/g, ' ').trim();
   if (rawSummary) {
     const check = validSummary(rawSummary);
     if (!check.ok) throw new Error(check.reason);
     summary = check.text;
-  } else if (options.requireSummary === false) {
-    summary = title;
-  } else {
+  } else if (has('summary')) {
     throw new Error('摘要为空');
   }
+  /** 更新（带 id）与候选草稿允许省略摘要；省略表示保持原值，不拿标题补。 */
+  const mayOmitSummary = options.requireSummary === false || Boolean(id);
+  if (!summary && !mayOmitSummary) throw new Error('摘要为空');
   const body = String(draft.body ?? '').trim();
   const bodyBytes = Buffer.byteLength(body);
   if (bodyBytes > LIMITS.entryBytes) {
@@ -268,8 +258,6 @@ export function normalizeDraft(source, options = {}) {
   if (!Array.isArray(rawTags)) throw new Error('标签必须是数组');
   if (rawTags.length > LIMITS.tags) throw new Error(`标签最多 ${LIMITS.tags} 个`);
   const tags = [...new Set(rawTags.map((tag) => textField(tag, LIMITS.tagChars, '标签')).filter(Boolean))];
-  const id = typeof draft.id === 'string' && /^mem_[a-z0-9]+$/.test(draft.id) ? draft.id : '';
-  if (has('id') && !id) throw new Error('id 格式不对');
   const secret = detectSecret([title, summary, when, body, tags.join(' ')].join('\n'));
   if (secret) throw new Error(`疑似凭据（${secret}），只记位置，不记值`);
   return {
@@ -338,15 +326,13 @@ function archiveEntry(scope, index, entry) {
   index.entries = index.entries.filter((item) => item.id !== entry.id);
 }
 
-/** Trim by count only: an entry that would break the byte budget is rejected at write time. */
-export function trimIndex(scope, index) {
-  const rank = (item) => item.lastUsed || item.updated || item.created || '';
+/**
+ * 满额不驱逐：条数上限只做明确拒绝，让用户自己归档或彻底遗忘。
+ * 自动按最久未用移走会把用户的规则悄悄挪进归档，读的时候看不见也不报错。
+ */
+export function capacityOf(scope, index) {
   const cap = scope.key === 'global' ? LIMITS.globalEntries : LIMITS.entries;
-  while (index.entries.length > cap) {
-    const victim = [...index.entries].sort((a, b) => rank(a).localeCompare(rank(b)))[0];
-    if (!victim) break;
-    archiveEntry(scope, index, victim);
-  }
+  return { cap, used: index.entries.length, remaining: Math.max(0, cap - index.entries.length) };
 }
 
 /** 相邻两字为一组：中文没有空格，按词切分永远对不上，按字片才认得出改写的同一件事。 */
@@ -436,7 +422,8 @@ function applyDraft(scope, index, source, now) {
   let mergedFrom = null;
   let similarList = [];
   if (!record) {
-    const hit = resolveTarget(index.entries, draft);
+    /** distinct 是用户明确说的「这是另一条」：同名也另起一条，不被规范化后的精确同名吞掉。 */
+    const hit = distinct ? null : resolveTarget(index.entries, draft);
     if (hit) {
       record = hit.target;
       mergedFrom = hit.target.title === draft.title ? null : hit.target.title;
@@ -454,7 +441,7 @@ function applyDraft(scope, index, source, now) {
     const oldBody = readBody(scope, record.id);
     const next = {
       title: draft.title,
-      summary: draft.summary,
+      summary: draft.has.summary ? draft.summary : record.summary || '',
       when: draft.has.when ? draft.when : record.when || '',
       kind: draft.has.kind ? draft.kind || 'note' : record.kind || 'note',
       tags: draft.has.tags ? draft.tags : record.tags || [],
@@ -511,12 +498,18 @@ function applyDraft(scope, index, source, now) {
   assertFits(index, created);
   writeBody(scope, created.id, created.body);
   index.entries.push(created);
-  trimIndex(scope, index);
   return { record: created, merged: false, mergedFrom: null, similar: similarList[0] || null, similarList, draft, noop: false, previousBody: null };
 }
 
 /** 单条、记录序列化、整库三档预算：新增与更新走同一套。 */
 function assertFits(index, record) {
+  const isNew = !index.entries.some((item) => item.id === record.id);
+  if (isNew) {
+    const cap = index.scope === 'global' ? LIMITS.globalEntries : LIMITS.entries;
+    if (index.entries.length + 1 > cap) {
+      throw new Error(`记忆已满：${index.scope === 'global' ? '全局' : '这个项目'}最多 ${cap} 条，先归档或彻底遗忘一条`);
+    }
+  }
   if (record.bytes > LIMITS.entryBytes) {
     throw new Error(`这一条 ${record.bytes} 字节，超过单条 ${LIMITS.entryBytes} 字节；先精简正文`);
   }
@@ -800,6 +793,8 @@ export function noteSuggestion(scope, source, decision = 'asked') {
         body: draft.body,
         kind: draft.kind,
         tags: draft.tags,
+        /** 字段「有」和「空」不是一回事：确认时只写真正给过的字段。 */
+        has: { ...draft.has },
         targetId: target ? target.id : '',
         targetRevision: target ? target.revision || 1 : 0,
       },
@@ -851,15 +846,22 @@ export function acceptCandidate(scope, key, operationId = '') {
     if (target && draft.targetRevision && (target.revision || 1) !== draft.targetRevision) {
       return { ok: false, reason: '那条记忆在你确认前改过了，重新建议一次' };
     }
-    /** 只把建议里真有的字段交给写入：空正文不覆盖原正文。 */
-    const source = {
-      title: draft.title,
-      summary: draft.summary,
-      when: draft.when || '',
-      kind: draft.kind || 'note',
-      tags: Array.isArray(draft.tags) ? draft.tags : [],
-    };
-    if (draft.body) source.body = draft.body;
+    /** 只把建议里真有的字段交给写入：省略表示保持，显式空正文清空；旧候选没有 has 时按有没有值回退。 */
+    const source = { title: draft.title };
+    const has = draft.has && typeof draft.has === 'object' ? draft.has : null;
+    if (has) {
+      if (has.summary) source.summary = draft.summary;
+      if (has.when) source.when = draft.when;
+      if (has.kind) source.kind = draft.kind;
+      if (has.tags) source.tags = Array.isArray(draft.tags) ? draft.tags : [];
+      if (has.body) source.body = draft.body;
+    } else {
+      if (draft.summary) source.summary = draft.summary;
+      if (draft.when) source.when = draft.when;
+      if (draft.kind) source.kind = draft.kind;
+      if (Array.isArray(draft.tags)) source.tags = draft.tags;
+      if (draft.body) source.body = draft.body;
+    }
     if (target) source.id = target.id;
     const now = new Date().toISOString();
     try {
@@ -978,14 +980,11 @@ export function recordCitations(scope, sessionId, items) {
   const rows = new Map();
   const now = new Date().toISOString();
   for (const item of incoming) {
-    const source = item.scope === 'global' ? globalScope() : scope;
+    const key = item.scope === 'global' ? 'global' : (typeof item.scopeKey === 'string' && item.scopeKey ? item.scopeKey : scope.key);
     rows.set(item.id, {
       id: item.id,
-      title: String(item.title || '').slice(0, LIMITS.titleChars),
-      scope: item.scope === 'global' ? 'global' : 'project',
-      revision: Number(item.revision) || 1,
-      when: String(item.when || '').slice(0, LIMITS.whenChars),
-      path: entryFile(source, item.id),
+      scope: key === 'global' ? 'global' : 'project',
+      key,
       at: now,
     });
   }
@@ -1006,49 +1005,73 @@ export function recordCitations(scope, sessionId, items) {
   return next;
 }
 
-/** 行里的名字、层跟当前条目走：改过标题或换过层的，不该继续显示旧的。 */
-function refreshCitation(item) {
-  if (!item || typeof item.path !== 'string') return item;
-  const dir = path.dirname(path.dirname(path.resolve(item.path)));
-  if (!dir.startsWith(memoryRoot() + path.sep)) return item;
-  const key = dir === path.join(memoryRoot(), 'global') ? 'global' : path.basename(dir);
-  let entry;
+const SCOPE_KEY = /^[A-Za-z0-9._-]{1,80}$/;
+
+/** 引用的身份是「哪个 scope 的哪个 id」；旧文件里只有 path 时从目录名推回来。 */
+function citationKey(row) {
+  if (!row || typeof row !== 'object') return '';
+  if (typeof row.key === 'string' && SCOPE_KEY.test(row.key)) return row.key;
+  if (typeof row.path !== 'string') return '';
+  const scopeDir = path.dirname(path.dirname(path.resolve(row.path)));
+  if (path.dirname(scopeDir) !== memoryRoot()) return '';
+  const key = path.basename(scopeDir);
+  return SCOPE_KEY.test(key) ? key : '';
+}
+
+function scopeForKey(key) {
+  if (key === 'global') return globalScope();
+  if (!SCOPE_KEY.test(key)) return null;
+  const dir = path.join(memoryRoot(), key);
+  if (!path.resolve(dir).startsWith(memoryRoot() + path.sep)) return null;
+  return { key, dir, cwd: '' };
+}
+
+/**
+ * 引用只存身份，不存标题和正文：解析时一律读当前索引。
+ * 目标不在了就整行失效，不回退旧缓存，也不按旧名字重建。
+ */
+function resolveCitation(row) {
+  const key = citationKey(row);
+  if (!key) return null;
+  const scope = scopeForKey(key);
+  if (!scope) return null;
+  let entry = null;
   try {
-    const index = loadIndex({ key, dir });
-    entry = (index.entries || []).find((row) => row && row.id === item.id);
+    entry = (loadIndex(scope).entries || []).find((item) => item && item.id === row.id) || null;
   } catch {
-    return item;
+    return null;
   }
-  if (!entry) return item;
+  if (!entry) return null;
   return {
-    ...item,
-    title: entry.title || item.title,
-    scope: key === 'global' ? 'global' : 'project',
-    revision: Number(entry.revision) || item.revision,
-    when: entry.when || '',
+    key,
+    scope,
+    entry,
+    row: {
+      id: row.id,
+      title: entry.title || '',
+      scope: key === 'global' ? 'global' : 'project',
+      revision: Number(entry.revision) || 1,
+      when: entry.when || '',
+      at: row.at,
+    },
   };
 }
 
 /** 界面要的那几列：不返回正文，也不返回磁盘路径。 */
 export function listCitations(sessionId) {
   const data = readSessionFile(sessionId);
-  const items = ((data && data.items) || []).map(refreshCitation).filter(Boolean).map((item) => ({
-    id: item.id,
-    title: item.title,
-    scope: item.scope,
-    revision: item.revision,
-    when: item.when || '',
-    at: item.at,
-  }));
+  const items = ((data && data.items) || []).map(resolveCitation).filter(Boolean).map((item) => item.row);
   return { items, updatedAt: (data && data.updatedAt) || '' };
 }
 
-/** 点开一条时读正文；只认自己记下的路径，且必须落在记忆根目录里。 */
+/** 点开一条时读当前正文；目标已删/已移出记忆根目录就返回空。 */
 export function readCitationBody(sessionId, id) {
   const data = readSessionFile(sessionId);
-  const item = ((data && data.items) || []).find((row) => row && row.id === id);
-  if (!item || typeof item.path !== 'string') return null;
-  const abs = path.resolve(item.path);
+  const row = ((data && data.items) || []).find((item) => item && item.id === id);
+  if (!row) return null;
+  const found = resolveCitation(row);
+  if (!found) return null;
+  const abs = path.resolve(entryFile(found.scope, id));
   if (!abs.startsWith(memoryRoot() + path.sep)) return null;
   let body;
   try {
@@ -1056,5 +1079,5 @@ export function readCitationBody(sessionId, id) {
   } catch {
     return null;
   }
-  return { ...item, body: body.slice(0, LIMITS.entryBytes) };
+  return { ...found.row, body: body.slice(0, LIMITS.entryBytes) };
 }

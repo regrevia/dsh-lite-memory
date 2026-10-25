@@ -321,15 +321,21 @@ test('corrupt index stops reads and writes and stays on disk', () => {
   assert.throws(() => loadIndex(scope), /结构不对/);
 });
 
-test('capacity trim moves the oldest entries into archive/', () => {
+test('capacity refuses a new entry instead of moving old ones into archive/', () => {
   const scope = fresh('trim');
-  for (let i = 0; i < LIMITS.entries + 3; i += 1) {
+  for (let i = 0; i < LIMITS.entries; i += 1) {
     upsert(scope, { title: `条目 ${i}`, summary: `第 ${i} 条压容量`, body: `body ${i}`, resolution: 'distinct' });
   }
   assert.equal(countOf(scope), LIMITS.entries);
-  const archived = fs.readdirSync(path.join(scope.dir, 'archive'));
-  assert.equal(archived.filter((name) => name.endsWith('.md')).length, 3);
-  assert.equal(archived.filter((name) => name.endsWith('.json')).length, 3);
+  assert.throws(() => upsert(scope, { title: '溢出的一条', summary: '满了就明确拒绝' }), /记忆已满/);
+  assert.equal(countOf(scope), LIMITS.entries);
+  assert.equal(fs.existsSync(path.join(scope.dir, 'archive')), false);
+});
+
+test('the global layer uses its own count cap', () => {
+  const global = globalScope();
+  assert.equal(LIMITS.globalEntries, 200);
+  assert.deepEqual(store.capacityOf(global, { entries: new Array(41).fill({}) }), { cap: 200, used: 41, remaining: 159 });
 });
 
 test('projects and the global layer stay separate', () => {
@@ -350,12 +356,9 @@ test('projects and the global layer stay separate', () => {
 // ── 会话引用 ────────────────────────────────────────────────────────────────
 test('citations keep one row per id and drop the oldest', () => {
   const scope = fresh('cite');
-  const items = Array.from({ length: 25 }, (_, i) => ({
-    id: `mem_${String(i).padStart(12, '0')}`,
-    title: `条目 ${i}`,
-    scope: 'project',
-    revision: 1,
-  }));
+  const items = Array.from({ length: LIMITS.citations + 5 }, (_, i) => upsert(scope, {
+    title: `条目 ${i}`, summary: `引用第 ${i} 条`, body: `正文 ${i}`, resolution: 'distinct',
+  }).record);
   recordCitations(scope, 'session-cite', items.slice(0, 3));
   assert.equal(listCitations('session-cite').items.length, 3);
   recordCitations(scope, 'session-cite', [items[1]]);
@@ -405,31 +408,43 @@ test('citation rows follow the current title and layer', () => {
 
 test('old citation session files are pruned', () => {
   const scope = fresh('cite-prune');
-  recordCitations(scope, 'session-old', [{ id: 'mem_000000000001', title: '旧的' }]);
+  recordCitations(scope, 'session-old', [{ id: 'mem_000000000001' }]);
   const file = path.join(store.memoryRoot(), 'sessions', 'session-old.json');
   assert.equal(fs.existsSync(file), true);
   const past = new Date(Date.now() - LIMITS.citationTtlMs - 60_000);
   fs.utimesSync(file, past, past);
-  recordCitations(scope, 'session-new', [{ id: 'mem_000000000002', title: '新的' }]);
+  recordCitations(scope, 'session-new', [{ id: 'mem_000000000002' }]);
   assert.equal(fs.existsSync(file), false);
-  assert.equal(listCitations('session-new').items.length, 1);
+  assert.equal(listCitations('session-new').items.length, 0);
 });
 
-test('title is identity: separator and pasted condition are cut before saving', () => {
+test('title is identity: only whitespace is normalized, nothing is cut', () => {
   const scope = fresh('title-clean');
   const saved = upsert(scope, {
     title: 'Chrome 临时 profile 触发「找不到钥匙串」弹窗｜macOS 上由',
     summary: '临时 profile 起 Chrome 会弹钥匙串窗口',
     when: 'macOS 上由 agent 启动 Chrome 且用临时 profile 时',
   });
-  assert.equal(saved.record.title, 'Chrome 临时 profile 触发「找不到钥匙串」弹窗');
-  assert.equal(saved.record.when, 'macOS 上由 agent 启动 Chrome 且用临时 profile 时');
+  assert.equal(saved.record.title, 'Chrome 临时 profile 触发「找不到钥匙串」弹窗｜macOS 上由');
 
   const pasted = normalizeDraft({ title: '发布顺序 （发版前要按顺序做的事）', summary: '发版前要按顺序做的事', when: '发版前要按顺序做的事' });
-  assert.equal(pasted.title, '发布顺序');
+  assert.equal(pasted.title, '发布顺序 （发版前要按顺序做的事）');
 
-  const whole = normalizeDraft({ title: '发布顺序 发版前要按顺序做的事', summary: '发版前要按顺序做的事', when: '发版前要按顺序做的事' });
-  assert.equal(whole.title, '发布顺序');
+  const spaced = normalizeDraft({ title: '  发布   顺序  ', summary: '发版前要按顺序做的事' });
+  assert.equal(spaced.title, '发布 顺序');
+});
+
+test('distinct keeps two entries whose titles normalize to the same name', () => {
+  const scope = fresh('title-distinct');
+  const first = upsert(scope, { title: '菜单｜工作日', summary: '工作日菜单', body: '周一到周五' });
+  const second = upsert(scope, { title: '菜单｜周末', summary: '周末菜单', body: '周六周日', resolution: 'distinct' });
+  assert.notEqual(first.record.id, second.record.id);
+  assert.equal(countOf(scope), 2);
+  assert.equal(search(scope, '菜单').length, 2);
+
+  const sameAgain = upsert(scope, { title: '菜单｜工作日', summary: '工作日菜单另存一份', resolution: 'distinct' });
+  assert.notEqual(sameAgain.record.id, first.record.id);
+  assert.equal(countOf(scope), 3);
 });
 
 test('peek hints on real title overlap and never writes hits', () => {
@@ -444,6 +459,24 @@ test('peek hints on real title overlap and never writes hits', () => {
   assert.equal(after.hits, before.hits);
   assert.equal(after.lastUsed, before.lastUsed);
   assert.deepEqual(store.peek(scope, '把这个按钮的圆角改小一点', 3), []);
+});
+
+test('candidate keeps field presence: explicit empty body clears, omitted fields stay', () => {
+  const scope = fresh('candidate-presence');
+  const created = upsert(scope, {
+    title: '字段存在', summary: '省略保持原样', when: '项目内', body: '原正文', tags: ['旧标签'],
+  }).record;
+  const noted = noteSuggestion(scope, {
+    title: '字段存在 改名', summary: '换成新摘要', body: '', targetId: created.id,
+  });
+  const kept = acceptCandidate(scope, noted.id, '');
+  assert.equal(kept.ok, true);
+  const after = readEntry(scope, created.id);
+  assert.equal(after.title, '字段存在 改名');
+  assert.equal(after.summary, '换成新摘要');
+  assert.equal(after.when, '项目内');
+  assert.deepEqual(after.tags, ['旧标签']);
+  assert.equal(after.body, '');
 });
 
 for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });

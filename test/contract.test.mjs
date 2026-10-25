@@ -82,6 +82,7 @@ assert.equal(defs.get('memory_suggest').parameters.properties.resolution, undefi
 const saved = await exec('memory_save', { title: '发布顺序', summary: '发版前要按顺序做的事', body: '第一步' });
 assert.equal(saved.needsResolution, false);
 assert.equal(saved.merged, false);
+assert.equal(saved.changed, true);
 assert.equal(saved.scope, 'project');
 assert.equal(typeof saved.id, 'string');
 assert.match(render('memory_save', {}, saved), /^memory · saved "发布顺序" · mem_[a-z0-9]+ · 第 1 版$/);
@@ -95,6 +96,13 @@ assert.match(render('memory_save', {}, merged), /^memory · merged "发布顺序
 const patch = await exec('memory_save', { id: saved.id, title: '发布顺序', summary: '发版前要按顺序做的事', when: '发版当天' });
 assert.equal(patch.when, '发版当天');
 assert.match(render('memory_save', {}, patch), /（发版当天）/);
+
+/** 同样的字段再存一次不算修改：不改版次，也不该被读成「存过一次」。 */
+const again = await exec('memory_save', { title: '发布顺序', summary: '发版前要按顺序做的事', when: '发版当天' });
+assert.equal(again.changed, false);
+assert.equal(again.id, saved.id);
+assert.equal(again.revision, 3);
+assert.match(render('memory_save', {}, again), /^memory · unchanged "发布顺序" · mem_[a-z0-9]+ · 第 3 版$/);
 
 // ── similar title asks before overwriting ────────────────────────────────────
 const probe = await exec('memory_save', { title: '发布顺序是啥', summary: '发版前要按顺序做的事', body: '另一条' });
