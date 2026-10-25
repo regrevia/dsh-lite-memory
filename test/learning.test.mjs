@@ -105,6 +105,29 @@ function commitNew(scope, grown, started, change = NEW_CHANGE, overrides = {}) {
   });
 }
 
+/** 对已有规则提交一次样例或检查点变化。 */
+function commitExisting(scope, grown, started, id, change, extra = {}) {
+  const flat = ruleOf(scope, id);
+  const rules = [{ ref: 'r0', id, revision: flat.revision, conditions: flat.conditions }];
+  const refs = { feedback: { u0: grown.messageIds[0] }, rules: { r0: id } };
+  const check = parsed(change, { rules, refs, ranges: { taskKinds: ['video'], series: ['口播', '字幕'] } });
+  assert.equal(check.ok, true, check.reason);
+  return store.commitLearning(scope, {
+    operationId: extra.operationId || `learn_${Math.random().toString(16).slice(2, 10)}`,
+    epoch: started.epoch,
+    episodeId: grown.episode.episodeId,
+    episodeUpdatedAt: grown.episode.updatedAt,
+    projectId: 'proj',
+    sessionId: grown.sessionId,
+    messageIds: grown.messageIds,
+    feedbackText: extra.feedbackText || '',
+    dimension: extra.dimension || '',
+    changes: check.changes,
+    preparedTargets: [{ id, revision: flat.revision, specDigest: flat.learning.specDigest }],
+    usage: extra.usage,
+  });
+}
+
 test('P00 初始任务与致谢不算反馈', () => {
   assert.equal(learning.classifyFeedback('帮我做一期口播，开头要抓人').worth, false);
   assert.equal(learning.classifyFeedback('谢谢').worth, false);
@@ -218,6 +241,97 @@ test('B05 频次：每作品两次、每项目 24 小时六次，失败也计数
   const blocked = begin(scope, overflow);
   assert.equal(blocked.ok, false);
   assert.equal(blocked.reason, 'project_limit');
+});
+
+test('P10 执行没做到时只补检查点，不改规范正文', () => {
+  const scope = fresh('checkpoint');
+  enable(scope);
+  const grown = seedEpisode(scope);
+  const started = begin(scope, grown);
+  assert.equal(commitNew(scope, grown, started, NEW_CHANGE, { explicitLongTerm: true }).ok, true);
+  const id = ruleRows(scope)[0].id;
+  const before = ruleOf(scope, id);
+  const next = begin(scope, grown);
+  const result = commitExisting(scope, grown, next, id, {
+    target: 'r0', feedbackType: 'execution_miss', currentText: '交付前先核对开头是否先给结论。', evidence: ['u0'],
+  });
+  assert.equal(result.ok, true, result.reason);
+  const after = ruleOf(scope, id);
+  assert.equal(after.body, before.body);
+  assert.equal(after.revision, before.revision + 1);
+  assert.equal(after.learning.state, 'active');
+  assert.equal(after.learning.checkpoints.length, 1);
+  assert.match(after.learning.checkpoints[0].text, /核对/);
+  assert.equal(after.learning.evidence.length, before.learning.evidence.length);
+  assert.equal(after.learning.samples, undefined);
+});
+
+test('P11 认可作品只记有限样例，不抬规则证据也不改正文', () => {
+  const scope = fresh('sample');
+  enable(scope);
+  const grown = seedEpisode(scope);
+  const started = begin(scope, grown);
+  assert.equal(commitNew(scope, grown, started, NEW_CHANGE, { explicitLongTerm: true }).ok, true);
+  const id = ruleRows(scope)[0].id;
+  const before = ruleOf(scope, id);
+  const next = begin(scope, grown);
+  const result = commitExisting(scope, grown, next, id, {
+    target: 'r0', feedbackType: 'artifact_accept', evidence: ['u0'],
+  }, { dimension: '开头' });
+  assert.equal(result.ok, true, result.reason);
+  const after = ruleOf(scope, id);
+  assert.equal(after.body, before.body);
+  assert.equal(after.revision, before.revision + 1);
+  assert.equal(after.learning.samples.length, 1);
+  assert.equal(after.learning.samples[0].dimension, '开头');
+  assert.equal(after.learning.samples[0].verified, false);
+  assert.equal(after.learning.samples[0].artifactVersion, grown.episode.updatedAt);
+  assert.equal(after.learning.evidence.length, before.learning.evidence.length);
+  assert.equal(after.learning.supportedEpisodeIds.length, before.learning.supportedEpisodeIds.length);
+});
+
+test('P12 样例只能挂已有规则，临时例外仍不形成规则', () => {
+  const scope = fresh('sample-new');
+  enable(scope);
+  const grown = seedEpisode(scope);
+  const started = begin(scope, grown);
+  const rejected = parsed({
+    target: 'new', feedbackType: 'artifact_accept', currentText: '这次就这版。', evidence: ['u0'],
+  });
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.reason, /已有规则/);
+  assert.equal(parsed({ target: 'new', feedbackType: 'task_exception', currentText: '这次例外。', evidence: ['u0'] }).ok, false);
+  assert.equal(parsed({ target: 'new', feedbackType: 'unclear', currentText: '说不上。', evidence: ['u0'] }).ok, false);
+  assert.equal(commitNew(scope, grown, started, NEW_CHANGE).ok, true);
+  const id = ruleRows(scope)[0].id;
+  const second = begin(scope, grown);
+  const exception = parsed({ target: 'r0', feedbackType: 'task_exception', currentText: '这次例外。', evidence: ['u0'] }, {
+    rules: [{ ref: 'r0', id, revision: ruleOf(scope, id).revision, conditions: ruleOf(scope, id).conditions }],
+    refs: { feedback: { u0: grown.messageIds[0] }, rules: { r0: id } },
+  });
+  assert.equal(exception.ok, false);
+  assert.equal(second.ok, true);
+});
+
+test('P13 样例与检查点按上限保留', () => {
+  const scope = fresh('sample-caps');
+  enable(scope);
+  const grown = seedEpisode(scope);
+  const started = begin(scope, grown);
+  assert.equal(commitNew(scope, grown, started, NEW_CHANGE, { explicitLongTerm: true }).ok, true);
+  const id = ruleRows(scope)[0].id;
+  for (const dimension of ['开头', '字幕', '节奏', '配乐', '镜头']) {
+    assert.equal(commitExisting(scope, grown, { epoch: evolutionOf(scope).epoch }, id, {
+      target: 'r0', feedbackType: 'artifact_accept', evidence: ['u0'],
+    }, { dimension }).ok, true);
+  }
+  assert.equal(ruleOf(scope, id).learning.samples.length, 4);
+  for (const text of ['检查一。', '检查二。', '检查三。', '检查四。']) {
+    assert.equal(commitExisting(scope, grown, { epoch: evolutionOf(scope).epoch }, id, {
+      target: 'r0', feedbackType: 'execution_miss', currentText: text, evidence: ['u0'],
+    }).ok, true);
+  }
+  assert.equal(ruleOf(scope, id).learning.checkpoints.length, 3);
 });
 
 test('P01 新规则落盘带来源、条件与待复核状态', () => {
@@ -627,6 +741,30 @@ test('D09 用量缺失只报未知，不补零', () => {
   assert.equal(snapshot.economy.knownCalls, 0);
   assert.equal(snapshot.economy.inputTokens, null);
   assert.equal(snapshot.economy.outputTokens, null);
+});
+
+test('D10 效果摘要只算最近 64 条，未知用量不补零', () => {
+  const scope = fresh('effect-window');
+  enable(scope);
+  const grown = seedEpisode(scope);
+  assert.equal(commitNew(scope, grown, begin(scope, grown), NEW_CHANGE, {
+    usage: { known: true, inputTokens: 30, outputTokens: 7 },
+  }).ok, true);
+  assert.equal(store.recordLearningFailure(scope, { operationId: 'effect_fail', episodeId: grown.episode.episodeId, reason: '模型超时' }).ok, true);
+  const first = store.learningSnapshot(scope).effect;
+  assert.equal(first.window, 2);
+  assert.equal(first.applied, 1);
+  assert.equal(first.failed, 1);
+  assert.equal(first.knownCalls, 1);
+  assert.equal(first.inputTokens, 30);
+  for (let i = 0; i < 70; i += 1) {
+    assert.equal(store.recordLearningFailure(scope, { operationId: `effect_more_${i}`, episodeId: grown.episode.episodeId, reason: '超时' }).ok, true);
+  }
+  const after = store.learningSnapshot(scope).effect;
+  assert.equal(after.window, 64);
+  assert.equal(after.knownCalls, 0);
+  assert.equal(after.inputTokens, null);
+  assert.equal(after.outputTokens, null);
 });
 
 console.log(`learning.test.mjs: ${passed} passed`);

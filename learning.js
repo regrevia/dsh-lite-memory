@@ -21,6 +21,7 @@ export const LIMITS = {
   versions: 2,
   receipts: 64,
   samples: 4,
+  checkpoints: 3,
 };
 
 export const FEEDBACK_TYPES = ['spec_change', 'execution_miss', 'task_exception', 'aspect_accept', 'artifact_accept', 'unclear'];
@@ -39,6 +40,13 @@ const EXECUTION_MISS = /之前说过|已经说过|不是说好|怎么又|又没|
 const UNCLEAR = /不太对|再想想|感觉不对|说不上|有点怪|不对劲/;
 
 const has = (pattern, text) => pattern.test(text);
+
+/** 从反馈里取一个可命名的验收维度；没有就记为作品整体。 */
+export function dimensionOf(input) {
+  const text = String(input || '');
+  const match = text.match(DIMENSION);
+  return match ? match[0] : '作品';
+}
 
 /** 只判断“值得检查”，不把正则命中直接当长期规则。 */
 export function classifyFeedback(input) {
@@ -189,7 +197,7 @@ export function buildCallInput({ projectId, episodeId, taskKind, seriesId, phase
     project,
     feedback: { refs: [['u0', feedback.text.slice(0, 600)]], type: feedback.cue?.type || 'unclear', longTerm: Boolean(feedback.cue?.explicitLongTerm) },
     rules: inputRules,
-    allowed: { conditions: view.CONDITION_KEYS, ranges: rangesInput, maxChanges: LIMITS.maxChanges },
+    allowed: { conditions: view.CONDITION_KEYS, ranges: rangesInput, maxChanges: LIMITS.maxChanges, execution_miss: '仅已有规则，currentText 写检查点', artifact_accept: '仅已有规则，记验收样例' },
     output: {
       changes: [{
         target: 'r0 或 new', feedbackType: FEEDBACK_TYPES, topicKey: '短主题键', currentText: '当前可执行规范', applicability: 'all_in_scope|conditional|unresolved', conditions: [{ key: 'taskKind', value: 'video' }], evidence: ['u0'], persistence: 'project_candidate',
@@ -237,8 +245,13 @@ export function validateChange(change, { refs, rules, ranges } = {}) {
   if (!target) return { ok: false, reason: '变化缺少目标' };
   if (target !== 'new' && !byRef.has(target)) return { ok: false, reason: '变化目标不在本次输入里' };
   if (!FEEDBACK_TYPES.includes(change.feedbackType)) return { ok: false, reason: '反馈类型不认' };
-  if (change.feedbackType === 'task_exception' || change.feedbackType === 'artifact_accept' || change.feedbackType === 'unclear') {
+  if (change.feedbackType === 'task_exception' || change.feedbackType === 'unclear') {
     return { ok: false, reason: '这类反馈不直接形成长期规则' };
+  }
+  const sampleOnly = change.feedbackType === 'artifact_accept';
+  const checkpointOnly = change.feedbackType === 'execution_miss';
+  if ((sampleOnly || checkpointOnly) && target === 'new') {
+    return { ok: false, reason: sampleOnly ? '验收依据只能挂到已有规则' : '执行检查点只能挂到已有规则' };
   }
   const existing = target === 'new' ? null : {
     id: refs?.rules?.[target] || '',
@@ -246,11 +259,11 @@ export function validateChange(change, { refs, rules, ranges } = {}) {
     conditions: byRef.get(target).conditions,
   };
   if (change.persistence !== undefined && change.persistence !== 'project_candidate') return { ok: false, reason: '持久化方式不认' };
-  const topicKey = change.topicKey === undefined ? (existing ? undefined : '') : String(change.topicKey || '').trim();
-  if (!existing && !topicKey) return { ok: false, reason: '新规则缺少主题键' };
+  const topicKey = change.topicKey === undefined ? (existing || sampleOnly ? undefined : '') : String(change.topicKey || '').trim();
+  if (!existing && !sampleOnly && !topicKey) return { ok: false, reason: '新规则缺少主题键' };
   if (topicKey !== undefined && (!topicKey || topicKey.length > 60)) return { ok: false, reason: '主题键不合法' };
-  const currentText = change.currentText === undefined ? (existing ? undefined : '') : String(change.currentText || '').trim();
-  if (!existing && !currentText) return { ok: false, reason: '新规则缺少当前规范' };
+  const currentText = change.currentText === undefined ? (existing || sampleOnly ? undefined : '') : String(change.currentText || '').trim();
+  if (!existing && !sampleOnly && !currentText) return { ok: false, reason: '新规则缺少当前规范' };
   if (currentText !== undefined && (!currentText || currentText.length > 240 || currentText.split('\n').length > 6)) {
     return { ok: false, reason: '当前规范不合法' };
   }
@@ -341,6 +354,37 @@ export function mergeChange(existing, change, { now } = {}) {
   learning.specDigest = digest;
   learning.updatedAt = at;
   return { current, learning, specChanged, digest };
+}
+
+/** 认可样例只记作品版本与验收维度，不抬规则证据；路径未校验就标未验证。 */
+export function addSample(learning, sample = {}) {
+  const next = learning ? JSON.parse(JSON.stringify(learning)) : {};
+  const rows = (Array.isArray(next.samples) ? next.samples : []).filter((row) => row && row.episodeId && row.dimension);
+  const row = {
+    episodeId: bounded(sample.episodeId, 80),
+    artifactVersion: bounded(sample.artifactVersion || '', 40),
+    dimension: bounded(sample.dimension || '作品', 20),
+    messageIds: (Array.isArray(sample.messageIds) ? sample.messageIds : []).slice(-3).map((id) => bounded(id, 80)),
+    verified: sample.verified === true,
+    at: new Date(sample.at || Date.now()).toISOString(),
+  };
+  const kept = rows.filter((item) => !(item.episodeId === row.episodeId && item.dimension === row.dimension));
+  next.samples = [...kept, row].slice(-LIMITS.samples);
+  return next;
+}
+
+/** 执行没做到时补检查点：不改规范正文，也不加同义禁令。 */
+export function addCheckpoint(learning, checkpoint = {}) {
+  const next = learning ? JSON.parse(JSON.stringify(learning)) : {};
+  const text = bounded(String(checkpoint.text || '').trim(), 160);
+  if (!text) return next;
+  const rows = (Array.isArray(next.checkpoints) ? next.checkpoints : []).filter((row) => row && row.text);
+  next.checkpoints = [...rows.filter((row) => row.text !== text), {
+    text,
+    messageIds: (Array.isArray(checkpoint.messageIds) ? checkpoint.messageIds : []).slice(-3).map((id) => bounded(id, 80)),
+    at: new Date(checkpoint.at || Date.now()).toISOString(),
+  }].slice(-LIMITS.checkpoints);
+  return next;
 }
 
 /** 状态只看证据强度：明确长期要求或两个独立作品才 active；条件不确定就 pending。 */
@@ -462,6 +506,40 @@ export function receiptOf({ operationId, episodeId, status, changes, usage, at, 
     changes: Number(changes || 0),
     ...(usage ? { usage } : {}),
     at: new Date(at || Date.now()).toISOString(),
+  };
+}
+
+/** 最近回执就是效果摘要的来源；只报发生过的次数，未知用量不补零。 */
+export function effectSummary(learning) {
+  const rows = (Array.isArray(learning?.receipts) ? learning.receipts : []).slice(-LIMITS.receipts);
+  const episodes = new Set();
+  let applied = 0;
+  let noChange = 0;
+  let failed = 0;
+  let knownCalls = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  for (const row of rows) {
+    if (!row) continue;
+    if (row.episodeId) episodes.add(row.episodeId);
+    if (row.status === 'applied' || row.status === 'deleted' || row.status === 'undone') applied += 1;
+    else if (row.status === 'no_change') noChange += 1;
+    else failed += 1;
+    if (row.usage && row.usage.known === true) {
+      knownCalls += 1;
+      inputTokens += Number(row.usage.inputTokens || 0);
+      outputTokens += Number(row.usage.outputTokens || 0);
+    }
+  }
+  return {
+    window: rows.length,
+    applied,
+    noChange,
+    failed,
+    episodes: episodes.size,
+    knownCalls,
+    inputTokens: knownCalls ? inputTokens : null,
+    outputTokens: knownCalls ? outputTokens : null,
   };
 }
 

@@ -63,6 +63,26 @@ Each completed turn keeps a few lines under 「已编辑 N 个文件」, built f
 - Limits: 4096 bytes per body, 512 KB of bodies per store, 1000 entries per layer, 60 characters per title or summary; 200 entries per layer is just a warning line. At the hard ceiling a save is never refused: the least recently read entry in the same layer moves to archive and the result names it (body and full record kept, restorable by hand); only an entry that alone exceeds the budget fails. Saying 「别记」 also archives. Files are never deleted.
 - One directory per project, so projects never see each other's notes.
 
+## 项目自进化〔实验〕 / Project self-evolution (experimental)
+
+默认关闭，只对当前项目生效。开启后，它从你的纠正和认可里整理出少量项目规范：纠正更新做法，认可作品只给已有规范留一条带版本与维度的样例；执行漏掉只补检查点，不改写成禁令。下次匹配任务按需读取，不逐轮注入。会增加一次有上限的后台整理调用，以及命中的记忆读取消耗。
+
+Off by default, per project only. When enabled it distills a few project rules from your corrections and approvals: corrections revise the approach, approvals attach one bounded, versioned sample to an existing rule, and an execution miss adds a checkpoint instead of a ban. Matching tasks read them on demand, never per turn. It adds one bounded background organize call and the memory reads that actually hit.
+
+- 一次整理最多 2 处改动、768 输出 token、15 秒；输入不超过 8 KiB，同一作品最多 2 次，同一项目 24 小时内最多 6 次。
+- 成果停在 `pending` / `trial` / `active` / `paused`；明确说「以后都这样」或两个独立作品支持才 `active`，试用与暂停 30 天后清理。
+- 规则 32 条、待定 12 条、每规则样例 4 个/检查点 3 个/来源 3 条、旧版本 2 个，都有硬上限；到顶先暂停新学习，不静默丢已生效规则。
+- 面板把「整理调用用量」和「本请求记忆载荷」分开显示；usage 没返回就写未知，不补零。
+- 关闭后停止学习、读取和晚到写入；已固定为普通项目规范的内容继续生效，实验成果保留可查看。
+- 同一项目换栏目、新一期、临时例外不会互相继承；仓库子目录、符号链接、worktree 视为同一项目，不同克隆分开。
+
+- At most 2 changes, 768 output tokens and 15 s per organize call; input ≤ 8 KiB, ≤ 2 calls per episode and ≤ 6 per project in 24 h.
+- Results stay `pending` / `trial` / `active` / `paused`; they become `active` only on an explicit long-term ask or two independent episodes; trial and paused entries expire after 30 days.
+- Hard caps: 32 rules, 12 pending, 4 samples / 3 checkpoints / 3 sources per rule, 2 old versions. At the ceiling new learning pauses; active explicit rules are never silently dropped.
+- The panel reports organize usage and per-request memory payload separately; missing usage is shown as unknown, never zero.
+- Turning it off stops learning, reads and late writes; rules pinned as ordinary project norms keep working, experimental results stay viewable.
+- Switching columns, a new episode and one-off exceptions do not leak into each other; a repository subdirectory, symlink or worktree is the same project, separate clones are not.
+
 ## 安装 / Install
 
 Plugin Manager 里搜 `dsh-lite-memory` 直接装；或 `npm pack` 后用 Plugin Manager 安装生成的 `.tgz`。

@@ -2268,6 +2268,16 @@ function learningRuleView(record) {
     topicKey: record.topicKey || '',
     origin: record.origin,
     state: record.learning?.state || 'pending',
+    samples: (Array.isArray(record.learning?.samples) ? record.learning.samples : []).slice(-4).map((row) => ({
+      dimension: row.dimension || '作品',
+      artifactVersion: row.artifactVersion || '',
+      verified: row.verified === true,
+      at: row.at || '',
+    })),
+    checkpoints: (Array.isArray(record.learning?.checkpoints) ? record.learning.checkpoints : []).slice(-3).map((row) => ({
+      text: row.text || '',
+      at: row.at || '',
+    })),
     learning: JSON.parse(JSON.stringify(record.learning || {})),
     updated: record.updated || '',
     created: record.created || '',
@@ -2294,6 +2304,7 @@ export function learningSnapshot(scope, options = {}) {
       paused: rules.filter((row) => row.state === 'paused').length,
     },
     economy: economyOf(evolution.learning),
+    effect: learning.effectSummary(evolution.learning),
   };
 }
 
@@ -2421,6 +2432,27 @@ export function commitLearning(scope, batch = {}) {
             if (Number(entry.revision) !== Number(expected.revision)) throw new Error('目标规则刚被改过，这次整理作废');
             const flat = toFlat(entry);
             if (expected.specDigest && learning.specDigestOf(flat) !== expected.specDigest) throw new Error('目标规则已经变过，这次整理作废');
+            if (change.feedbackType === 'artifact_accept' || change.feedbackType === 'execution_miss') {
+              const next = change.feedbackType === 'artifact_accept'
+                ? learning.addSample(flat.learning, {
+                  episodeId,
+                  artifactVersion: batch.episodeUpdatedAt || '',
+                  dimension: batch.dimension || learning.dimensionOf(batch.feedbackText),
+                  messageIds: batch.messageIds || [],
+                  at,
+                })
+                : learning.addCheckpoint(flat.learning, {
+                  text: change.currentText || `交付前核对：${flat.title}`,
+                  messageIds: batch.messageIds || [],
+                  at,
+                });
+              next.updatedAt = at;
+              entry.revision = Number(entry.revision) + 1;
+              entry.updatedAt = at;
+              entry.maintenance = { ...(entry.maintenance || {}), learning: next };
+              touched += 1;
+              continue;
+            }
             const merged = learning.mergeChange(flat, change, { now });
             const evidence = {
               sourceType: 'human_feedback',

@@ -781,8 +781,11 @@ export function apply(ctx, config) {
       const body = String(record.body || '');
       const short = body && body.length <= EXPERIMENT_SHORT_CHARS && body.split('\n').length <= 4;
       const conditions = conditionLabel(record.conditions);
+      const check = Array.isArray(learning.checkpoints) && learning.checkpoints[0]?.text
+        ? `；核对：${String(learning.checkpoints[0].text).slice(0, 24)}`
+        : '';
       const line = short
-        ? `- 「${record.title}」${conditions ? `（${conditions}）` : ''} · ${record.id} · 第 ${record.revision || 1} 版：${body}`
+        ? `- 「${record.title}」${conditions ? `（${conditions}）` : ''} · ${record.id} · 第 ${record.revision || 1} 版：${body}${check}`
         : `- 「${record.title}」 · ${record.id} · 第 ${record.revision || 1} 版（用途：${record.summary || record.title}；要用时 memory_read 取正文）`;
       const size = Buffer.byteLength(`\n${line}`);
       if (used + size > EXPERIMENT_BYTES) break;
@@ -1702,6 +1705,8 @@ export function apply(ctx, config) {
         projectId: scope.key,
         sessionId: candidate.sessionId,
         messageIds: candidate.messageIds,
+        feedbackText: candidate.text,
+        dimension: candidate.cue?.dimension || '',
         changes: parsed.changes,
         preparedTargets,
         usage: learning.usageOf(chunks),

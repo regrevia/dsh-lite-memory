@@ -532,6 +532,8 @@ window.__ModuleLoader__.load({
       const usageLine = economy && economy.calls > 0
         ? (economy.knownCalls > 0 ? `整理 ${economy.calls} 次 · 输入 ${economy.inputTokens} / 输出 ${economy.outputTokens}` : `整理 ${economy.calls} 次 · 用量未知`)
         : '还没整理过';
+      const checkpoints = Array.isArray(current?.checkpoints) ? current.checkpoints : [];
+      const samples = Array.isArray(current?.samples) ? current.samples : [];
       const detail = current ? h('div', { style: EVO_DETAIL },
         h('div', null, current.title),
         h('div', { style: EVO_MUTED }, `第 ${current.revision} 版 · ${EVO_STATE[current.state] || current.state}`),
@@ -540,6 +542,8 @@ window.__ModuleLoader__.load({
           : '适用范围待确认'),
         h('div', { style: BODY }, current.body || '没有正文'),
         h('div', { style: EVO_MUTED }, `来源 ${Array.isArray(current.learning?.evidence) ? current.learning.evidence.length : 0} 条${EVO_DATE(current.learning?.updatedAt) ? ` · 最近 ${EVO_DATE(current.learning.updatedAt)}` : ''}`),
+        checkpoints.length ? h('div', { style: EVO_MUTED }, `检查点：${checkpoints[0].text}`) : null,
+        samples.length ? h('div', { style: EVO_MUTED }, `样例 ${samples.length} 项 · 未验证`) : null,
         h('div', { style: EVO_ACTIONS },
           Array.isArray(current.learning?.versions) && current.learning.versions.length > 0
             ? h('button', { type: 'button', onClick: () => manage('undo'), style: EVO_LINK }, '撤回')

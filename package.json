@@ -1,6 +1,6 @@
 {
   "name": "dsh-lite-memory",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "On-demand memory for the DeepSeek Harness: nothing in the system prompt, one muted line only when something is saved, hit or suggested.",
   "type": "module",
   "main": "index.js",
@@ -8,8 +8,9 @@
     "dsh": ">=0.1.5"
   },
   "scripts": {
-    "test": "node test/store.test.mjs && node test/state.test.mjs && node test/view.test.mjs && node test/anchor.test.mjs && node test/recall.test.mjs && node test/evolution-read.test.mjs && node test/learning.test.mjs && node test/crossing.test.mjs && node test/client.test.mjs && node test/contract.test.mjs",
-    "bench": "node bench/bench.mjs"
+    "test": "node test/store.test.mjs && node test/state.test.mjs && node test/view.test.mjs && node test/anchor.test.mjs && node test/recall.test.mjs && node test/evolution-read.test.mjs && node test/learning.test.mjs && node test/scenario.test.mjs && node test/crossing.test.mjs && node test/client.test.mjs && node test/contract.test.mjs",
+    "bench": "node bench/bench.mjs",
+    "bench:evolution": "node bench/evolution.mjs"
   },
   "exports": {
     ".": "./index.js",
@@ -31,6 +32,7 @@
     "icon.svg",
     "README.md",
     "TRIGGERS.md",
+    "docs",
     "LICENSE",
     "bench",
     "test"

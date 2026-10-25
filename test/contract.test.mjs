@@ -574,6 +574,7 @@ const orgScope = store.scopeOf(orgCwd);
 await store.setTaskDefault(orgScope, { taskKind: 'video', seriesId: '口播' });
 let orgOptions = null;
 let orgPrepare = null;
+let orgMode = 'new';
 llmImpl = {
   prepareCall: async (config, signal) => {
     orgPrepare = { config, signal };
@@ -581,10 +582,14 @@ llmImpl = {
       config: { provider: 'deepseek', model: 'chat' },
       stream: async function* (options) {
         orgOptions = options;
-        yield { type: 'text-delta', text: JSON.stringify({ changes: [{
-          target: 'new', feedbackType: 'spec_change', topicKey: '开头', currentText: '开头先给结论。',
-          applicability: 'all_in_scope', conditions: [], evidence: ['u0'], persistence: 'project_candidate',
-        }] }) };
+        const prompt = options.messages[0].content[0].text;
+        const ref = (prompt.match(/"ref":"(r\d+)"/) || [])[1] || 'r0';
+        const change = orgMode === 'checkpoint'
+          ? { target: ref, feedbackType: 'execution_miss', currentText: '交付前先核对开头是否先给结论。', evidence: ['u0'], persistence: 'project_candidate' }
+          : orgMode === 'sample'
+            ? { target: ref, feedbackType: 'artifact_accept', evidence: ['u0'], persistence: 'project_candidate' }
+            : { target: 'new', feedbackType: 'spec_change', topicKey: '开头', currentText: '开头先给结论。', applicability: 'all_in_scope', conditions: [], evidence: ['u0'], persistence: 'project_candidate' };
+        yield { type: 'text-delta', text: JSON.stringify({ changes: [change] }) };
         yield { type: 'usage', usage: { inputTokens: 12, outputTokens: 6 } };
         yield { type: 'finish', reason: { kind: 'stop' } };
       },
@@ -618,6 +623,55 @@ const orgEconomy = store.learningSnapshot(orgScope).economy;
 assert.equal(orgEconomy.calls, 1);
 assert.equal(orgEconomy.knownCalls, 1);
 assert.equal(orgEconomy.inputTokens, 12);
+
+/** 第二步：执行没做到，后台只补检查点；主持人新开一版也不改正文。 */
+orgMode = 'checkpoint';
+await preStep({ agent: orgAgent, signal: orgSig, turn: '32' }, async () => ({
+  kind: 'enter',
+  messages: [{ role: 'user', id: 'org-m2', source: { kind: 'user' }, content: [{ type: 'text', text: '之前说过开头先给结论，这次怎么又没做到。' }] }],
+}));
+orgTurnEnd(orgAgent.session, { type: 'turn/end', data: { reason: { kind: 'completed' } } });
+const orgRuleId = store.learningSnapshot(orgScope).rules[0].id;
+const orgFlat = () => store.loadIndex(orgScope).entries.find((row) => row.id === orgRuleId);
+for (let i = 0; i < 100 && !(orgFlat()?.learning?.checkpoints || []).length; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+assert.equal(orgFlat().body, '开头先给结论。');
+assert.equal((orgFlat().learning.checkpoints || []).length, 1);
+assert.match(orgFlat().learning.checkpoints[0].text, /核对/);
+assert.equal(orgFlat().learning.state, 'active');
+assert.equal(orgFlat().learning.evidence.length, 1);
+
+/** 第三步：另一期作品认可这个开头，只记一条有版本、有维度的样例。 */
+sessionCwds.set('session-organize-2', orgCwd);
+const orgScope2 = orgScope;
+orgMode = 'sample';
+const orgAgent2 = { id: 'session-organize-2', cwd: orgCwd, session: { id: 'session-organize-2', header: { id: 'session-organize-2', cwd: orgCwd }, requestHeader: () => ({ config: { provider: 'deepseek', model: 'chat' } }) } };
+currentAgent = orgAgent2;
+await preStep({ agent: orgAgent2, signal: orgSig, turn: '41' }, async () => ({
+  kind: 'enter',
+  messages: [{ role: 'user', id: 'org-m3', source: { kind: 'user' }, content: [{ type: 'text', text: '这版可以，开头这样就行。' }] }],
+}));
+orgMode = 'sample';
+orgTurnEnd(orgAgent2.session, { type: 'turn/end', data: { reason: { kind: 'completed' } } });
+const orgRule2 = () => store.loadIndex(orgScope2).entries.find((row) => row.origin === 'project_evolution');
+for (let i = 0; i < 100 && !(orgRule2()?.learning?.samples || []).length; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+assert.equal(orgRule2().body, '开头先给结论。');
+assert.equal((orgRule2().learning.samples || []).length, 1);
+assert.equal(orgRule2().learning.samples[0].dimension, '开头');
+assert.equal(orgRule2().learning.samples[0].verified, false);
+assert.ok(orgRule2().learning.samples[0].artifactVersion);
+const orgSnapshot2 = await call('/lite-memory/evolution', { sessionId: 'session-organize-2', learningAction: 'snapshot' });
+assert.equal(orgSnapshot2.status, 200);
+assert.equal(orgSnapshot2.body.rules.length, 1);
+assert.equal(orgSnapshot2.body.rules[0].samples.length, 1);
+assert.equal(orgSnapshot2.body.rules[0].checkpoints.length, 1);
+const orgEconomy2 = store.learningSnapshot(orgScope2).economy;
+assert.equal(orgEconomy2.calls, 3);
+assert.equal(orgEconomy2.knownCalls, 3);
+assert.equal(orgEconomy2.inputTokens, 36);
 llmImpl = null;
 
 console.log('contract.test.mjs: all passed');
