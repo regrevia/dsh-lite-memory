@@ -80,38 +80,45 @@ window.__ModuleLoader__.load({
     /** 失败不装作成功：把服务端那一句原样放回行里。 */
     const failure = (result, fallback) => (result && result.body && typeof result.body.reason === 'string' && result.body.reason ? result.body.reason : fallback);
 
-    /** 引用按轮归属。 */
-    const pendingCites = new Map();
-    const assignedCites = new Map();
-    const tailCites = new Map();
-    const noteCites = (sessionId, text) => {
+    /** 每条记忆按轮归属：读到的、写过的各归各的条。 */
+    const WRITE_MARK = /^memory · (saved|merged|kept)/m;
+    const pendingItems = new Map();
+    const assignedItems = new Map();
+    const tailItems = new Map();
+    const noteMemory = (sessionId, text) => {
       if (!sessionId) return;
-      const seen = assignedCites.get(sessionId) || new Set();
-      const queue = pendingCites.get(sessionId) || [];
+      const write = WRITE_MARK.test(String(text || ''));
+      const seen = assignedItems.get(sessionId) || new Set();
+      const queue = pendingItems.get(sessionId) || [];
       for (const id of idsIn(text)) {
-        if (seen.has(id) || queue.includes(id)) continue;
-        queue.push(id);
+        const mark = `${write ? 'w' : 'r'}:${id}`;
+        if (seen.has(mark) || queue.some((item) => item.mark === mark)) continue;
+        queue.push({ id, mark, write });
       }
-      pendingCites.set(sessionId, queue);
+      pendingItems.set(sessionId, queue);
     };
-    const takeCites = (sessionId, key) => {
-      if (!sessionId) return [];
-      const cached = tailCites.get(key);
+    const takeMemory = (sessionId, key) => {
+      const found = { reads: [], writes: [] };
+      if (!sessionId) return found;
+      const cached = tailItems.get(key);
       if (cached) return cached;
-      const queue = pendingCites.get(sessionId) || [];
-      const taken = queue.slice();
-      pendingCites.set(sessionId, []);
-      const seen = assignedCites.get(sessionId) || new Set();
-      for (const id of taken) seen.add(id);
-      assignedCites.set(sessionId, seen);
-      tailCites.set(key, taken);
-      return taken;
+      const queue = pendingItems.get(sessionId) || [];
+      const seen = assignedItems.get(sessionId) || new Set();
+      for (const item of queue) {
+        if (seen.has(item.mark)) continue;
+        seen.add(item.mark);
+        (item.write ? found.writes : found.reads).push(item.id);
+      }
+      pendingItems.set(sessionId, []);
+      assignedItems.set(sessionId, seen);
+      tailItems.set(key, found);
+      return found;
     };
 
     const Row = (props) => {
       const line = props.phase === 'preparing' ? null : firstLine(settledText(props.block));
       React.useEffect(() => {
-        if (props.phase === 'result') noteCites(sessionKeyOf(props), settledText(props.block));
+        if (props.phase === 'result') noteMemory(sessionKeyOf(props), settledText(props.block));
       }, [props.phase]);
       return h('div', { 'data-tool': props.toolName, style: ROW }, h('span', { style: DOT }, '·'), h('span', { style: LABEL }, line ?? RUNNING[props.toolName] ?? 'memory'));
     };
@@ -130,8 +137,9 @@ window.__ModuleLoader__.load({
         if (!canKeep) return;
         if (!operationId.current) operationId.current = newOperationId();
         setState('saving');
-        post('/lite-memory/keep', { op: 'keep', candidateId, operationId: operationId.current, cwd }).then((result) => {
+        post('/lite-memory/keep', { op: 'keep', candidateId, operationId: operationId.current, cwd, sessionId: sessionKeyOf(props) }).then((result) => {
           if (result.ok) {
+            if (result.body && result.body.id) noteMemory(sessionKeyOf(props), `memory · saved ${result.body.id}`);
             setState('saved');
             return;
           }
@@ -167,6 +175,9 @@ window.__ModuleLoader__.load({
           setState('failed');
         });
       };
+      React.useEffect(() => {
+        if (props.phase === 'result') noteMemory(sessionKeyOf(props), settledText(props.block));
+      }, [props.phase]);
       const label = note || (firstLine(text) ?? RUNNING.memory_save);
       const button = entryId && state !== 'dropped'
         ? h('button', { type: 'button', onClick: drop, disabled: !canDrop, 'aria-label': '删除这条记忆', style: DROP }, '✕')
@@ -174,8 +185,9 @@ window.__ModuleLoader__.load({
       return h('div', { 'data-tool': props.toolName, style: ROW }, h('span', { style: DOT }, '·'), h('span', { style: LABEL }, label), button);
     };
 
-    /** 本轮引用了几条：点开是标题，再点看正文。 */
+    /** 本轮有几条：点开是标题，再点看正文。 */
     const Citations = (props) => {
+      const name = typeof props.label === 'string' && props.label ? props.label : '记忆引用';
       const sessionId = typeof props.sessionId === 'string' ? props.sessionId : '';
       const ids = Array.isArray(props.ids) ? props.ids : [];
       const idsKey = ids.join(',');
@@ -230,25 +242,30 @@ window.__ModuleLoader__.load({
         setNote('');
       };
 
-      return h('div', { style: DOCK, 'data-memory-citations': items.length },
-        h('button', { type: 'button', onClick: toggle, 'aria-expanded': open, 'aria-label': open ? '收起记忆引用' : '展开记忆引用', style: CHIP }, `记忆引用 ${items.length} 条${open ? ' · 收起' : ''}`),
+      return h('div', { style: DOCK, 'data-memory-list': name },
+        h('button', { type: 'button', onClick: toggle, 'aria-expanded': open, 'aria-label': `${open ? '收起' : '展开'}${name}`, style: CHIP }, `${name} ${items.length} 条${open ? ' · 收起' : ''}`),
         ...rows,
         shown ? h('div', { style: BODY }, h('div', { style: { opacity: 0.9 } }, shown.title), shown.body) : null,
         note ? h('div', { style: BODY }, note) : null,
       );
     };
 
-    /** 输出末尾的那一条：只算本轮读到的。 */
-    const TurnCites = (props) => {
+    /** 输出末尾那几条：只算本轮的。 */
+    const TurnMemory = (props) => {
       const sessionId = sessionKeyOf(props);
       const turn = props.turn && props.turn.id !== undefined ? String(props.turn.id) : String(props.seq ?? '');
       const key = `${sessionId}|${turn}`;
-      const [ids, setIds] = React.useState([]);
+      const [found, setFound] = React.useState({ reads: [], writes: [] });
       React.useEffect(() => {
-        setIds(takeCites(sessionId, key));
+        setFound(takeMemory(sessionId, key));
       }, [key, sessionId]);
-      if (!sessionId || ids.length === 0) return null;
-      return h('div', { style: TAIL }, h(Citations, { sessionId, ids }));
+      if (!sessionId) return null;
+      const reads = Array.isArray(found.reads) ? found.reads : [];
+      const writes = Array.isArray(found.writes) ? found.writes : [];
+      if (reads.length === 0 && writes.length === 0) return null;
+      return h('div', { style: TAIL },
+        reads.length ? h(Citations, { sessionId, ids: reads, label: '记忆引用' }) : null,
+        writes.length ? h(Citations, { sessionId, ids: writes, label: '记忆更新' }) : null);
     };
 
     return {
@@ -261,7 +278,7 @@ window.__ModuleLoader__.load({
         ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({ name: 'tool.call.toolview', key: 'memory_save' }, SavedRow));
         ctx.slots.inject('conversation.chat.turnTail', () => {
           try {
-            return ctx.slots.register({ name: 'conversation.chat.turnTail', id: 'lite-memory', order: 30 }, TurnCites);
+            return ctx.slots.register({ name: 'conversation.chat.turnTail', id: 'lite-memory', order: 30 }, TurnMemory);
           } catch {
             return () => {};
           }

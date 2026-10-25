@@ -144,6 +144,7 @@ function keepHandler(webServer) {
     const candidateId = typeof body.candidateId === 'string' && body.candidateId
       ? body.candidateId
       : typeof body.suggestionId === 'string' ? body.suggestionId : '';
+    const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
 
     if (action === 'undo') {
       if (!id) return sendJson(res, 400, { ok: false, reason: '缺少 id' });
@@ -170,6 +171,7 @@ function keepHandler(webServer) {
       if (!kept.ok) {
         return sendJson(res, kept.reason === '候选与已有条目相近，需要确认' ? 409 : 404, kept);
       }
+      if (kept.id) recordCitations(scope, sessionId, [{ id: kept.id, title: kept.title }]);
       return sendJson(res, 200, kept);
     } catch (error) {
       return sendJson(res, 409, { ok: false, reason: error instanceof Error ? error.message : '保存失败' });
@@ -282,6 +284,7 @@ export function apply(ctx) {
           similar: saved.similarList.map((item) => `${item.id}「${item.title}」${item.summary ? `｜${item.summary}` : ''}`).join('；'),
         };
       }
+      recordCitations(scope, sessionIdOf(execution), [saved.record]);
       return {
         id: saved.record.id,
         title: saved.record.title,
