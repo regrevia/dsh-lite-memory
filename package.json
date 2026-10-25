@@ -1,6 +1,6 @@
 {
   "name": "dsh-lite-memory",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "On-demand memory for the DeepSeek Harness: nothing in the system prompt, one muted line only when something is saved, hit or suggested.",
   "type": "module",
   "main": "index.js",
