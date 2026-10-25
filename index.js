@@ -1,5 +1,6 @@
 import {
   scopeOf,
+  globalScope,
   upsert,
   search,
   readEntry,
@@ -177,7 +178,7 @@ export function apply(ctx) {
       }],
     },
     execute: async (args, execution) => {
-      const scope = scopeOf(cwdOf(execution));
+      const scope = args.scope === 'global' ? globalScope() : scopeOf(cwdOf(execution));
       const saved = upsert(scope, args);
       return { id: saved.record.id, title: saved.record.title, summary: saved.record.summary, merged: saved.merged };
     },
@@ -218,7 +219,7 @@ export function apply(ctx) {
 
   ctx.effect(() => tools.register({
     name: 'memory_search',
-    description: `按关键词检索已有记忆，返回标题与一句话摘要（最多 4 条）。用户提到「记住过 / 上次 / 规范 / 约定 / 路径 / 凭据怎么取」时先查这里。命中后再用 memory_read 取正文。${NOTES}`,
+    description: `按关键词检索已有记忆，返回标题与一句话摘要（最多 4 条），项目库与全局库一起查，「[全局]」前缀表示跨项目通用。带（场景）的条目只在该条件下成立。用户提到「记住过 / 上次 / 规范 / 约定 / 路径 / 凭据怎么取」时先查这里。命中后再用 memory_read 取正文。${NOTES}`,
     parameters: SEARCH_PARAMS,
     output: {
       schema: {

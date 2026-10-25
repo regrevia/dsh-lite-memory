@@ -21,6 +21,8 @@ Lightweight memory for the DeepSeek Harness. Nothing in the system prompt, nothi
 
 这些行只属于产生它的那一轮：重进会话就没了，历史里只留正文。同一件事再记一次会合并进原条目（旧要点保留，同键的新值覆盖）；前置条件不同的同一主题是两条，不合并。
 
+写入时分两层：默认只在这个项目生效；用户说「以后所有项目都这样」才进全局层（上限 40 条），检索时一起查。同一主题在不同前提下用 `when` 区分，各存一条。
+
 触发词：`记住`、`记一下`、`上次`、`规范`、`约定`、`路径`、`凭据怎么取`。
 
 | Case | Behaviour |
@@ -30,6 +32,8 @@ Lightweight memory for the DeepSeek Harness. Nothing in the system prompt, nothi
 | **L2** common sense, one-off parameters, credential values | never written |
 
 Those lines belong to the turn that made them: reopening the session drops them, leaving only the prose in history. Recording the same subject again merges into the existing entry — earlier points are kept and only conflicting keys are updated. The same subject under different preconditions stays two entries.
+
+Writes land in one of two layers: the current project by default, or the global layer (max 40 entries) when the user says the rule holds for every project. Both layers are searched together, and a `when` field separates the same subject under different preconditions.
 
 ## 点一下就存 / One click, no turn
 

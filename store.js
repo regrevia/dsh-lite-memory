@@ -9,6 +9,7 @@ import crypto from 'node:crypto';
  */
 export const LIMITS = {
   entries: 200,
+  globalEntries: 40,
   entryBytes: 4096,
   totalBytes: 512 * 1024,
   titleChars: 40,
@@ -41,6 +42,21 @@ export function scopeOf(cwd) {
   const hash = crypto.createHash('sha1').update(abs).digest('hex').slice(0, 8);
   const label = path.basename(abs).replace(/[^\w.-]+/g, '-').slice(0, 32) || 'root';
   return { key: `${label}-${hash}`, dir: path.join(memoryRoot(), `${label}-${hash}`), cwd: abs };
+}
+
+/** 跨项目通用的那层：用户说「以后所有项目都这样」才写这里。 */
+export function globalScope() {
+  return { key: 'global', dir: path.join(memoryRoot(), 'global'), cwd: '' };
+}
+
+/** 一次写入只落在一个库里：项目库优先，全局库兜底。 */
+function locate(scope, id) {
+  for (const source of [scope, globalScope()]) {
+    const index = loadIndex(source);
+    const record = index.entries.find((item) => item.id === id);
+    if (record) return { source, index, record };
+  }
+  return null;
 }
 
 function readJson(file, fallback) {
@@ -116,7 +132,8 @@ export function trimIndex(scope, index) {
     const rank = (item) => (item.lastUsed || item.updated || item.created || '');
     return rank(a).localeCompare(rank(b));
   });
-  while (index.entries.length > LIMITS.entries) archiveEntry(scope, index, byStaleness.shift());
+  const cap = scope.key === 'global' ? LIMITS.globalEntries : LIMITS.entries;
+  while (index.entries.length > cap) archiveEntry(scope, index, byStaleness.shift());
   let total = index.entries.reduce((sum, item) => sum + (item.bytes || 0), 0);
   while (total > LIMITS.totalBytes && byStaleness.length > 0) {
     const victim = byStaleness.shift();
@@ -235,47 +252,53 @@ export function upsert(scope, draft) {
 }
 
 export function search(scope, query, limit = 4) {
-  const index = loadIndex(scope);
   const terms = normalizeText(query, 200)
     .toLowerCase()
     .split(/[^\p{L}\p{N}]+/u)
     .filter((word) => word.length > 1);
-  const scored = index.entries.map((item) => {
-    const hay = `${item.title} ${item.summary} ${item.when || ''} ${(item.tags || []).join(' ')}`.toLowerCase();
-    let score = 0;
-    for (const term of terms) if (hay.includes(term)) score += term.length > 2 ? 2 : 1;
-    if (terms.length > 0 && score === 0) score = similarity(item.title, query) > 0.5 ? 1 : 0;
-    return { item, score };
-  });
-  const hits = scored.filter((row) => row.score > 0).sort((a, b) => b.score - a.score).slice(0, limit);
-  if (hits.length > 0) {
-    const now = new Date().toISOString();
-    for (const hit of hits) {
-      hit.item.hits = (hit.item.hits || 0) + 1;
-      hit.item.lastUsed = now;
+  const sources = scope.key === 'global' ? [scope] : [scope, globalScope()];
+  const seen = new Set();
+  const hits = [];
+  for (const source of sources) {
+    const index = loadIndex(source);
+    for (const item of index.entries) {
+      if (seen.has(item.id)) continue;
+      const hay = `${item.title} ${item.summary} ${item.when || ''} ${(item.tags || []).join(' ')}`.toLowerCase();
+      let score = 0;
+      for (const term of terms) if (hay.includes(term)) score += term.length > 2 ? 2 : 1;
+      if (terms.length > 0 && score === 0) score = similarity(item.title, query) > 0.5 ? 1 : 0;
+      if (score > 0) hits.push({ item, score, source, index });
     }
-    saveIndex(scope, index);
   }
-  return hits.map((row) => row.item);
+  const top = hits.sort((a, b) => b.score - a.score).slice(0, limit);
+  const now = new Date().toISOString();
+  const dirty = new Map();
+  for (const hit of top) {
+    hit.item.hits = (hit.item.hits || 0) + 1;
+    hit.item.lastUsed = now;
+    dirty.set(hit.source.key, { source: hit.source, index: hit.index });
+  }
+  for (const entry of dirty.values()) saveIndex(entry.source, entry.index);
+  return top.map((hit) => ({ ...hit.item, scope: hit.source.key === 'global' ? 'global' : 'project' }));
 }
 
 export function readEntry(scope, id) {
-  const index = loadIndex(scope);
-  const record = index.entries.find((item) => item.id === id);
-  if (!record) throw new Error(`没有这条记忆：${id}`);
-  const body = fs.readFileSync(entryFile(scope, record.id), 'utf8');
+  const found = locate(scope, id);
+  if (!found) throw new Error(`没有这条记忆：${id}`);
+  const { source, index, record } = found;
+  const body = fs.readFileSync(entryFile(source, record.id), 'utf8');
   record.lastUsed = new Date().toISOString();
   record.hits = (record.hits || 0) + 1;
-  saveIndex(scope, index);
+  saveIndex(source, index);
   return { record, body };
 }
 
 export function forget(scope, id) {
-  const index = loadIndex(scope);
-  const record = index.entries.find((item) => item.id === id);
-  if (!record) throw new Error(`没有这条记忆：${id}`);
-  archiveEntry(scope, index, record);
-  saveIndex(scope, index);
+  const found = locate(scope, id);
+  if (!found) throw new Error(`没有这条记忆：${id}`);
+  const { source, index, record } = found;
+  archiveEntry(source, index, record);
+  saveIndex(source, index);
   return record;
 }
 
@@ -326,7 +349,7 @@ export function renderIndex(entries, budget = 400) {
   for (const item of entries) {
     const last = Date.parse(item.lastUsed || item.updated || item.created || '') || now;
     const stale = now - last > staleMs;
-    const head = item.when ? `${item.title}（${item.when}）` : item.title;
+    const head = `${item.scope === 'global' ? '[全局] ' : ''}${item.title}${item.when ? `（${item.when}）` : ''}`;
     const line = stale ? `- ${item.id} ${head}` : `- ${item.id} ${head}｜${item.summary}`;
     if (used + line.length > budget) break;
     lines.push(line);
