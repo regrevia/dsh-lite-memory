@@ -232,7 +232,7 @@ export function apply(ctx) {
       },
       render: (value) => [{
         type: 'text',
-        text: value.count === 0 ? 'memory · no hits' : `memory · ${value.count} hits · ${value.chars} chars\n${value.index}`,
+        text: value.count === 0 ? 'memory · no hits' : `memory · ${value.count} hits\n${value.index}`,
       }],
     },
     execute: async (args, execution) => {

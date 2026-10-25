@@ -13,7 +13,7 @@ window.__ModuleLoader__.load({
       memory_forget: 'memory · dropping',
     };
 
-    const KEEP = { idle: 'keep', saving: 'saving', saved: 'kept', kept: 'kept' };
+    const KEEP = { idle: 'keep', saving: 'saving', saved: 'kept' };
     const ROW = { display: 'flex', alignItems: 'center', gap: '6px', padding: '1px 0', fontSize: '12px', lineHeight: '1.6', opacity: 0.7 };
     const DOT = { flex: '0 0 auto', opacity: 0.8 };
     const LABEL = { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
@@ -41,6 +41,13 @@ window.__ModuleLoader__.load({
       return match ? match[1] : null;
     };
 
+    /** 只在产生这行的那一轮显示。 */
+    const useLive = (phase) => {
+      const live = React.useRef(phase !== 'result');
+      if (phase !== 'result') live.current = true;
+      return live.current;
+    };
+
     const post = (payload) => {
       if (typeof fetch !== 'function') return Promise.resolve(null);
       return fetch('/lite-memory/keep', {
@@ -53,37 +60,24 @@ window.__ModuleLoader__.load({
     };
 
     const Row = (props) => {
+      if (!useLive(props.phase)) return null;
       const line = props.phase === 'preparing' ? null : firstLine(settledText(props.block));
       return h('div', { 'data-tool': props.toolName, style: ROW }, h('span', { style: DOT }, '·'), h('span', { style: LABEL }, line ?? RUNNING[props.toolName] ?? 'memory'));
     };
 
     /** 建议行：一个「keep」按钮，点了直接写盘。 */
     const SuggestRow = (props) => {
+      if (!useLive(props.phase)) return null;
       const [state, setState] = React.useState('idle');
       const text = props.phase === 'preparing' ? null : settledText(props.block);
       const label = firstLine(text) ?? RUNNING.memory_suggest;
       const title = quoted(text);
       const cwd = typeof props.cwd === 'string' ? props.cwd : '';
-      const actions = props.inputActions;
       const canKeep = Boolean(title) && Boolean(cwd) && state === 'idle';
       const keep = () => {
         if (!canKeep) return;
         setState('saving');
-        /** 写盘通道不通时退回一条普通消息，至少不丢这条建议。 */
-        const fallback = () => {
-          try {
-            const message = `保留记忆「${title}」`;
-            const span = actions && typeof actions.captureInsertion === 'function' ? actions.captureInsertion() : null;
-            const inserted = span && actions && typeof actions.insertText === 'function' ? actions.insertText(message, span) : false;
-            if (inserted === false && actions && typeof actions.setDraft === 'function') actions.setDraft(message);
-            if (actions && typeof actions.submit === 'function') actions.submit();
-            setState('kept');
-          } catch {
-            setState('idle');
-          }
-        };
-        if (typeof fetch !== 'function') return fallback();
-        post({ op: 'keep', title, cwd }).then((value) => setState(value && value.ok ? 'saved' : 'kept'));
+        post({ op: 'keep', title, cwd }).then((value) => setState(value && value.ok ? 'saved' : 'idle'));
       };
       const button = title
         ? h('button', { type: 'button', onClick: keep, disabled: !canKeep, 'aria-label': '保留这条记忆', style: canKeep ? KEEP_ON : KEEP_OFF }, KEEP[state] ?? KEEP.idle)
@@ -93,6 +87,7 @@ window.__ModuleLoader__.load({
 
     /** 自动写入行：一个「✕」，点了把它移入归档。 */
     const SavedRow = (props) => {
+      if (!useLive(props.phase)) return null;
       const [state, setState] = React.useState('idle');
       const text = props.phase === 'preparing' ? null : settledText(props.block);
       const title = quoted(text);
