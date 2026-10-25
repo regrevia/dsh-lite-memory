@@ -201,6 +201,8 @@ assert.match(opened.body.body, /引用正文第一行/);
 assert.equal((await call('/lite-memory/body', { sessionId: 'session-contract', id: 'mem_999999999999' })).status, 404);
 assert.equal((await call('/lite-memory/citations', {})).status, 400);
 assert.equal((await call('/lite-memory/citations', {}, { origin: 'http://evil.example' })).status, 403);
+assert.notEqual((await call('/lite-memory/citations', { sessionId: 'session-contract' }, { origin: 'dsh-app://app' })).status, 403);
+assert.notEqual((await call('/lite-memory/keep', { candidateId: 'sug_000000', cwd }, { origin: 'dsh-app://app' })).status, 403);
 assert.equal((await call('/lite-memory/citations', {}, { method: 'GET' })).status, 405);
 
 console.log('contract.test.mjs: all passed');

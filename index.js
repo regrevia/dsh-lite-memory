@@ -84,6 +84,15 @@ function readJsonBody(req, limit = 8192) {
 }
 
 /**
+ * 桌面壳与本地 Web 是同一个界面：认 host 自己的 origin，也认 app 内建协议。
+ */
+function sameSurface(origin, selfOrigin) {
+  if (typeof origin !== 'string' || origin.length === 0) return true;
+  if (origin === selfOrigin) return true;
+  return /^dsh-app:\/\/[A-Za-z0-9.-]+$/.test(origin);
+}
+
+/**
  * 「保留」「✕」的唯一入口。定位只认 id / candidateId，作用域由服务端按 id 查，
  * 不再从展示文案里解析标题或 [全局]。已处理的候选重放返回原回执。
  */
@@ -91,7 +100,7 @@ function keepHandler(webServer) {
   return async (req, res) => {
     if (req.method !== 'POST') return sendJson(res, 405, { ok: false, reason: '只接受 POST' });
     const origin = req.headers.origin;
-    if (typeof origin === 'string' && origin.length > 0 && origin !== webServer.getOrigin()) {
+    if (!sameSurface(origin, webServer.getOrigin())) {
       return sendJson(res, 403, { ok: false, reason: '来源不符' });
     }
     const pathname = String(req.url || '').split('?')[0];
