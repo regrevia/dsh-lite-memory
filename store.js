@@ -130,6 +130,7 @@ export function loadIndex(scope, options = {}) {
   const index = {
     version: 2,
     scope: loaded.state.scopeKey,
+    cwd: typeof loaded.state.cwd === 'string' ? loaded.state.cwd : '',
     generation: loaded.state.generation,
     epoch: loaded.state.epoch,
     entries,
@@ -934,12 +935,16 @@ function findCurrent(id, scope) {
 
 
 /** 撤销一次修改：有旧版本就整条还原成新 revision；没有旧版本（新建的）就归档。 */
-export function undoChange(scope, id) {
+export function undoChange(scope, id, options = {}) {
   return withLocks([scope, globalScope()], () => {
     for (const source of [scope, globalScope()]) {
       const index = loadIndex(source);
       const record = index.entries.find((item) => item.id === id);
       if (!record) continue;
+      /** 旧回执不能撤掉别人后来的修改：版本对不上就明确拒绝。 */
+      if (options.expectedRevision !== undefined && Number(record.revision) !== Number(options.expectedRevision)) {
+        throw new state.StateError('conflict', `这条记忆已经更新到第 ${record.revision} 版`);
+      }
       const versions = record.versions || [];
       const last = versions[versions.length - 1];
       if (!last) {
@@ -979,6 +984,60 @@ export function undoChange(scope, id) {
     }
     return null;
   });
+}
+
+/**
+ * 按 id 在所有已知层里找：界面上的引用是历史事实，当前正文可能已经不在原来那层了。
+ * 只读，不做任何写回；找不到就返回 null，调用方据此显示「已失效」。
+ */
+export function findAnywhere(id) {
+  if (!/^mem_[a-z0-9]{6,}$/.test(String(id || ''))) return null;
+  let names;
+  try {
+    names = fs.readdirSync(memoryRoot(), { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const dirent of names) {
+    if (!dirent.isDirectory()) continue;
+    const scope = {
+      key: dirent.name,
+      dir: path.join(memoryRoot(), dirent.name),
+      cwd: '',
+      requestedCwd: '',
+      rootSource: 'scan',
+      confirmed: true,
+    };
+    if (!fs.existsSync(path.join(scope.dir, 'state.json'))) continue;
+    let index;
+    try {
+      index = loadIndex(scope);
+    } catch {
+      continue;
+    }
+    const record = index.entries.find((item) => item.id === id);
+    const archived = record ? null : index.archived.find((item) => item.id === id);
+    if (!record && !archived) continue;
+    let body = '';
+    try {
+      body = readBody(scope, id) || '';
+    } catch {
+      body = '';
+    }
+    const current = record || archived;
+    return {
+      id,
+      title: current.title || '',
+      when: current.when || '',
+      scope: scope.key === 'global' ? 'global' : 'project',
+      scopeKey: scope.key,
+      scopeLabel: scope.key === 'global' ? '全局' : path.basename(index.cwd || '') || scope.key,
+      revision: current.revision || 1,
+      status: archived ? 'archived' : 'ok',
+      body,
+    };
+  }
+  return null;
 }
 
 /** 按 id 在项目层与全局层里找位置，不靠文案猜作用域。 */

@@ -238,7 +238,11 @@ assert.equal(cites.body.items.some((item) => 'path' in item), false);
 const opened = await call('/lite-memory/body', { sessionId: 'session-contract', id: cited.id });
 assert.equal(opened.status, 200);
 assert.match(opened.body.body, /引用正文第一行/);
-assert.equal((await call('/lite-memory/body', { sessionId: 'session-contract', id: 'mem_999999999999' })).status, 404);
+assert.equal(opened.body.scopeLabel, path.basename(cwd));
+const gone = await call('/lite-memory/body', { sessionId: 'session-contract', id: 'mem_999999999999' });
+assert.equal(gone.status, 200);
+assert.equal(gone.body.status, 'gone');
+assert.equal('title' in gone.body, false);
 assert.equal((await call('/lite-memory/citations', {})).status, 400);
 assert.equal((await call('/lite-memory/citations', {}, { origin: 'http://evil.example' })).status, 403);
 assert.notEqual((await call('/lite-memory/citations', { sessionId: 'session-contract' }, { origin: 'dsh-app://app' })).status, 403);
@@ -280,5 +284,38 @@ const sig3 = new AbortController().signal;
 await preStep({ agent: recallAgent, signal: sig3, turn: '4' }, pass('把这个按钮的圆角改小一点', 'h3'));
 assert.equal(recall.text({ agent: recallAgent, signal: sig3 }), '');
 assert.equal(subscriptions.has('agent/disposed'), true);
+
+// ── 界面只吃持久元数据，不猜文案 ─────────────────────────────────────────────
+const metaOf = (name, args, value) => defs.get(name).output.presentationMeta(args, value);
+const savedMeta = metaOf('memory_save', {}, saved);
+assert.equal(savedMeta.kind, 'memory-save');
+assert.equal(savedMeta.id, saved.id);
+assert.equal(savedMeta.title, '发布顺序');
+assert.equal(savedMeta.changed, true);
+assert.ok(['created', 'updated'].includes(savedMeta.mode));
+assert.equal('path' in savedMeta, false);
+const searchMeta = metaOf('memory_search', {}, globalSearch);
+assert.deepEqual(Object.keys(searchMeta.refs[0]).sort(), ['id', 'revision', 'scope', 'status', 'title']);
+assert.equal(searchMeta.refs[0].id, global.id);
+const readValue = await exec('memory_read', { id: global.id });
+const readMeta = metaOf('memory_read', {}, readValue);
+assert.equal(readMeta.kind, 'memory-read');
+assert.equal(readMeta.title, '回复用中文');
+assert.equal(readMeta.revision, 1);
+const suggestValue = await exec('memory_suggest', { title: '元数据建议', summary: '建议行只认元数据里的候选 id' });
+const suggestMeta = metaOf('memory_suggest', {}, suggestValue);
+assert.equal(suggestMeta.kind, 'memory-suggest');
+assert.equal(typeof suggestMeta.asked, 'boolean');
+assert.equal('path' in suggestMeta, false);
+if (suggestMeta.asked === true) assert.match(suggestMeta.id, /^sug_[a-z0-9]+$/);
+
+// ── 撤销带着当时的版本：过期就冲突，不覆盖后来的修改 ─────────────────────────
+const guarded = await exec('memory_save', { title: '版本守卫', summary: '撤销要带当时版本' });
+await exec('memory_save', { title: '版本守卫', summary: '撤销要带当时版本', body: '第二版正文' });
+const stale = await call('/lite-memory/undo', { op: 'undo', id: guarded.id, revision: 1, cwd });
+assert.equal(stale.status, 409);
+const fresh = store.loadIndex(store.scopeOf(cwd)).entries.find((item) => item.id === guarded.id);
+const accepted = await call('/lite-memory/undo', { op: 'undo', id: guarded.id, revision: fresh.revision, cwd });
+assert.equal(accepted.status, 200);
 
 console.log('contract.test.mjs: all passed');
