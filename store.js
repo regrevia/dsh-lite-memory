@@ -1,40 +1,15 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import * as state from './state.js';
+import { LIMITS, memoryRoot, scopeOf, globalScope } from './state.js';
 
 /**
- * Hard limits. Count caps are soft lines: the real ceiling per layer is
- * LIMITS.hardEntries plus the total body budget. Past it the least recently
- * read entry moves to archive/ — announced in the result, body kept in full.
+ * 落盘格式与预算归 state.js 管；这里只保留条目的业务规则。
+ * 条数 200 是提示线，硬上限 1000 条或整层正文 512 KB；到顶把最久没读的移进归档，
+ * 不拒绝新记忆（保存结果里写明动了哪条，正文保留）。单条超预算才报错。
  */
-export const LIMITS = {
-  entries: 200,
-  globalEntries: 200,
-  hardEntries: 1000,
-  entryBytes: 4096,
-  recordBytes: 10 * 1024,
-  totalBytes: 512 * 1024,
-  historyBytes: 512 * 1024,
-  stateBytes: 2 * 1024 * 1024,
-  titleChars: 60,
-  whenChars: 60,
-  summaryChars: 60,
-  tagChars: 20,
-  tags: 5,
-  lockWaitMs: 500,
-  suggestionWindowMs: 48 * 60 * 60 * 1000,
-  suggestionTtlMs: 48 * 60 * 60 * 1000,
-  pending: 20,
-  pendingBytes: 64 * 1024,
-  receipts: 256,
-  receiptTtlMs: 7 * 24 * 60 * 60 * 1000,
-  citations: 20,
-  citationSessions: 20,
-  citationTtlMs: 30 * 24 * 60 * 60 * 1000,
-  citationBytes: 16 * 1024,
-};
-
+export { LIMITS, memoryRoot, scopeOf, globalScope };
 /** Record types the model may pick. Anything else is a schema error, not a guess. */
 export const KINDS = ['preference', 'convention', 'procedure', 'pointer', 'pitfall', 'credential_hint', 'note'];
 
@@ -51,133 +26,162 @@ const SECRET_PATTERNS = [
 /** A summary is a noun phrase. An imperative turns a note into an instruction. */
 const IMPERATIVE = /^(?:你要|你得|你必须|请|务必|必须|记得|记住|别忘了|do not|don't|please|you (?:must|should|need))/i;
 
-export function memoryRoot() {
-  const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
-  return path.join(home, 'lite-memory');
+const SUGGESTION_ID = /^sug_[a-z0-9]{6,}$/;
+
+/** 正文缓存：一次读到的正文先放这里，saveIndex 落盘后清掉。 */
+const bodyCache = new Map();
+
+function cacheBodies(scope, entries) {
+  const map = new Map();
+  for (const entry of entries) map.set(entry.id, entry.current && entry.current.body);
+  bodyCache.set(scope.dir, map);
 }
 
-/** One store per project directory, so projects never see each other. */
-export function scopeOf(cwd) {
-  const abs = path.resolve(cwd || process.cwd());
-  const hash = crypto.createHash('sha1').update(abs).digest('hex').slice(0, 8);
-  const label = path.basename(abs).replace(/[^\w.-]+/g, '-').slice(0, 32) || 'root';
-  return { key: `${label}-${hash}`, dir: path.join(memoryRoot(), `${label}-${hash}`), cwd: abs };
+function cachedBody(scope, id) {
+  const map = bodyCache.get(scope.dir);
+  if (!map || !map.has(id)) return undefined;
+  return map.get(id);
 }
 
-/** 跨项目通用的那层：用户说「以后所有项目都这样」才写这里。 */
-export function globalScope() {
-  return { key: 'global', dir: path.join(memoryRoot(), 'global'), cwd: '' };
+/** v2 条目 → 旧扁平记录：业务层只认这一种形状。 */
+function toFlat(entry) {
+  const current = entry.current || {};
+  const maintenance = entry.maintenance || {};
+  return {
+    id: entry.id,
+    title: current.title || '',
+    summary: current.summary || '',
+    when: current.when || '',
+    body: typeof current.body === 'string' ? current.body : '',
+    kind: current.kind || 'note',
+    tags: Array.isArray(current.keywords) ? [...current.keywords] : [],
+    topicKey: current.topicKey || '',
+    aliases: Array.isArray(maintenance.retiredNames) ? [...maintenance.retiredNames] : [],
+    created: entry.createdAt || '',
+    updated: entry.updatedAt || '',
+    lastUsed: maintenance.lastUsed || entry.updatedAt || entry.createdAt || '',
+    revision: Number(entry.revision) || 1,
+    status: entry.status === 'archived' ? 'archived' : 'active',
+    origin: entry.origin || 'user_explicit',
+    hits: Number(maintenance.hits) || 0,
+    merges: Number(maintenance.merges) || 0,
+    versions: Array.isArray(maintenance.versions) ? JSON.parse(JSON.stringify(maintenance.versions)) : [],
+    bytes: Buffer.byteLength(current.body || '') + Buffer.byteLength([current.title || '', current.summary || '', (current.keywords || []).join(',')].join('\n')),
+  };
 }
 
-function indexFile(scope) {
-  return path.join(scope.dir, 'index.json');
-}
-
-function entryFile(scope, id) {
-  return path.join(scope.dir, 'entries', `${id}.md`);
-}
-
-function emptyIndex(scope) {
-  return { version: 1, scope: scope.key, entries: [], suggestions: [], receipts: [] };
+function fromFlat(record, status) {
+  const at = record.updated || record.created || new Date().toISOString();
+  return {
+    id: record.id,
+    revision: Number(record.revision) || 1,
+    status: status || (record.status === 'archived' ? 'archived' : 'active'),
+    origin: record.origin === 'observed' ? 'observed' : 'user_explicit',
+    createdAt: record.created || at,
+    updatedAt: at,
+    current: {
+      title: record.title || '',
+      summary: record.summary || '',
+      body: typeof record.body === 'string' ? record.body : '',
+      kind: record.kind || 'note',
+      when: record.when || '',
+      keywords: Array.isArray(record.tags) ? [...record.tags] : [],
+      topicKey: record.topicKey || '',
+      triggers: [],
+      applicability: 'all_in_scope',
+      conditions: [],
+      selection: null,
+      links: [],
+      aliases: [],
+    },
+    maintenance: {
+      reviewState: 'active',
+      sourceRefs: [],
+      retiredNames: Array.isArray(record.aliases) ? [...record.aliases] : [],
+      versions: Array.isArray(record.versions) ? JSON.parse(JSON.stringify(record.versions)) : [],
+      checks: [],
+      hits: Number(record.hits) || 0,
+      merges: Number(record.merges) || 0,
+      lastUsed: record.lastUsed || at,
+    },
+  };
 }
 
 /**
- * 只有 ENOENT 才算「还没用过」。JSON 损坏、没有读权限必须报错，
- * 否则下一次写入会拿空库覆盖掉整个索引。
+ * 读一层：v2 状态是唯一权威。旧 index.json 只在迁移时读，读不到正文的旧条目
+ * 由 state.js 拦成报告，这里不猜、不补空正文。
  */
 export function loadIndex(scope) {
-  const file = indexFile(scope);
-  let raw;
-  try {
-    raw = fs.readFileSync(file, 'utf8');
-  } catch (error) {
-    if (error.code === 'ENOENT') return emptyIndex(scope);
-    throw new Error(`记忆索引读不出来（${error.code || 'IO'}）：${file}`);
+  if (!fs.existsSync(path.join(scope.dir, 'state.json'))) {
+    const report = state.migrationReport(scope);
+    if (report.required || report.adoptable.length) state.migrateLegacy(scope);
   }
-  let data;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    throw new Error(`记忆索引已损坏，已停止读写：${file}`);
-  }
-  if (!data || !Array.isArray(data.entries)) throw new Error(`记忆索引结构不对，已停止读写：${file}`);
-  if (!Array.isArray(data.suggestions)) data.suggestions = [];
-  if (!Array.isArray(data.receipts)) data.receipts = [];
-  return data;
-}
-
-function writeAtomic(file, text) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.${crypto.randomBytes(3).toString('hex')}.tmp`;
-  fs.writeFileSync(tmp, text);
-  fs.renameSync(tmp, file);
-}
-
-export function saveIndex(scope, index) {
-  index.version = 1;
-  index.scope = scope.key;
-  index.cwd = scope.cwd;
-  index.updated = new Date().toISOString();
-  index.totalBytes = index.entries.reduce((sum, item) => sum + (item.bytes || 0), 0)
-    + index.suggestions.reduce((sum, item) => sum + Buffer.byteLength(JSON.stringify(item.draft || {})), 0);
-  const text = `${JSON.stringify(index, null, 2)}\n`;
-  const bytes = Buffer.byteLength(text);
-  if (bytes > LIMITS.stateBytes) {
-    throw new Error(`记忆索引超过 ${LIMITS.stateBytes} 字节，先归档旧的再写`);
-  }
-  writeAtomic(indexFile(scope), text);
+  const loaded = state.load(scope);
+  const entries = loaded.state.entries.filter((entry) => entry.status === 'active').map(toFlat);
+  const archived = loaded.state.entries.filter((entry) => entry.status === 'archived').map(toFlat);
+  cacheBodies(scope, loaded.state.entries);
+  const index = {
+    version: 2,
+    scope: loaded.state.scopeKey,
+    generation: loaded.state.generation,
+    epoch: loaded.state.epoch,
+    entries,
+    archived,
+    suggestions: JSON.parse(JSON.stringify(loaded.state.candidates || [])),
+    receipts: JSON.parse(JSON.stringify(loaded.state.receipts || [])),
+    lastSuggestedAt: loaded.state.lastSuggestedAt || '',
+  };
+  index.__meta = { exists: loaded.exists, generation: loaded.state.generation, epoch: loaded.state.epoch };
   return index;
 }
 
-function sleepSync(ms) {
-  try {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-  } catch {
-    /* no Atomics: plain wait below */
-  }
+/** 扁平索引 → v2 状态：整层重写，条目、候选、回执一次换完。 */
+function applyFlat(draft, index) {
+  const next = [];
+  for (const record of index.entries) next.push(fromFlat(record));
+  for (const record of index.archived || []) next.push(fromFlat(record, 'archived'));
+  draft.entries = next;
+  draft.candidates = Array.isArray(index.suggestions) ? JSON.parse(JSON.stringify(index.suggestions)) : [];
+  draft.receipts = Array.isArray(index.receipts) ? JSON.parse(JSON.stringify(index.receipts)) : [];
+  draft.lastSuggestedAt = typeof index.lastSuggestedAt === 'string' ? index.lastSuggestedAt : draft.lastSuggestedAt || '';
+  draft.scopeKey = draft.scopeKey || index.scope;
 }
 
 /**
- * 整个作用域一把锁：两个 DSH 进程共用全局库时，读—改—写必须串行。
- * 锁里写 ownerToken，只释放自己那把；不按 mtime 抢活进程的锁，
- * 崩溃留下的锁要人工确认后再删，宁可 busy 也不写坏。
+ * 写一层：一个事务发布整份状态。容量在事务里裁决，腾位结果回填到 index.archived，
+ * 调用方据此在结果里点名。
  */
+export function saveIndex(scope, index) {
+  const meta = index.__meta || { exists: false };
+  const expected = meta.exists ? { generation: meta.generation, epoch: meta.epoch } : null;
+  const result = state.transact(scope, { expected, expectCreate: !meta.exists }, (draft) => {
+    const before = JSON.stringify([draft.entries, draft.candidates, draft.receipts, draft.lastSuggestedAt]);
+    applyFlat(draft, index);
+    const after = JSON.stringify([draft.entries, draft.candidates, draft.receipts, draft.lastSuggestedAt]);
+    return { changed: before !== after };
+  });
+  const published = result.state;
+  const byId = new Map(published.entries.map((entry) => [entry.id, entry]));
+  index.entries = index.entries.filter((record) => {
+    const entry = byId.get(record.id);
+    return entry && entry.status === 'active';
+  });
+  index.archived = index.archived || [];
+  for (const evicted of result.archived) {
+    const record = index.entries.find((item) => item.id === evicted.id);
+    if (record) index.entries = index.entries.filter((item) => item.id !== record.id);
+    if (!index.archived.some((item) => item.id === evicted.id)) index.archived.push({ id: evicted.id, title: evicted.title, status: 'archived' });
+  }
+  index.generation = published.generation;
+  index.epoch = published.epoch;
+  index.__archived = result.archived;
+  index.__meta = { exists: true, generation: published.generation, epoch: published.epoch };
+  cacheBodies(scope, published.entries);
+  return index;
+}
+
 function withLock(scope, fn) {
-  fs.mkdirSync(scope.dir, { recursive: true });
-  const file = path.join(scope.dir, '.lock');
-  const token = `${process.pid}:${crypto.randomBytes(4).toString('hex')}`;
-  const deadline = Date.now() + LIMITS.lockWaitMs;
-  let fd = null;
-  while (fd === null) {
-    try {
-      fd = fs.openSync(file, 'wx');
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw new Error(`记忆库加锁失败（${error.code || 'IO'}）：${file}`);
-      if (Date.now() > deadline) {
-        throw new Error(`记忆库正忙（另一个进程在写），稍后再试；若确认没有写入进程，删掉 ${file}`);
-      }
-      sleepSync(10);
-    }
-  }
-  try {
-    try {
-      fs.writeSync(fd, token);
-    } catch {
-      /* token is advisory; the lock file itself is the mutex */
-    }
-    return fn();
-  } finally {
-    try {
-      fs.closeSync(fd);
-    } catch {
-      /* already closed */
-    }
-    try {
-      if (fs.readFileSync(file, 'utf8').trim() === token) fs.rmSync(file, { force: true });
-    } catch {
-      /* someone else already removed it */
-    }
-  }
+  return state.withScopeLock(scope, fn);
 }
 
 /** Locks several scopes in a stable order, so search across layers cannot deadlock. */
@@ -285,25 +289,24 @@ function newId() {
   return `mem_${crypto.randomBytes(6).toString('hex')}`;
 }
 
+/** 正文就在状态里；缓存只是省一次读盘，得手时一律回状态读。 */
 function readBody(scope, id) {
-  try {
-    return fs.readFileSync(entryFile(scope, id), 'utf8');
-  } catch (error) {
-    if (error.code === 'ENOENT') throw new Error(`记忆正文缺失：${id} 在索引里，但正文文件不在了`);
-    throw new Error(`记忆正文读不出来（${error.code || 'IO'}）：${id}`);
-  }
+  const cached = cachedBody(scope, id);
+  if (typeof cached === 'string') return cached;
+  const found = state.readEntryBody(scope, id);
+  if (!found) throw new Error(`记忆正文缺失：${id} 在索引里，但正文文件不在了`);
+  return found.body;
 }
 
 function writeBody(scope, id, body) {
-  writeAtomic(entryFile(scope, id), body);
+  const map = bodyCache.get(scope.dir) || new Map();
+  map.set(id, body);
+  bodyCache.set(scope.dir, map);
 }
 
 function removeBody(scope, id) {
-  try {
-    fs.rmSync(entryFile(scope, id), { force: true });
-  } catch {
-    /* leftover body is harmless; the index no longer references it */
-  }
+  const map = bodyCache.get(scope.dir);
+  if (map) map.delete(id);
 }
 
 function entrySize(record, body) {
@@ -318,14 +321,14 @@ function activeBytes(index, skipId) {
   return index.entries.reduce((sum, item) => (item.id === skipId ? sum : sum + (item.bytes || 0)), 0);
 }
 
+/** 归档不是删除：条目标成 archived，正文与旧版本原样留在状态里，检索与提示不再返回。 */
 function archiveEntry(scope, index, entry) {
-  const dir = path.join(scope.dir, 'archive');
-  const from = entryFile(scope, entry.id);
-  fs.mkdirSync(dir, { recursive: true });
   const body = readBody(scope, entry.id);
-  if (fs.existsSync(from)) fs.renameSync(from, path.join(dir, `${entry.id}.md`));
-  writeAtomic(path.join(dir, `${entry.id}.json`), `${JSON.stringify({ ...entry, body }, null, 2)}\n`);
+  entry.status = 'archived';
+  entry.body = body;
   index.entries = index.entries.filter((item) => item.id !== entry.id);
+  index.archived = [...(index.archived || []), entry];
+  writeBody(scope, entry.id, body);
 }
 
 /**
@@ -512,24 +515,10 @@ function applyDraft(scope, index, source, now) {
   return { record: created, merged: false, mergedFrom: null, similar: similarList[0] || null, similarList, draft, noop: false, previousBody: null, archived };
 }
 
-const IDLE_MS = 7 * 24 * 60 * 60 * 1000;
-
-function lastTouch(item) {
-  return Date.parse(item.lastUsed || item.updated || item.created || '') || 0;
-}
-
-/** 优先腾 7 天没被读过的；都在用就腾最久没动的。正在更新的这条永远不腾。 */
-function pickVictim(entries, now) {
-  if (!entries.length) return null;
-  const idle = entries.filter((item) => now - lastTouch(item) >= IDLE_MS);
-  const pool = idle.length ? idle : entries;
-  return pool.reduce((oldest, item) => (lastTouch(item) < lastTouch(oldest) ? item : oldest));
-}
-
 /**
- * 单条、记录序列化、整库三档预算：新增与更新走同一套。
- * 到硬上限不拒绝新记忆，也不偷偷丢：把同层最久没被读/更新的那条移进归档（正文完整，可取回），
- * 返回被归档的条目，让结果里说清动了哪条。真腾不出位置（只剩它自己还超预算）才报错。
+ * 单条与记录序列化两档预算：新增与更新走同一套。
+ * 整层条数/正文预算由 state.transact 在发布前裁决（腾最久没读的那条，不拒绝新记忆），
+ * 结果经 index.__archived 回填，调用方在工具结果里点名。
  */
 function assertFits(scope, index, record) {
   if (record.bytes > LIMITS.entryBytes) {
@@ -539,22 +528,7 @@ function assertFits(scope, index, record) {
   if (size > LIMITS.recordBytes) {
     throw new Error(`这一条序列化后 ${size} 字节，超过 ${LIMITS.recordBytes} 字节；减少字段或换更短的标签`);
   }
-  const isNew = !index.entries.some((item) => item.id === record.id);
-  const now = Date.now();
-  let rest = index.entries.filter((item) => item.id !== record.id);
-  let restBytes = rest.reduce((sum, item) => sum + (item.bytes || 0), 0);
-  const evicted = [];
-  while (rest.length + (isNew ? 1 : 0) > LIMITS.hardEntries || restBytes + record.bytes > LIMITS.totalBytes) {
-    const victim = pickVictim(rest, now);
-    if (!victim) {
-      throw new Error(`记忆库已满：这一条会让总正文超过 ${LIMITS.totalBytes} 字节，先精简正文`);
-    }
-    rest = rest.filter((item) => item.id !== victim.id);
-    restBytes -= victim.bytes || 0;
-    evicted.push(victim);
-  }
-  for (const victim of evicted) archiveEntry(scope, index, victim);
-  return evicted.map((item) => ({ id: item.id, title: item.title }));
+  return [];
 }
 
 /**
@@ -582,6 +556,8 @@ export function upsert(scope, source) {
       }
       throw error;
     }
+    const evicted = index.__archived || [];
+    if (evicted.length) result.archived = [...(result.archived || []), ...evicted];
     return result;
   });
 }
@@ -732,6 +708,7 @@ export function undoChange(scope, id) {
         when: last.when || '',
         kind: last.kind || record.kind,
         tags: Array.isArray(last.tags) ? last.tags : record.tags,
+        body: last.body,
         versions: versions.slice(0, -1),
         revision: (record.revision || 1) + 1,
         updated: new Date().toISOString(),
@@ -954,6 +931,14 @@ export function renderIndex(entries, budget = 400) {
  */
 const SESSION_ID = /^[A-Za-z0-9._-]{1,80}$/;
 
+/** 会话引用文件独立于记忆库状态，简单原子替换就够。 */
+function writeAtomic(file, text) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.${crypto.randomBytes(3).toString('hex')}.tmp`;
+  fs.writeFileSync(tmp, text);
+  fs.renameSync(tmp, file);
+}
+
 function sessionsDir() {
   return path.join(memoryRoot(), 'sessions');
 }
@@ -1105,11 +1090,11 @@ export function readCitationBody(sessionId, id) {
   if (!row) return null;
   const found = resolveCitation(row);
   if (!found) return null;
-  const abs = path.resolve(entryFile(found.scope, id));
-  if (!abs.startsWith(memoryRoot() + path.sep)) return null;
   let body;
   try {
-    body = fs.readFileSync(abs, 'utf8');
+    const current = state.readEntryBody(found.scope, id);
+    if (!current) return null;
+    body = current.body;
   } catch {
     return null;
   }

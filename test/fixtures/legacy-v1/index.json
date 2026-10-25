@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "scope": "fixture",
+  "cwd": "CWD_PLACEHOLDER",
+  "entries": [
+    {
+      "id": "mem_111111111111",
+      "title": "发布顺序",
+      "summary": "发版前要按顺序做的事",
+      "when": "所有发布",
+      "kind": "note",
+      "tags": [],
+      "created": "2026-01-01T00:00:00.000Z",
+      "updated": "2026-01-01T00:00:00.000Z",
+      "lastUsed": "2026-01-01T00:00:00.000Z",
+      "revision": 1,
+      "status": "active",
+      "source": "user_explicit",
+      "hits": 0,
+      "merges": 0,
+      "versions": [],
+      "bytes": 100
+    },
+    {
+      "id": "mem_222222222222",
+      "title": "回复用中文",
+      "summary": "用户要求回复用中文",
+      "when": "所有对话",
+      "kind": "preference",
+      "tags": [],
+      "created": "2026-01-02T00:00:00.000Z",
+      "updated": "2026-01-02T00:00:00.000Z",
+      "lastUsed": "2026-01-02T00:00:00.000Z",
+      "revision": 1,
+      "status": "active",
+      "source": "user_explicit",
+      "hits": 0,
+      "merges": 0,
+      "versions": [],
+      "bytes": 100
+    },
+    {
+      "id": "mem_333333333333",
+      "title": "跑测试",
+      "summary": "提交前跑哪条命令",
+      "when": "本地",
+      "kind": "note",
+      "tags": [],
+      "created": "2026-01-03T00:00:00.000Z",
+      "updated": "2026-01-03T00:00:00.000Z",
+      "lastUsed": "2026-01-03T00:00:00.000Z",
+      "revision": 1,
+      "status": "active",
+      "source": "user_explicit",
+      "hits": 0,
+      "merges": 0,
+      "versions": [],
+      "bytes": 100
+    }
+  ],
+  "suggestions": [],
+  "receipts": []
+}
