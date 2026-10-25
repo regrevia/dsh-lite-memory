@@ -19,7 +19,7 @@ Lightweight memory for the DeepSeek Harness. Nothing in the system prompt, nothi
 | **L1** 它发现有跨会话价值的经验 | 一行灰字 `memory · keep? "X" — 要记的内容` + 一个 `keep` 按钮；标题加一句话，看得懂才点，不点就永远不写，48 小时内不重复 |
 | **L2** 常识、一次性参数、凭据的值 | 永不写入 |
 
-这些行只属于产生它的那一轮：重进会话就没了，历史里只留正文。
+这些行只属于产生它的那一轮：重进会话就没了，历史里只留正文。同一件事再记一次会合并进原条目，不会长成两条。
 
 触发词：`记住`、`记一下`、`上次`、`规范`、`约定`、`路径`、`凭据怎么取`。
 
@@ -29,7 +29,7 @@ Lightweight memory for the DeepSeek Harness. Nothing in the system prompt, nothi
 | **L1** it spots something worth keeping | one muted line `memory · keep? "X" — what would be remembered` with a single `keep` button — readable before you click, nothing written unless you click, at most once per two days |
 | **L2** common sense, one-off parameters, credential values | never written |
 
-Those lines belong to the turn that made them: reopening the session drops them, leaving only the prose in history.
+Those lines belong to the turn that made them: reopening the session drops them, leaving only the prose in history. Recording the same subject again merges into the existing entry instead of adding a second one.
 
 ## 点一下就存 / One click, no turn
 

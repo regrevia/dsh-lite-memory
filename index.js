@@ -156,7 +156,7 @@ export function apply(ctx) {
 
   ctx.effect(() => tools.register({
     name: 'memory_save',
-    description: `保存一条记忆。用户明确说「记住」时直接调用；用户自己的话已经是长期规则（「以后都这样」「别再 X」）时也直接调用，不要先问。用户点了「保留」或发「保留记忆「X」」时，用那条建议的内容调用。${NOTES}`,
+    description: `保存一条记忆。用户明确说「记住」时直接调用；用户自己的话已经是长期规则（「以后都这样」「别再 X」）时也直接调用，不要先问。用户点了「保留」或发「保留记忆「X」」时，用那条建议的内容调用。更新已知主题时先 memory_read 旧正文再写：标题相同、或标题与摘要高度相近时，会合并进原来那条（merges+1），正文整篇替换，不新增条目。${NOTES}`,
     parameters: SAVE_PARAMS,
     output: {
       schema: {

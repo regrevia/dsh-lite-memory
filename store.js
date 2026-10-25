@@ -125,14 +125,44 @@ export function trimIndex(scope, index) {
   }
 }
 
+/** 同一主题的判定线。跨过就合并成一条，跨不过就新建。 */
+export const MERGE = { title: 0.6, summary: 0.75 };
+
+/** 相邻两字为一组：中文没有空格，按词切分永远对不上，按字片才认得出改写的同一件事。 */
+function bigrams(text) {
+  const plain = normalizeText(text, 400).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+  if (!plain) return new Set();
+  if (plain.length < 2) return new Set([plain]);
+  const out = new Set();
+  for (let i = 0; i + 1 < plain.length; i += 1) out.add(plain.slice(i, i + 2));
+  return out;
+}
+
 function similarity(a, b) {
-  const words = (text) => new Set(normalizeText(text, 400).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 1));
-  const left = words(a);
-  const right = words(b);
+  const left = bigrams(a);
+  const right = bigrams(b);
   if (left.size === 0 || right.size === 0) return 0;
   let shared = 0;
-  for (const word of left) if (right.has(word)) shared += 1;
-  return shared / Math.max(left.size, right.size);
+  for (const gram of left) if (right.has(gram)) shared += 1;
+  return shared / (left.size + right.size - shared);
+}
+
+/** 同标题必合并；否则标题或摘要够像，也当作同一主题的又一次记录。 */
+function mergeCandidate(entries, title, summary) {
+  let best = null;
+  let bestScore = 0;
+  for (const item of entries) {
+    if (item.title === title) return item;
+    const titleScore = similarity(item.title, title);
+    const summaryScore = similarity(item.summary, summary);
+    if (titleScore < MERGE.title && summaryScore < MERGE.summary) continue;
+    const score = Math.max(titleScore, summaryScore);
+    if (score > bestScore) {
+      best = item;
+      bestScore = score;
+    }
+  }
+  return best;
 }
 
 /**
@@ -151,7 +181,7 @@ export function upsert(scope, draft) {
 
   const index = loadIndex(scope);
   const now = new Date().toISOString();
-  const existing = index.entries.find((item) => item.title === title) || index.entries.find((item) => similarity(item.summary, summary.text) > 0.8);
+  const existing = mergeCandidate(index.entries, title, summary.text);
   const id = existing ? existing.id : `mem_${Date.now().toString(36)}${crypto.randomBytes(2).toString('hex')}`;
   const record = {
     id,
@@ -172,7 +202,7 @@ export function upsert(scope, draft) {
   index.suggestions = (index.suggestions || []).filter((item) => item.title !== title).slice(-19);
   trimIndex(scope, index);
   saveIndex(scope, index);
-  return { record, merged: Boolean(existing) };
+  return { record, merged: Boolean(existing), mergedFrom: existing && existing.title !== title ? existing.title : null };
 }
 
 export function search(scope, query, limit = 4) {

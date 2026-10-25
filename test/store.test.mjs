@@ -63,3 +63,18 @@ assert.ok(trimmed.totalBytes <= store.LIMITS.totalBytes);
 
 fs.rmSync(home, { recursive: true, force: true });
 console.log('store: 16 checks passed');
+
+// 同一主题换个说法：合并，不新增。
+const mergeScope = store.scopeOf('/tmp/project-merge');
+store.upsert(mergeScope, { title: '插件市场条目规范', summary: '市场上传指南的位置与要点', body: '见 UPLOAD-GUIDE.md' });
+const paraphrase = store.upsert(mergeScope, { title: '插件市场条目规范（改写）', summary: '市场上传指南的位置与要点', body: '见 UPLOAD-GUIDE.md#第二节' });
+assert.equal(paraphrase.merged, true);
+assert.equal(paraphrase.mergedFrom, '插件市场条目规范');
+assert.equal(store.loadIndex(mergeScope).entries.length, 1);
+
+// 同一项目下的另一件事：不合并。
+const sibling = store.upsert(mergeScope, { title: '插件市场踩坑清单', summary: '卡片不刷新与抓取失败的已知原因', body: 'y' });
+assert.equal(sibling.merged, false);
+assert.equal(store.loadIndex(mergeScope).entries.length, 2);
+
+console.log('store: merge rules ok');
