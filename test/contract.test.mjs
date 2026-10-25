@@ -7,6 +7,7 @@ import { EventEmitter } from 'node:events';
 process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-'));
 const { apply } = await import('../index.js');
 const store = await import('../store.js');
+const state = await import('../state.js');
 
 const ORIGIN = 'http://127.0.0.1:60402';
 const defs = new Map();
@@ -342,6 +343,53 @@ const sig3 = new AbortController().signal;
 await preStep({ agent: recallAgent, signal: sig3, turn: '4' }, pass('把这个按钮的圆角改小一点', 'h3'));
 assert.equal(recall.text({ agent: recallAgent, signal: sig3 }), '');
 assert.equal(subscriptions.has('agent/disposed'), true);
+
+// ── 项目实验：宿主事件顺序下由最终人类消息决定读取 ───────────────────────────
+const evoReadCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-evo-read-'));
+sessionCwds.set('session-evo-read', evoReadCwd);
+const evoReadOn = await call('/lite-memory/evolution', { sessionId: 'session-evo-read', enabled: true });
+assert.equal(evoReadOn.status, 200);
+assert.equal(evoReadOn.body.enabled, true);
+const evoReadScope = store.scopeOf(evoReadCwd);
+const evoAgentSeed = { id: 'session-evo-read', cwd: evoReadCwd, session: { id: 'session-evo-read', header: { cwd: evoReadCwd } } };
+const evoRule = await defs.get('memory_save').execute(
+  { title: '口播开头', summary: '口播开头三句内给结论', body: '开场三句内给结论。' },
+  { agent: evoAgentSeed },
+);
+state.transact(evoReadScope, {}, (draft) => {
+  const row = draft.entries.find((entry) => entry.id === evoRule.id);
+  row.origin = 'project_evolution';
+  row.current.conditions = [{ key: 'seriesId', value: '口播' }];
+  row.maintenance = { ...(row.maintenance || {}), learning: { state: 'active', source: 'evolution' } };
+  return { changed: true };
+});
+await store.setTaskDefault(evoReadScope, { seriesId: '口播' });
+
+const evoAgent = { id: 'session-evo-read', cwd: evoReadCwd, session: { id: 'session-evo-read', header: { cwd: evoReadCwd } } };
+currentAgent = evoAgent;
+const evoSig = new AbortController().signal;
+const evoEnter = async () => ({
+  kind: 'enter',
+  messages: [
+    // 宿主可能先给出被拒/草稿消息，只有最终收下的 user 消息算新的人类输入
+    { role: 'user', id: 'draft-1', source: { kind: 'synthetic' }, content: [{ type: 'text', text: '改做 README 文案' }] },
+    { role: 'user', id: 'final-1', source: { kind: 'user' }, content: [{ type: 'text', text: '这期口播怎么开头' }] },
+  ],
+});
+await preStep({ agent: evoAgent, signal: evoSig, turn: '21' }, evoEnter);
+const evoRecall = promptContexts.find((entry) => entry.name === 'lite-memory:recall');
+assert.match(evoRecall.text({ agent: evoAgent, signal: evoSig }), /开场三句内给结论/);
+assert.equal(evoRecall.text({ agent: evoAgent, signal: evoSig }).includes('README'), false);
+
+// 工具续步没有新人类消息：沿用本批快照，交给 refreshContext 的是同一份内容
+await preStep({ agent: evoAgent, signal: evoSig, turn: '21' }, async () => ({ kind: 'enter', messages: [] }));
+assert.match(evoRecall.text({ agent: evoAgent, signal: evoSig }), /开场三句内给结论/);
+
+// 事件确实触发：本回合停止后快照立即失效，下一批必须重新算
+const stopping = subscriptions.get('agent/turn-stopping');
+assert.equal(typeof stopping, 'function');
+stopping({ turn: '21', signal: evoSig });
+assert.equal(evoRecall.text({ agent: evoAgent, signal: evoSig }), '');
 
 // ── 界面只吃持久元数据，不猜文案 ─────────────────────────────────────────────
 const metaOf = (name, args, value) => defs.get(name).output.presentationMeta(args, value);

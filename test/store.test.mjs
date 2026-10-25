@@ -757,8 +757,9 @@ test('项目实验默认关闭；打开才放行实验读取，关闭暂停试�
   assert.equal(on.changed, true);
   assert.equal(on.enabled, true);
   assert.notEqual(on.epoch, initial.epoch);
-  assert.equal(search(scope, '实验规则', 4).some((row) => row.id === target.id), true);
-  assert.equal(readEntry(scope, target.id).body, '实验正文');
+  assert.equal(search(scope, '实验规则', 4).some((row) => row.id === target.id), false);
+  assert.equal(search(scope, '实验规则', 4, { allowExperimental: true }).some((row) => row.id === target.id), true);
+  assert.equal(readEntry(scope, target.id, { allowExperimental: true }).body, '实验正文');
 
   const off = setEvolution(scope, false, { operationId: 'op-disable-1' });
   assert.equal(off.ok, true);

@@ -92,6 +92,7 @@ window.__ModuleLoader__.load({
         scope: meta.scope === 'global' ? 'global' : 'project',
         revision: Number.isInteger(meta.revision) ? meta.revision : 1,
         status: typeof meta.status === 'string' ? meta.status : 'ok',
+        origin: meta.origin === 'project_evolution' ? 'project_evolution' : 'user_explicit',
         kind,
         exposure: kind === 'memory-save' || kind === 'memory-forget' ? 'update' : 'reference',
       };

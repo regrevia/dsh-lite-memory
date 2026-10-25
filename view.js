@@ -159,6 +159,10 @@ export function trustedContext(scope, options = {}) {
     projectRoot: options.projectRoot || cwd,
     pathPrefix: options.pathPrefix === undefined ? cwd : options.pathPrefix,
     artifactKey: options.artifactKey,
+    /** 任务键只接受已确认的项目默认或本轮请求绑定；自由措辞不能直接填进来。 */
+    ...(options.taskKind ? { taskKind: String(options.taskKind) } : {}),
+    ...(options.seriesId ? { seriesId: String(options.seriesId) } : {}),
+    ...(options.phase ? { phase: String(options.phase) } : {}),
   };
 }
 
@@ -410,6 +414,7 @@ export function toModelView(record, purpose, extra = {}) {
   if (purpose === 'read') {
     const view = pick(record, ['id', 'title', 'summary', 'when', 'kind', 'revision', 'body']);
     view.scope = scope;
+    if (record.origin === 'project_evolution') view.origin = 'project_evolution';
     if (Array.isArray(record.conditions) && record.conditions.length) view.conditions = record.conditions;
     if (record.selection && record.selection.mode === 'complete') view.selection = record.selection.artifactKey;
     const related = linksOf(record).length;

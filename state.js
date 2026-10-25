@@ -13,18 +13,44 @@ export const LEGACY_STATE_VERSION = 2;
 /** 一期只有一个实验开关，策略版本不认时停止实验而不是猜测兼容。 */
 export const EVOLUTION_POLICY_VERSION = 1;
 
+function emptyTasks() {
+  return { revision: 0, defaults: null, sessions: {}, episodes: {} };
+}
+
 function newEvolution() {
-  return { enabled: false, epoch: '', policyVersion: EVOLUTION_POLICY_VERSION, feedbackGeneration: 0 };
+  return {
+    enabled: false,
+    epoch: '',
+    policyVersion: EVOLUTION_POLICY_VERSION,
+    feedbackGeneration: 0,
+    tasks: emptyTasks(),
+  };
+}
+
+/** 任务锚点只是实验内部状态；坏数据按空表处理，不让它挡住整层记忆读取。 */
+function normalizeTasks(raw) {
+  const out = emptyTasks();
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  out.revision = Number.isInteger(raw.revision) && raw.revision >= 0 ? raw.revision : 0;
+  if (raw.defaults && typeof raw.defaults === 'object' && !Array.isArray(raw.defaults)) {
+    out.defaults = JSON.parse(JSON.stringify(raw.defaults));
+  }
+  for (const key of ['sessions', 'episodes']) {
+    if (raw[key] && typeof raw[key] === 'object' && !Array.isArray(raw[key])) {
+      out[key] = JSON.parse(JSON.stringify(raw[key]));
+    }
+  }
+  return out;
 }
 
 /** 缺字段即关闭；未知或不兼容版本一律按关闭处理，也不改写现场。 */
 export function evolutionOf(state) {
   const raw = state && state.experimental && state.experimental.projectEvolution;
   if (raw === undefined) {
-    return { enabled: false, epoch: '', policyVersion: EVOLUTION_POLICY_VERSION, feedbackGeneration: 0, compatible: true };
+    return { enabled: false, epoch: '', policyVersion: EVOLUTION_POLICY_VERSION, feedbackGeneration: 0, tasks: emptyTasks(), compatible: true };
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    return { enabled: false, epoch: '', policyVersion: 0, feedbackGeneration: 0, compatible: false };
+    return { enabled: false, epoch: '', policyVersion: 0, feedbackGeneration: 0, tasks: emptyTasks(), compatible: false };
   }
   const policyVersion = Number.isInteger(raw.policyVersion) ? raw.policyVersion : 0;
   const compatible = policyVersion === EVOLUTION_POLICY_VERSION;
@@ -33,6 +59,7 @@ export function evolutionOf(state) {
     epoch: typeof raw.epoch === 'string' ? raw.epoch : '',
     policyVersion,
     feedbackGeneration: Number.isInteger(raw.feedbackGeneration) ? raw.feedbackGeneration : 0,
+    tasks: normalizeTasks(raw.tasks),
     compatible,
   };
 }
@@ -50,6 +77,8 @@ export function applyEvolution(draft, enabled) {
     policyVersion: EVOLUTION_POLICY_VERSION,
     feedbackGeneration: current.feedbackGeneration + 1,
     changedAt: now,
+    /** 开与关都让上一轮锚点失效；已经确认的项目默认保留，它不属于临时作品状态。 */
+    tasks: { ...emptyTasks(), ...(current.tasks && current.tasks.defaults ? { defaults: current.tasks.defaults } : {}) },
   };
   draft.experimental = { ...(draft.experimental || {}), projectEvolution: config };
   if (!next) {
@@ -371,6 +400,21 @@ export function validateState(data) {
       if (evolution.feedbackGeneration !== undefined
         && (!Number.isInteger(evolution.feedbackGeneration) || evolution.feedbackGeneration < 0)) {
         throw new StateError('invalid', '记忆状态反馈代次不对');
+      }
+      if (evolution.tasks !== undefined) {
+        const tasks = evolution.tasks;
+        if (!tasks || typeof tasks !== 'object' || Array.isArray(tasks)) throw new StateError('invalid', '记忆状态任务锚点不是对象');
+        if (tasks.revision !== undefined && (!Number.isInteger(tasks.revision) || tasks.revision < 0)) {
+          throw new StateError('invalid', '记忆状态任务锚点版本不对');
+        }
+        for (const key of ['sessions', 'episodes']) {
+          if (tasks[key] !== undefined && (!tasks[key] || typeof tasks[key] !== 'object' || Array.isArray(tasks[key]))) {
+            throw new StateError('invalid', '记忆状态任务锚点表不是对象');
+          }
+        }
+        if (tasks.defaults !== undefined && tasks.defaults !== null && (typeof tasks.defaults !== 'object' || Array.isArray(tasks.defaults))) {
+          throw new StateError('invalid', '记忆状态栏目默认不是对象');
+        }
       }
     }
   }

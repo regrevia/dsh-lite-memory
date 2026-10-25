@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import * as state from './state.js';
 import * as view from './view.js';
+import * as anchor from './anchor.js';
 import { LIMITS, memoryRoot, scopeOf, globalScope } from './state.js';
 
 /**
@@ -44,11 +45,8 @@ export function isExperimentalRecord(record) {
 
 function readableRecord(record, options, index) {
   if (!isExperimentalRecord(record)) return true;
-  if (options && options.allowExperimental === true) return true;
-  if (!index || !index.__evolution || index.__evolution.enabled !== true) return false;
-  const learning = record.learning;
-  if (learning && (learning.state === 'paused' || learning.blockedReason)) return false;
-  return true;
+  /** 实验来源只在带本请求上下文时放行；开关打开不等于全局可见。 */
+  return !!(options && options.allowExperimental === true);
 }
 
 /** 正文缓存：一次读到的正文先放这里，saveIndex 落盘后清掉。 */
@@ -176,6 +174,7 @@ export function loadIndex(scope, options = {}) {
     lastSuggestedAt: loaded.state.lastSuggestedAt || '',
     suppressions: JSON.parse(JSON.stringify(loaded.state.suppressions || [])),
     __evolution: state.evolutionOf(loaded.state),
+    __tasks: anchor.normalizeTasks(state.evolutionOf(loaded.state).tasks),
     __exists: loaded.exists === true,
   };
   index.__meta = {
@@ -901,6 +900,45 @@ export function setEvolution(scope, enabled, options = {}) {
     const after = evolutionStatus(scope);
     return { ok: true, changed: Boolean(applied && applied.changed), ...after };
   });
+}
+
+
+/** 任务锚点只从实验状态里进出：实验关闭时不给写，避免留下无法解释的焦点。 */
+export function taskState(scope) {
+  const index = loadIndex(scope);
+  return anchor.normalizeTasks(index.__tasks);
+}
+
+export function saveTaskState(scope, tasks, options = {}) {
+  return withLock(scope, () => {
+    const before = loadIndex(scope);
+    if (!before.__evolution.enabled) return { ok: false, reason: '实验还没开启' };
+    const next = anchor.normalizeTasks(tasks);
+    const operationId = typeof options.operationId === 'string' ? options.operationId : '';
+    let changed = false;
+    try {
+      const result = state.transact(scope, {
+        operationId,
+        expected: before.__exists ? { generation: before.generation, epoch: before.epoch } : null,
+        expectCreate: !before.__exists,
+      }, (draft) => {
+        const evolution = draft.experimental && draft.experimental.projectEvolution;
+        if (!evolution || evolution.enabled !== true) return { changed: false };
+        changed = JSON.stringify(evolution.tasks || {}) !== JSON.stringify(next);
+        if (changed) evolution.tasks = JSON.parse(JSON.stringify(next));
+        return changed ? { changed: true } : { changed: false };
+      });
+      return { ok: true, changed, tasks: next, replayed: Boolean(result && result.replayed) };
+    } catch (error) {
+      if (error && error.code === 'conflict') return { ok: false, reason: '项目状态刚被改过，重试一次', retry: true };
+      return { ok: false, reason: error instanceof Error ? error.message : '任务锚点没有保存' };
+    }
+  });
+}
+
+export function setTaskDefault(scope, defaults, options = {}) {
+  const before = taskState(scope);
+  return saveTaskState(scope, anchor.setDefault(before, { ...defaults, now: options.now }), options);
 }
 
 /**
