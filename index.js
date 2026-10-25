@@ -496,7 +496,6 @@ export function apply(ctx) {
           if (hintState.size === 0) return '';
           const agents = getService('agents');
           const agent = typeof agents?.currentInitiator === 'function' ? agents.currentInitiator() : undefined;
-          console.log(`[lite-memory] hint render ${agent?.id ? 'ok' : 'no-agent'}`);
           const state = hintState.get(String(agent?.id ?? ''));
           if (!state || !state.items.length) return '';
           return renderHint(state.items);
