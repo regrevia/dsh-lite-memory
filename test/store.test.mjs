@@ -504,6 +504,19 @@ test('distinct keeps two entries whose titles normalize to the same name', () =>
   assert.equal(countOf(scope), 3);
 });
 
+test('multi-word search keeps only entries the query really hits (no single-common-word noise)', () => {
+  const scope = fresh('relevance');
+  upsert(scope, { title: '插件刷新崩溃', summary: '改完插件刷新前端会崩', when: '改完插件要刷新时' });
+  upsert(scope, { title: '插件市场收录流程', summary: '提交卡片与预检', when: '上架插件市场前' });
+  upsert(scope, { title: '插件安装位置', summary: '本地开发的插件装到 profile' });
+
+  const hits = search(scope, '刷新插件 reload 前端');
+  assert.deepEqual(hits.map((item) => item.title), ['插件刷新崩溃']);
+
+  const none = search(scope, '本地视频 侧边栏 播放');
+  assert.deepEqual(none, []);
+});
+
 test('peek hints on real title overlap and never writes hits', () => {
   const scope = fresh('peek');
   const saved = upsert(scope, { title: 'Chrome 弹钥匙串窗口', summary: '临时 profile 起 Chrome 会弹钥匙串窗口' });
