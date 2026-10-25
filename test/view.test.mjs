@@ -106,6 +106,30 @@ test('召回先过阈值再排序，条件未知的不进自动召回', () => {
   assert.equal(known.some((item) => item.record.id === 'mem_000000000002'), true);
 });
 
+test('触发词进检索与自动召回', () => {
+  const record = {
+    id: 'mem_000000000009',
+    title: '对外链接处理',
+    summary: '本地文件怎样进对话',
+    tags: [],
+    triggers: ['把视频贴给我'],
+    when: '',
+    applicability: 'all_in_scope',
+    conditions: [],
+    selection: null,
+    lastUsed: '2026-03-01T00:00:00.000Z',
+  };
+  assert.ok(view.matchScore(record, '帮我把视频贴给我看看').score >= view.MATCH_FLOOR);
+  assert.ok(view.matchScore(record, '完全无关的主题词').score < view.MATCH_FLOOR);
+  const ranked = view.rank([record], '帮我把视频贴给我看看', { limit: 4, context: ctxOf(null, {}) });
+  assert.equal(ranked.length, 1);
+  assert.equal(ranked[0].record.id, record.id);
+  const scope = fresh('trigger');
+  const saved = store.upsert(scope, { title: '对外链接处理', summary: '本地文件怎样进对话', body: '看本地文件', triggers: ['把视频贴给我'] });
+  const hits = store.search(scope, '帮我把视频贴给我看看');
+  assert.equal(hits.some((item) => item.id === saved.record.id), true);
+});
+
 test('模型投影不含维护区、历史版本和旧名', () => {
   const record = {
     id: 'mem_000000000003',
@@ -224,6 +248,9 @@ test('没指定归档还是彻底忘掉时不动盘（D05）', () => {
   assert.equal(archived.mode, 'archive');
   assert.equal(store.loadIndex(scope).entries.length, 0);
   assert.equal(store.loadIndex(scope).archived.some((item) => item.id === saved.record.id), true);
+  const suggestedAgain = store.suggestionGate(scope, { title: '先别动', summary: '需要用户点明怎么处理' });
+  assert.equal(suggestedAgain.ok, false);
+  assert.match(suggestedAgain.reason, /忘掉/);
 });
 
 for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });

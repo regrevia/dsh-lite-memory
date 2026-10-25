@@ -276,16 +276,27 @@ export function matchScore(record, query) {
     score += titleScore;
     hints.push('title');
   }
-  const keywordScore = Math.max(0, ...(record.tags || []).map((tag) => hit(tag, WEIGHT.keywords)));
+  /** 标签和触发词都是关键词：触发词在查询里出现，就说明这条规则该被想起。 */
+  const keywordTexts = [...(record.tags || []), ...(record.triggers || [])];
+  const keywordScore = Math.max(0, ...keywordTexts.map((text) => hit(text, WEIGHT.keywords)));
   if (keywordScore > 0) {
     score += keywordScore;
     hints.push('keyword');
+  }
+  const loweredRaw = raw.toLowerCase();
+  const triggerHit = (record.triggers || []).some((trigger) => {
+    const text = plain(trigger, 400).toLowerCase();
+    return Boolean(text) && loweredRaw.includes(text);
+  });
+  if (triggerHit) {
+    score += WEIGHT.keywords;
+    hints.push('trigger');
   }
   for (const word of words) {
     const plainWord = word.toLowerCase();
     const inTitle = plain(record.title, 400).toLowerCase().includes(plainWord)
       || (record.aliases || []).some((name) => plain(name, 400).toLowerCase().includes(plainWord));
-    const inKeywords = (record.tags || []).some((tag) => plain(tag, 400).toLowerCase().includes(plainWord));
+    const inKeywords = keywordTexts.some((text) => plain(text, 400).toLowerCase().includes(plainWord));
     if (inTitle || inKeywords) {
       score += inKeywords ? WEIGHT.keywords : WEIGHT.title;
       hints.push(inKeywords ? 'keyword' : 'title');

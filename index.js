@@ -614,7 +614,9 @@ export function apply(ctx, config) {
       render: (_args, value) => [{
         type: 'text',
         text: value.needsScope
-          ? `memory · 归属还没定：「${value.title}」\n补 memoryClass（personal_preference / project_fact / environment_fact / portable_procedure）或显式 scope；设备事实还要给设备条件`
+          ? value.reason === 'unconfirmed_project'
+            ? `memory · 当前目录还不能确认属于哪个项目：「${value.title}」\n先确认项目根目录，或显式 scope="global"`
+            : `memory · 归属还没定：「${value.title}」\n补 memoryClass（personal_preference / project_fact / environment_fact / portable_procedure）或显式 scope；设备事实还要给设备条件`
           : value.existingId
             ? `memory · 已有相同记忆：「${value.title}」 · ${value.existingId}（${value.existingScope}）第 ${value.revision} 版\n要改成另一条，加 resolution="distinct"`
             : value.needsResolution
@@ -745,7 +747,7 @@ export function apply(ctx, config) {
 
   ctx.effect(() => tools.register({
     name: 'memory_search',
-    description: `按需检索已有记忆：先搜，命中再 memory_read 读正文。用户提到「记住了什么 / 上次 / 规范 / 约定 / 路径 / 凭据怎么取」，或者眼前反复出现的报错、弹窗、异常时，先查这里有没有记过解法。跨项目的通用条目以 [全局] 开头。中文长句可以直接当查询。每行带 id 与版次，更新时把 id 传回 memory_save。已归档的条目也会返回，标为「已归档」。`,
+    description: `按需检索已有记忆：先搜，命中再 memory_read 读正文。用户提到「记住了什么 / 上次 / 规范 / 约定 / 路径 / 凭据怎么取」，或者眼前反复出现的报错、弹窗、异常时，先查这里有没有记过解法。跨项目的通用条目以 [全局] 开头。中文长句可以直接当查询。每行带 id 与版次，更新时把 id 传回 memory_save。默认只列当前有效的；已经归档或被新版本替换的旧说法不混进来，要查历史就在参数里显式要 history。`,
     parameters: SEARCH_PARAMS,
     output: {
       presentationMeta: (_args, value) => ({ kind: 'memory-search', count: value.count, status: value.status || 'ok', refs: value.refs || [] }),
@@ -794,11 +796,22 @@ export function apply(ctx, config) {
       const scope = scopeOf(cwdOf(execution));
       const context = view.trustedContext(scope, {});
       const hits = search(scope, args.query, args.limit ?? 3, { context, history: args.history === true });
-      const shown = hits.map((item) => view.toModelView(item, 'search', { status: item.archived ? 'archived' : '' }));
+      const shown = hits.map((item) => view.toModelView(item, 'search', { status: item.status || (item.archived ? 'archived' : 'ok') }));
       const valueOf = (kept) => {
         const rendered = renderIndex(shown.slice(0, kept));
         return { count: kept, chars: rendered.chars, text: rendered.text, refs: refsOf(hits.slice(0, kept)) };
       };
+      /** 没命中是正常结果，不是额度问题；空响应同样记一次本请求开销。 */
+      if (!hits.length) {
+        const empty = { count: 0, chars: 0, text: '', status: 'ok', refs: [] };
+        if (win) {
+          const bytes = jsonBytes(empty);
+          if (!affordable(win, bytes)) return { ...empty, status: 'budget_exhausted' };
+          win.bytes += bytes;
+          win.reads += 1;
+        }
+        return empty;
+      }
       if (win) {
         let kept = shown.length;
         while (kept > 0 && !affordable(win, jsonBytes(valueOf(kept)))) kept -= 1;

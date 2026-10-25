@@ -269,6 +269,45 @@ test('suggestion gate, keep, replay and reject', () => {
   const dropped = rejectCandidate(scope, third.id);
   assert.equal(dropped.ok, true);
   assert.equal(rejectCandidate(scope, third.id).ok, false);
+  /** 拒绝过的候选在时限内不再冒出来，而不是靠 48 小时节流碰巧挡住。 */
+  const retry = suggestionGate(scope, { title: '另一条建议', summary: '用来测试 reject 的候选' });
+  assert.equal(retry.ok, false);
+  assert.match(retry.reason, /拒绝/);
+});
+
+test('未确认的项目根目录不新建命名空间，显式全局仍然可写', () => {
+  const project = fresh('unconfirmed');
+  const unconfirmed = { ...project, confirmed: false };
+  const blocked = store.saveEntry(unconfirmed, { title: '未确认目录里的规则', summary: '不该落进项目层', body: '正文' });
+  assert.equal(blocked.needsScope, true);
+  assert.equal(blocked.reasonCode, 'unconfirmed_project');
+  assert.equal(store.loadIndex(project).entries.length, 0);
+  const globalSaved = store.saveEntry(unconfirmed, {
+    scope: 'global',
+    memoryClass: 'personal_preference',
+    title: '跨项目也成立的偏好',
+    summary: '不依赖项目根目录',
+    body: '正文',
+  });
+  assert.equal(globalSaved.needsScope, false);
+  assert.equal(globalSaved.chosenScope, 'global');
+  assert.equal(store.loadIndex(globalScope()).entries.some((item) => item.id === globalSaved.record.id), true);
+  const created = upsert(project, { title: '已存在的项目规则', summary: '用来测更新', body: '旧正文' });
+  const updateBlocked = store.saveEntry(unconfirmed, { id: created.record.id, title: '已存在的项目规则', summary: '用来测更新', body: '新正文' });
+  assert.equal(updateBlocked.needsScope, true);
+  assert.equal(updateBlocked.reasonCode, 'unconfirmed_project');
+});
+
+test('空正文更新也留版本，撤销不会当成新建', () => {
+  const scope = fresh('empty-body');
+  const created = upsert(scope, { title: '空正文起步', summary: '正文之后补', body: '' });
+  const updated = upsert(scope, { id: created.record.id, title: '空正文起步', summary: '正文之后补', body: '后来补的正文' });
+  assert.equal(updated.previousBody, '');
+  const undone = undoChange(scope, created.record.id);
+  assert.equal(undone.mode, 'restored');
+  const current = readEntry(scope, created.record.id);
+  assert.equal(current.body, '');
+  assert.equal(current.revision, 3);
 });
 
 test('suggestion without a body never clears the target body', () => {
