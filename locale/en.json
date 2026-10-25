@@ -1,0 +1,4 @@
+{
+  "meta.title": "Lite Memory",
+  "meta.description": "Zero resident storage. Reads on a hit; costs nothing when nothing matches."
+}

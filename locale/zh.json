@@ -1,0 +1,4 @@
+{
+  "meta.title": "轻记忆",
+  "meta.description": "零常驻存储。命中才读，未命中不占上下文。"
+}
