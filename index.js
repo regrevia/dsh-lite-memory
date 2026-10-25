@@ -145,7 +145,7 @@ export function apply(ctx) {
 
   ctx.effect(() => tools.register({
     name: 'memory_save',
-    description: `保存一条记忆。仅在用户明确要求记住，或用户确认保留时才调用。用户发「保留记忆「X」」时，用当时那条建议的内容调用本工具。${NOTES}`,
+    description: `保存一条记忆。用户明确说「记住」时直接调用；用户自己的话已经是长期规则（「以后都这样」「别再 X」）时也直接调用，不要先问。用户点了「保留」或发「保留记忆「X」」时，用那条建议的内容调用。${NOTES}`,
     parameters: SAVE_PARAMS,
     output: {
       schema: {
@@ -172,7 +172,7 @@ export function apply(ctx) {
 
   ctx.effect(() => tools.register({
     name: 'memory_suggest',
-    description: `对一条值得长期保留、但用户没有明说的经验提出保存建议。用户点「保留」才保存，不点就不保存。每次会话最多用一次；同一项目 24 小时内不会重复建议。${NOTES}`,
+    description: `对一条用户没说、但跨会话还有用的经验提出保存建议。调用后对话里出现一个「保留」按钮，用户点了才保存。不要用问句征询「要不要记」，那要用户打字；按钮不打扰对话。一次对话最多建议一条，问自己「下次会话还得靠它吗」，不确定就别建议。${NOTES}`,
     parameters: SUGGEST_PARAMS,
     output: {
       schema: {
