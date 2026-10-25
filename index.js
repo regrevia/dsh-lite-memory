@@ -111,8 +111,8 @@ function keepHandler(webServer) {
 const SAVE_PARAMS = {
   type: 'object',
   properties: {
-    title: { type: 'string', description: `标题，名词短语，不超过 ${LIMITS.titleChars} 字` },
-    summary: { type: 'string', description: `一句话摘要，名词短语，不超过 ${LIMITS.summaryChars} 字` },
+    title: { type: 'string', description: `标题：名词短语，用户一眼能认出是哪件事，不超过 ${LIMITS.titleChars} 字` },
+    summary: { type: 'string', description: `一句话说清要记的内容本身——用户只看这一行决定留不留，名词短语，不超过 ${LIMITS.summaryChars} 字` },
     body: { type: 'string', description: '正文 markdown。只写指针与要点，不抄录长文档' },
     kind: { type: 'string', enum: ['preference', 'convention', 'procedure', 'pointer', 'pitfall', 'credential_hint', 'note'], description: '条目类型' },
     tags: { type: 'array', items: { type: 'string' }, description: '最多 5 个标签' },
@@ -164,20 +164,21 @@ export function apply(ctx) {
         properties: {
           id: { type: 'string' },
           title: { type: 'string' },
+          summary: { type: 'string' },
           merged: { type: 'boolean' },
         },
-        required: ['id', 'title', 'merged'],
+        required: ['id', 'title', 'summary', 'merged'],
         additionalProperties: false,
       },
       render: (value) => [{
         type: 'text',
-        text: value.merged ? `memory · merged "${value.title}"` : `memory · saved "${value.title}"`,
+        text: `${value.merged ? 'memory · merged' : 'memory · saved'} "${value.title}"${value.summary ? ` — ${value.summary}` : ''}`,
       }],
     },
     execute: async (args, execution) => {
       const scope = scopeOf(cwdOf(execution));
       const saved = upsert(scope, args);
-      return { id: saved.record.id, title: saved.record.title, merged: saved.merged };
+      return { id: saved.record.id, title: saved.record.title, summary: saved.record.summary, merged: saved.merged };
     },
   }), 'lite-memory: memory_save');
 
@@ -191,22 +192,26 @@ export function apply(ctx) {
         properties: {
           asked: { type: 'boolean' },
           title: { type: 'string' },
+          summary: { type: 'string' },
           reason: { type: 'string' },
         },
-        required: ['asked', 'title'],
+        required: ['asked', 'title', 'summary'],
         additionalProperties: false,
       },
       render: (value) => [{
         type: 'text',
-        text: value.asked ? `memory · keep "${value.title}"?` : 'memory · skipped',
+        text: value.asked
+          ? `memory · keep? "${value.title}"${value.summary ? ` — ${value.summary}` : ''}`
+          : 'memory · skipped',
       }],
     },
     execute: async (args, execution) => {
       const scope = scopeOf(cwdOf(execution));
       const gate = suggestionGate(scope, args.title);
-      if (!gate.ok) return { asked: false, title: String(args.title ?? ''), reason: gate.reason };
+      const summary = String(args.summary ?? '');
+      if (!gate.ok) return { asked: false, title: String(args.title ?? ''), summary, reason: gate.reason };
       noteSuggestion(scope, args, 'asked');
-      return { asked: true, title: String(args.title ?? '') };
+      return { asked: true, title: String(args.title ?? ''), summary };
     },
   }), 'lite-memory: memory_suggest');
 
