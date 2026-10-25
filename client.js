@@ -35,11 +35,14 @@ window.__ModuleLoader__.load({
 
     const firstLine = (value) => (typeof value === 'string' ? value.split('\n')[0] : null);
 
-    /** 结果行里带标题时把它取出来，用于点按钮后原路回传。 */
+    /** 取整段标题，收到最后一个引号，不截断。 */
     const quoted = (value) => {
-      const match = typeof value === 'string' ? /"([^"]+)"/.exec(value) : null;
+      const match = typeof value === 'string' ? /"(.+)"(?:\s+—|\s*$)/.exec(value) : null;
       return match ? match[1] : null;
     };
+
+    /** [全局] 前缀决定按钮改哪一层。 */
+    const layerOf = (value) => (typeof value === 'string' && value.includes('[全局]') ? 'global' : 'project');
 
     /** 只在产生这行的那一轮显示。 */
     const useLive = (phase) => {
@@ -77,7 +80,7 @@ window.__ModuleLoader__.load({
       const keep = () => {
         if (!canKeep) return;
         setState('saving');
-        post({ op: 'keep', title, cwd }).then((value) => setState(value && value.ok ? 'saved' : 'idle'));
+        post({ op: 'keep', title, cwd, scope: layerOf(text) }).then((value) => setState(value && value.ok ? 'saved' : 'idle'));
       };
       const button = title
         ? h('button', { type: 'button', onClick: keep, disabled: !canKeep, 'aria-label': '保留这条记忆', style: canKeep ? KEEP_ON : KEEP_OFF }, KEEP[state] ?? KEEP.idle)
@@ -96,7 +99,7 @@ window.__ModuleLoader__.load({
       const drop = () => {
         if (!canDrop) return;
         setState('saving');
-        post({ op: 'undo', title, cwd }).then((value) => setState(value && value.ok ? 'dropped' : 'idle'));
+        post({ op: 'undo', title, cwd, scope: layerOf(text) }).then((value) => setState(value && value.ok ? 'dropped' : 'idle'));
       };
       const label = state === 'dropped' ? 'memory · dropped' : firstLine(text) ?? RUNNING.memory_save;
       const button = title && state !== 'dropped' ? h('button', { type: 'button', onClick: drop, disabled: !canDrop, 'aria-label': '删除这条记忆', style: DROP }, '✕') : null;

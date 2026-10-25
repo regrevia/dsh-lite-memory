@@ -1,7 +1,7 @@
 # dsh-lite-memory
 
-**零常驻记忆。命中才读，没命中一分上下文都不花。**
-**Memory that costs nothing until the moment you need it.**
+**没有常驻的记忆正文：不写系统提示，不逐轮注入，命中才读。**
+**No memory in the prompt: nothing injected per turn, read only on a hit.**
 
 ---
 
@@ -19,7 +19,7 @@ Lightweight memory for the DeepSeek Harness. Nothing in the system prompt, nothi
 | **L1** 它发现有跨会话价值的经验 | 一行灰字 `memory · keep? "X" — 要记的内容` + 一个 `keep` 按钮；标题加一句话，看得懂才点，不点就永远不写，48 小时内不重复 |
 | **L2** 常识、一次性参数、凭据的值 | 永不写入 |
 
-这些行只属于产生它的那一轮：重进会话就没了，历史里只留正文。再记一次时插件自己判是更新还是新增：同层、同前置条件下标题或摘要够像（0.45 / 0.55）就更新原条目，换过说法的旧标题记成别名以后也认得；旧要点保留，同键的新值覆盖；前置条件不同的同一主题是两条。
+这些行只属于产生它的那一轮：重进会话就没了，历史里只留正文。再记一次时插件自己判是更新还是新增：同层、同前置条件下，标题（或这条用过的旧标题）完全一致就更新原条目，换过说法而标题变了的旧标题记成别名以后也认得；像但不同名的不合并，只在结果里报「相近：X」和它的 id，交给模型确认后用 id 更新。旧正文留在 `versions` 里；正文合并只在同一 Markdown 章节内覆盖同名键，跨章节的同名键互不覆盖；前置条件不同的同一主题是两条。
 
 写入时分两层：默认只在这个项目生效；用户说「以后所有项目都这样」才进全局层（上限 40 条），检索时一起查。同一主题在不同前提下用 `when` 区分，各存一条。
 
@@ -31,7 +31,7 @@ Lightweight memory for the DeepSeek Harness. Nothing in the system prompt, nothi
 | **L1** it spots something worth keeping | one muted line `memory · keep? "X" — what would be remembered` with a single `keep` button — readable before you click, nothing written unless you click, at most once per two days |
 | **L2** common sense, one-off parameters, credential values | never written |
 
-Those lines belong to the turn that made them: reopening the session drops them, leaving only the prose in history. Recording the same subject again merges into the existing entry — earlier points are kept and only conflicting keys are updated. The same subject under different preconditions stays two entries.
+Those lines belong to the turn that made them: reopening the session drops them, leaving only the prose in history. Saving again updates an entry only when the title (or one of its earlier titles) matches exactly under the same precondition. A merely similar title creates a new entry and reports the closest one with its id, so the caller can update it deliberately. Earlier bodies stay in `versions`, and key lines are only overwritten within the same Markdown section. The same subject under different preconditions stays two entries.
 
 Writes land in one of two layers: the current project by default, or the global layer (max 40 entries) when the user says the rule holds for every project. Both layers are searched together, and a `when` field separates the same subject under different preconditions.
 
@@ -45,12 +45,12 @@ Writes land in one of two layers: the current project by default, or the global 
 
 - **0 依赖**，存储层无定时器、无监听、无网络，只有同步单文件写。
 - 搜索最多 4 条、400 字；正文只在 `memory_read` 里出现，全文永不进上下文。
-- 判重自动合并，不靠模型判断；90 天未用只留 `id + 标题`；超 200 条或 512 KB 转 `archive/`，文件从不删除。
+- 判重只看标题与旧标题，不靠相似度覆盖；90 天未用只留 `id + 标题`；超 200 条或 512 KB 转 `archive/`（正文与完整记录都留着，可人工取回），文件从不删除。
 - 一个项目一个目录，项目之间互相看不见。
 
 - **Zero dependencies.** The store has no timers, no listeners, no network — just synchronous single-file writes.
 - Search returns at most 4 hits and 400 characters. Full text only appears in `memory_read`.
-- Same title merges. Unused for 90 days drops to `id + title`. Over 200 entries or 512 KB archives instead of piling up. Files are never deleted.
+- Identity is the title (or a title it used before), never fuzzy similarity. Unused for 90 days drops to `id + title`. Over 200 entries or 512 KB archives with body and full record kept, so an entry can be restored by hand. Files are never deleted.
 - One directory per project, so projects never see each other's notes.
 
 ## 安装 / Install
