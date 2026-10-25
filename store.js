@@ -4,12 +4,14 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 /**
- * Hard limits. Nothing grows without either an explicit error or a bounded,
- * oldest-first archive move — no silent truncation of what the user asked to keep.
+ * Hard limits. Count caps are soft lines: the real ceiling per layer is
+ * LIMITS.hardEntries plus the total body budget. Past it the least recently
+ * read entry moves to archive/ — announced in the result, body kept in full.
  */
 export const LIMITS = {
   entries: 200,
   globalEntries: 200,
+  hardEntries: 1000,
   entryBytes: 4096,
   recordBytes: 10 * 1024,
   totalBytes: 512 * 1024,
@@ -327,12 +329,21 @@ function archiveEntry(scope, index, entry) {
 }
 
 /**
- * 满额不驱逐：条数上限只做明确拒绝，让用户自己归档或彻底遗忘。
- * 自动按最久未用移走会把用户的规则悄悄挪进归档，读的时候看不见也不报错。
+ * 条数 200 是提示线，不是墙：到 1000 条或正文预算将满时才腾位置。
+ * capacityOf 同时给出字节余量，调用方能说清是条数还是正文先到顶。
  */
 export function capacityOf(scope, index) {
   const cap = scope.key === 'global' ? LIMITS.globalEntries : LIMITS.entries;
-  return { cap, used: index.entries.length, remaining: Math.max(0, cap - index.entries.length) };
+  const used = index.entries.length;
+  const bytes = index.entries.reduce((sum, item) => sum + (item.bytes || 0), 0);
+  return {
+    cap,
+    hard: LIMITS.hardEntries,
+    used,
+    remaining: Math.max(0, cap - used),
+    bytes,
+    bytesLeft: Math.max(0, LIMITS.totalBytes - bytes),
+  };
 }
 
 /** 相邻两字为一组：中文没有空格，按词切分永远对不上，按字片才认得出改写的同一件事。 */
@@ -433,7 +444,7 @@ function applyDraft(scope, index, source, now) {
       const sameName = index.entries.some((item) => [item.title, ...(item.aliases || [])]
         .some((name) => String(name || '').toLowerCase() === draft.title.toLowerCase()));
       if (similarList.length > 0 && !distinct && !sameName) {
-        return { needsResolution: true, similarList, similar: similarList[0], draft, record: null, merged: false, previousBody: null };
+        return { needsResolution: true, similarList, similar: similarList[0], draft, record: null, merged: false, previousBody: null, archived: [] };
       }
     }
   }
@@ -452,7 +463,7 @@ function applyDraft(scope, index, source, now) {
       && next.when === (record.when || '') && next.kind === (record.kind || 'note')
       && sameTags && next.body === oldBody;
     if (noop) {
-      return { record, merged: true, mergedFrom: null, similar: null, similarList, draft, noop: true, previousBody: oldBody };
+      return { record, merged: true, mergedFrom: null, similar: null, similarList, draft, noop: true, previousBody: oldBody, archived: [] };
     }
     const versions = snapshot(record, oldBody);
     const titles = [...new Set([...(record.aliases || []), record.title].map((name) => cleanTitle(name)).filter(Boolean))].slice(-5);
@@ -469,10 +480,10 @@ function applyDraft(scope, index, source, now) {
       source: record.source || (source && source.source) || 'user_explicit',
     };
     nextRecord.bytes = entrySize(nextRecord, next.body);
-    assertFits(index, nextRecord);
+    const archived = assertFits(scope, index, nextRecord);
     writeBody(scope, record.id, next.body);
     Object.assign(record, nextRecord);
-    return { record, merged: true, mergedFrom, similar: null, similarList, draft, noop: false, previousBody: oldBody };
+    return { record, merged: true, mergedFrom, similar: null, similarList, draft, noop: false, previousBody: oldBody, archived };
   }
   const created = {
     id: newId(),
@@ -495,21 +506,32 @@ function applyDraft(scope, index, source, now) {
     bytes: 0,
   };
   created.bytes = entrySize(created, created.body);
-  assertFits(index, created);
+  const archived = assertFits(scope, index, created);
   writeBody(scope, created.id, created.body);
   index.entries.push(created);
-  return { record: created, merged: false, mergedFrom: null, similar: similarList[0] || null, similarList, draft, noop: false, previousBody: null };
+  return { record: created, merged: false, mergedFrom: null, similar: similarList[0] || null, similarList, draft, noop: false, previousBody: null, archived };
 }
 
-/** 单条、记录序列化、整库三档预算：新增与更新走同一套。 */
-function assertFits(index, record) {
-  const isNew = !index.entries.some((item) => item.id === record.id);
-  if (isNew) {
-    const cap = index.scope === 'global' ? LIMITS.globalEntries : LIMITS.entries;
-    if (index.entries.length + 1 > cap) {
-      throw new Error(`记忆已满：${index.scope === 'global' ? '全局' : '这个项目'}最多 ${cap} 条，先归档或彻底遗忘一条`);
-    }
-  }
+const IDLE_MS = 7 * 24 * 60 * 60 * 1000;
+
+function lastTouch(item) {
+  return Date.parse(item.lastUsed || item.updated || item.created || '') || 0;
+}
+
+/** 优先腾 7 天没被读过的；都在用就腾最久没动的。正在更新的这条永远不腾。 */
+function pickVictim(entries, now) {
+  if (!entries.length) return null;
+  const idle = entries.filter((item) => now - lastTouch(item) >= IDLE_MS);
+  const pool = idle.length ? idle : entries;
+  return pool.reduce((oldest, item) => (lastTouch(item) < lastTouch(oldest) ? item : oldest));
+}
+
+/**
+ * 单条、记录序列化、整库三档预算：新增与更新走同一套。
+ * 到硬上限不拒绝新记忆，也不偷偷丢：把同层最久没被读/更新的那条移进归档（正文完整，可取回），
+ * 返回被归档的条目，让结果里说清动了哪条。真腾不出位置（只剩它自己还超预算）才报错。
+ */
+function assertFits(scope, index, record) {
   if (record.bytes > LIMITS.entryBytes) {
     throw new Error(`这一条 ${record.bytes} 字节，超过单条 ${LIMITS.entryBytes} 字节；先精简正文`);
   }
@@ -517,10 +539,22 @@ function assertFits(index, record) {
   if (size > LIMITS.recordBytes) {
     throw new Error(`这一条序列化后 ${size} 字节，超过 ${LIMITS.recordBytes} 字节；减少字段或换更短的标签`);
   }
-  const total = activeBytes(index, record.id) + record.bytes;
-  if (total > LIMITS.totalBytes) {
-    throw new Error(`记忆库已满：这一条会让总正文到 ${total} 字节，超过 ${LIMITS.totalBytes} 字节；先归档旧的`);
+  const isNew = !index.entries.some((item) => item.id === record.id);
+  const now = Date.now();
+  let rest = index.entries.filter((item) => item.id !== record.id);
+  let restBytes = rest.reduce((sum, item) => sum + (item.bytes || 0), 0);
+  const evicted = [];
+  while (rest.length + (isNew ? 1 : 0) > LIMITS.hardEntries || restBytes + record.bytes > LIMITS.totalBytes) {
+    const victim = pickVictim(rest, now);
+    if (!victim) {
+      throw new Error(`记忆库已满：这一条会让总正文超过 ${LIMITS.totalBytes} 字节，先精简正文`);
+    }
+    rest = rest.filter((item) => item.id !== victim.id);
+    restBytes -= victim.bytes || 0;
+    evicted.push(victim);
   }
+  for (const victim of evicted) archiveEntry(scope, index, victim);
+  return evicted.map((item) => ({ id: item.id, title: item.title }));
 }
 
 /**

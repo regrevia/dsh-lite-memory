@@ -275,7 +275,7 @@ export function apply(ctx) {
 
   ctx.effect(() => tools.register({
     name: 'memory_save',
-    description: `保存一条记忆。用户明确说「记住」时直接调用；用户自己的话已经是长期规则（「以后都这样」「别再 X」）时也直接调用，不要先问。更新同一件事时带 id：身份只看标题、旧标题和前置条件，像不像不授权覆盖。文本相近但标题不同时先不写，返回 needsResolution 与 1–2 条相近条目：确实是同一条就用那个 id 更新，确实是另一条才带 resolution="distinct" 再存。带 id 更新时没给的字段保持原值，正文整段替换，旧版本留在 versions 里（每字都留，不截断）。超限直接报错，不悄悄截断。前置条件不同的同一标题是两条。${NOTES}`,
+    description: `保存一条记忆。用户明确说「记住」时直接调用；用户自己的话已经是长期规则（「以后都这样」「别再 X」）时也直接调用，不要先问。更新同一件事时带 id：身份只看标题、旧标题和前置条件，像不像不授权覆盖。文本相近但标题不同时先不写，返回 needsResolution 与 1–2 条相近条目：确实是同一条就用那个 id 更新，确实是另一条才带 resolution="distinct" 再存。带 id 更新时没给的字段保持原值，正文整段替换，旧版本留在 versions 里（每字都留，不截断）。条数到硬上限时把同层最久没被读的一条移进归档，结果里写明动了哪条，不拒绝新记忆；单条正文超限只报错、不截断。前置条件不同的同一标题是两条。${NOTES}`,
     parameters: SAVE_PARAMS,
     output: {
       schema: {
@@ -292,8 +292,9 @@ export function apply(ctx) {
           needsResolution: { type: 'boolean' },
           similarIds: { type: 'string' },
           similar: { type: 'string' },
+          archived: { type: 'string' },
         },
-        required: ['id', 'title', 'summary', 'when', 'revision', 'merged', 'changed', 'scope', 'needsResolution'],
+        required: ['id', 'title', 'summary', 'when', 'revision', 'merged', 'changed', 'scope', 'needsResolution', 'archived'],
         additionalProperties: false,
       },
       render: (_args, value) => [{
@@ -302,7 +303,7 @@ export function apply(ctx) {
           ? `memory · 需要确认：「${value.title}」与已有条目相近\n${value.similar}\n要更新它，用 id 重存；确实是另一条，加 resolution="distinct"`
           : value.changed === false
             ? `memory · unchanged${scopeLabel(value)} "${value.title}" · ${value.id} · 第 ${value.revision} 版`
-            : `memory · ${value.merged ? 'merged' : 'saved'}${scopeLabel(value)} "${value.title}"${value.when ? `（${value.when}）` : ''} · ${value.id} · 第 ${value.revision} 版${value.similar ? ` · 相近：${value.similar}` : ''}`,
+            : `memory · ${value.merged ? 'merged' : 'saved'}${scopeLabel(value)} "${value.title}"${value.when ? `（${value.when}）` : ''} · ${value.id} · 第 ${value.revision} 版${value.similar ? ` · 相近：${value.similar}` : ''}${value.archived ? ` · 已归档「${value.archived}」腾位` : ''}`,
       }],
     },
     execute: async (args, execution) => {
@@ -321,6 +322,7 @@ export function apply(ctx) {
           needsResolution: true,
           similarIds: saved.similarList.map((item) => item.id).join('、'),
           similar: saved.similarList.map((item) => `${item.id}「${item.title}」${item.summary ? `｜${item.summary}` : ''}`).join('；'),
+          archived: '',
         };
       }
       recordCitations(scope, sessionIdOf(execution), [saved.record]);
@@ -335,6 +337,7 @@ export function apply(ctx) {
         scope: scope.key === 'global' ? 'global' : 'project',
         needsResolution: false,
         similarIds: saved.similarList.map((item) => item.id).join('、'),
+        archived: (saved.archived || []).map((item) => item.title).join('、'),
         ...(saved.similar ? { similar: `${saved.similar.id}「${saved.similar.title}」` } : {}),
       };
     },

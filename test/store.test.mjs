@@ -134,13 +134,15 @@ test('imperative summary and credentials are rejected', () => {
   assert.throws(() => normalizeDraft({ title: 'a', summary: '名词短语', kind: 'guess' }), /类型只能是/);
 });
 
-test('total bytes budget rejects instead of archiving silently', () => {
+test('正文预算满了也先归档腾位，并在结果里点名', () => {
   const scope = fresh('budget');
   const original = LIMITS.totalBytes;
   LIMITS.totalBytes = 600;
   try {
     upsert(scope, { title: '第一条', summary: '占满预算的正文', body: '记'.repeat(100) });
-    assert.throws(() => upsert(scope, { title: '第二条', summary: '再来一条就超了', body: '记'.repeat(100) }), /记忆库已满/);
+    const second = upsert(scope, { title: '第二条', summary: '再来一条就超了', body: '记'.repeat(100) });
+    assert.equal(second.record.title, '第二条');
+    assert.deepEqual(second.archived.map((item) => item.title), ['第一条']);
     assert.equal(countOf(scope), 1);
   } finally {
     LIMITS.totalBytes = original;
@@ -321,21 +323,70 @@ test('corrupt index stops reads and writes and stays on disk', () => {
   assert.throws(() => loadIndex(scope), /结构不对/);
 });
 
-test('capacity refuses a new entry instead of moving old ones into archive/', () => {
+test('条数 200 是提示线，不是拒绝线', () => {
   const scope = fresh('trim');
   for (let i = 0; i < LIMITS.entries; i += 1) {
     upsert(scope, { title: `条目 ${i}`, summary: `第 ${i} 条压容量`, body: `body ${i}`, resolution: 'distinct' });
   }
   assert.equal(countOf(scope), LIMITS.entries);
-  assert.throws(() => upsert(scope, { title: '溢出的一条', summary: '满了就明确拒绝' }), /记忆已满/);
-  assert.equal(countOf(scope), LIMITS.entries);
+  const extra = upsert(scope, { title: '第 201 条', summary: '不许因为条数拒绝新记忆' });
+  assert.equal(extra.record.title, '第 201 条');
+  assert.deepEqual(extra.archived, []);
+  assert.equal(countOf(scope), LIMITS.entries + 1);
   assert.equal(fs.existsSync(path.join(scope.dir, 'archive')), false);
 });
 
-test('the global layer uses its own count cap', () => {
+test('到硬上限时归档最久没读的一条，不拒绝新记忆', () => {
+  const scope = fresh('evict');
+  fs.mkdirSync(scope.dir, { recursive: true });
+  const chunk = Math.ceil(LIMITS.totalBytes / 20);
+  const entries = Array.from({ length: 20 }, (_, i) => {
+    const day = String(i + 1).padStart(2, '0');
+    return {
+      id: `mem_${String(i).padStart(12, '0')}`,
+      title: `旧条目 ${i}`,
+      summary: `第 ${i} 条`,
+      when: '',
+      kind: 'note',
+      tags: [],
+      created: `2026-01-${day}T00:00:00.000Z`,
+      updated: `2026-01-${day}T00:00:00.000Z`,
+      lastUsed: `2026-01-${day}T00:00:00.000Z`,
+      revision: 1,
+      status: 'active',
+      source: 'user_explicit',
+      hits: 0,
+      merges: 0,
+      versions: [],
+      bytes: chunk,
+    };
+  });
+  fs.writeFileSync(path.join(scope.dir, 'index.json'), JSON.stringify({
+    version: 1, scope: scope.key, entries, suggestions: [], receipts: [],
+  }));
+  fs.mkdirSync(path.join(scope.dir, 'entries'), { recursive: true });
+  for (const entry of entries) {
+    fs.writeFileSync(path.join(scope.dir, 'entries', `${entry.id}.md`), `正文 ${entry.title}`);
+  }
+  const saved = upsert(scope, { title: '新的一条', summary: '满了也要能存', body: '新正文' });
+  assert.equal(saved.record.title, '新的一条');
+  assert.equal(saved.archived.length, 1);
+  assert.equal(saved.archived[0].title, '旧条目 0');
+  assert.equal(countOf(scope), 20);
+  const archived = JSON.parse(fs.readFileSync(path.join(scope.dir, 'archive', `${saved.archived[0].id}.json`), 'utf8'));
+  assert.equal(archived.title, '旧条目 0');
+});
+
+test('the global layer reports both lines', () => {
   const global = globalScope();
   assert.equal(LIMITS.globalEntries, 200);
-  assert.deepEqual(store.capacityOf(global, { entries: new Array(41).fill({}) }), { cap: 200, used: 41, remaining: 159 });
+  const room = store.capacityOf(global, { entries: new Array(41).fill({}) });
+  assert.equal(room.cap, 200);
+  assert.equal(room.hard, LIMITS.hardEntries);
+  assert.equal(room.used, 41);
+  assert.equal(room.remaining, 159);
+  assert.equal(room.bytes, 0);
+  assert.equal(room.bytesLeft, LIMITS.totalBytes);
 });
 
 test('projects and the global layer stay separate', () => {
