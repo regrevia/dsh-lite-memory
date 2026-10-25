@@ -2,171 +2,405 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import * as store from '../store.js';
 
-const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-'));
-process.env.DSH_HOME = home;
+process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-'));
+const store = await import('../store.js');
 
-const scope = store.scopeOf('/tmp/project-a');
-const other = store.scopeOf('/tmp/project-b');
-const draft = { title: '插件市场条目规范', summary: '市场上传指南的位置与要点', body: '- 位置：UPLOAD-GUIDE.md' };
+const { upsert, search, readEntry, forget, undoChange, acceptCandidate, rejectCandidate,
+  suggestionGate, noteSuggestion, findSuggestion, renderIndex, normalizeDraft, loadIndex,
+  scopeOf, globalScope, LIMITS, recordCitations, listCitations, readCitationBody } = store;
 
-// 基本保存、检索、正文、命中计数。
-const first = store.upsert(scope, draft);
-assert.equal(first.merged, false);
-assert.equal(store.loadIndex(scope).entries.length, 1);
-assert.deepEqual(store.search(scope, '插件市场').map((item) => item.id), [first.record.id]);
-assert.deepEqual(store.search(scope, '量子力学'), []);
-assert.deepEqual(store.loadIndex(other).entries, []);
-const read = store.readEntry(scope, first.record.id);
-assert.match(read.body, /UPLOAD-GUIDE/);
-assert.ok(store.loadIndex(scope).entries[0].hits >= 2);
-console.log('store: save / search / read ok');
+let passed = 0;
+const test = (name, fn) => {
+  try {
+    fn();
+    passed += 1;
+  } catch (error) {
+    console.error(`FAIL ${name}`);
+    throw error;
+  }
+};
 
-// 中文长句按字片召回；摘要里的词也算。
-const longQuery = store.upsert(store.scopeOf('/tmp/recall'), { title: '发布流程', summary: '打 tag 后推分支再发 npm 包', body: '- 顺序：tag → push → publish' });
-assert.deepEqual(store.search(store.scopeOf('/tmp/recall'), '上次发布流程是什么').map((item) => item.id), [longQuery.record.id]);
-console.log('store: 中文长句召回 ok');
+const dirs = [];
+const fresh = (label) => {
+  const dir = path.join(os.tmpdir(), `lite-memory-case-${label}-${Math.random().toString(16).slice(2, 8)}`);
+  fs.mkdirSync(dir, { recursive: true });
+  dirs.push(dir);
+  return scopeOf(dir);
+};
 
-// 校验：名词短语、凭据（含 when / tags 里的凭据）。
-assert.throws(() => store.upsert(scope, { title: 'x', summary: '你要记得用 tab 缩进' }), /名词短语/);
-assert.throws(() => store.upsert(scope, { title: 'y', summary: '凭据位置', body: 'ghp_abcdefghijklmnopqrstuvwxyz0123456789' }), /凭据/);
-assert.throws(() => store.upsert(scope, { title: 'z', summary: '凭据位置', when: 'token: abcdef012345' }), /凭据/);
-assert.throws(() => store.upsert(scope, { title: 'x'.repeat(80), summary: '标题太长' }), /标题超过/);
-console.log('store: 全字段校验 ok');
+const bodyOf = (scope, id) => fs.readFileSync(path.join(scope.dir, 'entries', `${id}.md`), 'utf8');
+const countOf = (scope) => loadIndex(scope).entries.length;
+const suggestionsOf = (scope) => loadIndex(scope).suggestions;
 
-// 标题就是身份：同一个标题再存一次是更新，正文只增不减。
-const second = store.upsert(scope, { ...draft, summary: '市场上传指南的位置与要点（更新）', body: '- 抓取：先跑 marketplace' });
-assert.equal(second.merged, true);
-assert.equal(second.record.id, first.record.id);
-assert.equal(store.loadIndex(scope).entries.length, 1);
-assert.equal(store.loadIndex(scope).entries[0].merges, 1);
-const mergedBody = store.readEntry(scope, first.record.id).body;
-assert.match(mergedBody, /UPLOAD-GUIDE/);
-assert.match(mergedBody, /marketplace/);
-// 旧正文留在 versions 里，可回滚。
-assert.match(store.loadIndex(scope).entries[0].versions.at(-1).body, /UPLOAD-GUIDE/);
-console.log('store: 同标题更新 + 版本快照 ok');
-
-// 相似不授权覆盖：前端/后端的同位置条目各留各的值。
-const similarScope = store.scopeOf('/tmp/similar');
-const fe = store.upsert(similarScope, { title: '前端 API 地址', summary: '页面请求用的服务接口地址', body: '- 地址：https://frontend.example.test' });
-const be = store.upsert(similarScope, { title: '后端 API 地址', summary: '页面请求用的服务接口地址', body: '- 地址：https://backend.example.test' });
-assert.equal(be.merged, false);
-assert.equal(be.record.id !== fe.record.id, true);
-assert.equal(be.similar?.id, fe.record.id);
-assert.match(store.readEntry(similarScope, fe.record.id).body, /frontend\.example\.test/);
-assert.equal(store.readEntry(similarScope, fe.record.id).body.includes('backend'), false);
-console.log('store: 相近只提示、不覆盖 ok');
-
-// 明确按 id 更新，标题换掉时旧标题进别名，旧标题再存回来还认得。
-const renamed = store.upsert(similarScope, { id: fe.record.id, title: '前端 API 地址（v2）', summary: '页面请求用的服务接口地址', body: '- 地址：https://frontend.example.test/v2' });
-assert.equal(renamed.merged, true);
-assert.equal(store.loadIndex(similarScope).entries.find((item) => item.id === fe.record.id).aliases.includes('前端 API 地址'), true);
-const back = store.upsert(similarScope, { title: '前端 API 地址', summary: '页面请求用的服务接口地址', body: '- 备注：旧标题仍指向同一条' });
-assert.equal(back.merged, true);
-assert.equal(back.record.id, fe.record.id);
-assert.equal(store.loadIndex(similarScope).entries.length, 2);
-console.log('store: id 更新与别名回溯 ok');
-
-// 正文合并只在同一章节内覆盖同名键。
-const sectionsScope = store.scopeOf('/tmp/sections');
-store.upsert(sectionsScope, {
-  title: '服务端口',
-  summary: '前端与后端的本地端口',
-  body: '## 前端\n- 端口：3000\n\n## 后端\n- 端口：9000',
+test('create then same title merges with full old body kept', () => {
+  const scope = fresh('create');
+  const first = upsert(scope, { title: '发布顺序', summary: '发版前要按顺序做的事', body: '第一步\n- 跑测试' });
+  assert.equal(first.merged, false);
+  assert.equal(first.needsResolution, false);
+  assert.equal(first.record.revision, 1);
+  const second = upsert(scope, { title: '发布顺序', summary: '发版前要按顺序做的事', body: '第一步\n- 跑测试\n- 改版本号' });
+  assert.equal(second.merged, true);
+  assert.equal(second.record.id, first.record.id);
+  assert.equal(second.record.revision, 2);
+  assert.equal(second.record.versions.at(-1).body, '第一步\n- 跑测试');
+  assert.equal(second.record.versions.at(-1).summary, '发版前要按顺序做的事');
+  assert.match(readEntry(scope, first.record.id).body, /改版本号/);
+  assert.equal(countOf(scope), 1);
 });
-store.upsert(sectionsScope, { title: '服务端口', summary: '前端与后端的本地端口', body: '## 后端\n- 端口：9100' });
-const sectionBody = store.readEntry(sectionsScope, store.loadIndex(sectionsScope).entries[0].id).body;
-assert.match(sectionBody, /## 前端\n- 端口：3000/);
-assert.match(sectionBody, /## 后端\n- 端口：9100/);
-console.log('store: 章节内合并 ok');
 
-// 前置条件参与身份：不同 when 是两条，同一 when 才合并。
-const mac = store.upsert(sectionsScope, { title: '构建耗时长', summary: '本机构建要几分钟', when: 'macOS 本地', body: '- 原因：磁盘加密' });
-const ci = store.upsert(sectionsScope, { title: '构建耗时长', summary: '本机构建要几分钟', when: 'CI 容器', body: '- 原因：冷缓存' });
-assert.equal(mac.merged, false);
-assert.equal(ci.merged, false);
-assert.notEqual(ci.record.id, mac.record.id);
-const plus = store.upsert(sectionsScope, { title: '构建耗时长', summary: '本机构建要几分钟', when: 'macOS 本地', body: '- 绕过：先跑 cache\n- 原因：磁盘加密拖慢' });
-assert.equal(plus.merged, true);
-assert.equal(plus.record.id, mac.record.id);
-assert.equal(store.readEntry(sectionsScope, mac.record.id).body.includes('磁盘加密\n'), false);
-assert.ok(store.search(sectionsScope, 'CI 容器').some((item) => item.id === ci.record.id));
-console.log('store: 前置条件规则 ok');
+test('update replaces the body instead of merging markdown sections', () => {
+  const scope = fresh('replace');
+  const first = upsert(scope, { title: '发布顺序', summary: '发版前按顺序做的事', body: '## 部署\ndeploy 命令' });
+  const next = upsert(scope, { id: first.record.id, title: '发布顺序', summary: '发版前按顺序做的事', body: '## 回滚\nrollback 命令' });
+  assert.equal(next.merged, true);
+  const body = readEntry(scope, first.record.id).body;
+  assert.equal(body, '## 回滚\nrollback 命令');
+  assert.equal(next.record.versions.at(-1).body, '## 部署\ndeploy 命令');
+});
 
-// 全局层：一处写入，别的项目查得到；两层同名各存各的，全局 id 跨作用域可读可归档。
-const projA = store.scopeOf('/tmp/global-a');
-const projB = store.scopeOf('/tmp/global-b');
-const global = store.globalScope();
-store.upsert(global, { title: '回复用中文', summary: '所有项目的中文回复约定', body: '- 回复：中文' });
-const seen = store.search(projB, '中文回复');
-assert.equal(seen.some((item) => item.scope === 'global'), true);
-const local = store.upsert(projA, { title: '回复用中文', summary: '所有项目的中文回复约定', body: '- 回复：中文' });
-assert.equal(local.merged, false);
-assert.equal(store.loadIndex(global).entries.length, 1);
-assert.equal(store.loadIndex(projA).entries.length, 1);
-assert.match(store.readEntry(projB, seen[0].id).body, /中文/);
-store.forget(projB, seen[0].id);
-assert.equal(store.loadIndex(global).entries.length, 0);
-console.log('store: 全局层 ok');
+test('update without when/kind/tags/body keeps the old values', () => {
+  const scope = fresh('patch');
+  const first = upsert(scope, {
+    title: '回复用中文',
+    summary: '用户要求回复用中文',
+    when: '所有对话',
+    kind: 'preference',
+    tags: ['语言'],
+    body: '用中文回复。',
+  });
+  const next = upsert(scope, { id: first.record.id, title: '回复用中文', summary: '用户要求一律用中文回复' });
+  assert.equal(next.record.when, '所有对话');
+  assert.equal(next.record.kind, 'preference');
+  assert.deepEqual(next.record.tags, ['语言']);
+  assert.equal(readEntry(scope, first.record.id).body, '用中文回复。');
+  const cleared = upsert(scope, { id: first.record.id, title: '回复用中文', summary: '用户要求一律用中文回复', when: '', tags: [] });
+  assert.equal(cleared.record.when, '');
+  assert.deepEqual(cleared.record.tags, []);
+});
 
-// 建议门限：相近就不再建议；48 小时一条；草稿与正式保存同一套校验。
-assert.equal(store.suggestionGate(scope, { title: '插件市场条目规范' }).ok, false);
-const noted = store.noteSuggestion(scope, { title: '提交前先跑 lint', summary: '交付前的文案检查步骤', when: '发布前', body: '- 命令：node scripts/lint.mjs' });
-assert.ok(noted.id.startsWith('sug_'));
-assert.equal(store.suggestionGate(scope, { title: '另一条' }).ok, false);
-const kept = store.findSuggestion(scope, noted.id);
-assert.equal(kept.when, '发布前');
-assert.throws(() => store.noteSuggestion(scope, { title: '凭据草稿', summary: 'token 位置', body: 'sk-abcdefghijklmnopqrstuvwxyz' }), /凭据/);
-store.upsert(scope, { title: '提交前先跑 lint', summary: '交付前的文案检查步骤', when: '发布前' });
-const gateIndex = store.loadIndex(scope);
-gateIndex.lastSuggestedAt = new Date(Date.now() - 49 * 3600 * 1000).toISOString();
-store.saveIndex(scope, gateIndex);
-assert.equal(store.suggestionGate(scope, { title: '新的建议' }).ok, true);
-assert.equal(store.suggestionGate(scope, { title: '提交前先跑 lint 的步骤' }).ok, false);
-console.log('store: 建议门限与草稿校验 ok');
+test('similar title without id returns resolution and writes nothing', () => {
+  const scope = fresh('similar');
+  const base = upsert(scope, { title: 'npm 与 GitHub 发布凭据位置', summary: '两处凭据各在哪取', body: 'keychain 与 gh auth' });
+  const before = countOf(scope);
+  const entriesBefore = fs.readdirSync(path.join(scope.dir, 'entries')).sort();
+  const conflict = upsert(scope, { title: 'npm 与 GitHub 发布凭据在哪', summary: '两处凭据各在哪取', body: '另一条' });
+  assert.equal(conflict.needsResolution, true);
+  assert.equal(conflict.record, null);
+  assert.ok(conflict.similarList.length >= 1 && conflict.similarList.length <= 2);
+  assert.equal(conflict.similarList[0].id, base.record.id);
+  assert.equal(countOf(scope), before);
+  assert.deepEqual(fs.readdirSync(path.join(scope.dir, 'entries')).sort(), entriesBefore);
+  const distinct = upsert(scope, { title: 'npm 与 GitHub 发布凭据在哪', summary: '两处凭据各在哪取', body: '另一条', resolution: 'distinct' });
+  assert.equal(distinct.needsResolution, false);
+  assert.equal(distinct.merged, false);
+  assert.equal(countOf(scope), before + 1);
+});
 
-// 陈旧条目不展示摘要。
-const old = store.upsert(scope, { title: '很久没用到的条目', summary: '三个月没命中', body: 'x' });
-const staleIndex = store.loadIndex(scope);
-staleIndex.entries = staleIndex.entries.map((item) =>
-  item.id === old.record.id ? { ...item, lastUsed: new Date(Date.now() - 400 * 86400000).toISOString() } : item,
-);
-store.saveIndex(scope, staleIndex);
-const stale = store.loadIndex(scope).entries.find((item) => item.id === old.record.id);
-const rendered = store.renderIndex([stale]);
-assert.equal(rendered.text.includes('｜'), false);
-assert.ok(rendered.text.includes(old.record.title));
-console.log('store: 陈旧展示 ok');
+test('same title with a different when is a second entry', () => {
+  const scope = fresh('when');
+  const a = upsert(scope, { title: '跑测试', summary: '提交前跑哪条命令', when: '本地', body: 'node test' });
+  const b = upsert(scope, { title: '跑测试', summary: '提交前跑哪条命令', when: 'CI', body: 'pnpm test' });
+  assert.notEqual(a.record.id, b.record.id);
+  assert.equal(countOf(scope), 2);
+  const again = upsert(scope, { title: '跑测试', summary: '提交前跑哪条命令', when: 'CI', body: 'pnpm test --watch' });
+  assert.equal(again.merged, true);
+  assert.equal(again.record.id, b.record.id);
+});
 
-// 归档不是删除：正文与完整记录都留下来，索引只在这之后才改。
-const forgotten = store.forget(scope, first.record.id);
-assert.equal(forgotten.title, draft.title);
-assert.equal(store.loadIndex(scope).entries.some((item) => item.id === first.record.id), false);
-const archivedBody = path.join(scope.dir, 'archive', `${first.record.id}.md`);
-const archivedMeta = path.join(scope.dir, 'archive', `${first.record.id}.json`);
-assert.ok(fs.existsSync(archivedBody));
-assert.equal(JSON.parse(fs.readFileSync(archivedMeta, 'utf8')).title, draft.title);
-console.log('store: 归档保留正文与记录 ok');
+test('oversized body is rejected, old data untouched', () => {
+  const scope = fresh('oversize');
+  const big = 'x'.repeat(LIMITS.entryBytes + 1);
+  assert.throws(() => upsert(scope, { title: '太大', summary: '一条超大正文', body: big }), /超过/);
+  assert.equal(fs.existsSync(path.join(scope.dir, 'index.json')), false);
+  const first = upsert(scope, { title: '正常', summary: '一条正常正文', body: '保留我' });
+  assert.throws(() => upsert(scope, { id: first.record.id, title: '正常', summary: '一条正常正文', body: big }), /超过/);
+  assert.equal(bodyOf(scope, first.record.id), '保留我');
+  assert.equal(loadIndex(scope).entries[0].revision, 1);
+});
 
-// 索引损坏必须报错，绝不拿空库覆盖。
-fs.writeFileSync(path.join(scope.dir, 'index.json'), '{ broken');
-assert.throws(() => store.loadIndex(scope), /已损坏/);
-assert.throws(() => store.upsert(scope, { title: '新条目', summary: '不该写进去' }), /已损坏/);
-assert.equal(fs.readFileSync(path.join(scope.dir, 'index.json'), 'utf8'), '{ broken');
-fs.rmSync(path.join(scope.dir, 'index.json'));
-console.log('store: 损坏索引拒绝覆盖 ok');
+test('over-long title and summary are errors, not silent slices', () => {
+  const scope = fresh('length');
+  assert.throws(() => upsert(scope, { title: 't'.repeat(LIMITS.titleChars + 1), summary: '写得短一点' }), /标题超过/);
+  assert.throws(() => upsert(scope, { title: '长摘要', summary: 's'.repeat(LIMITS.summaryChars + 1) }), /摘要超过/);
+  assert.equal(fs.existsSync(path.join(scope.dir, 'index.json')), false);
+});
 
-// 上限：条目数与总大小都由归档维持。
-for (let i = 0; i < 240; i += 1) {
-  store.upsert(scope, { title: `条目 ${i}`, summary: `第 ${i} 条`, body: 'x' });
-}
-const trimmed = store.loadIndex(scope);
-assert.ok(trimmed.entries.length <= store.LIMITS.entries);
-assert.ok(trimmed.totalBytes <= store.LIMITS.totalBytes);
-assert.ok(fs.readdirSync(path.join(scope.dir, 'archive')).length > 0);
-console.log('store: 容量上限 ok');
+test('imperative summary and credentials are rejected', () => {
+  const scope = fresh('validate');
+  assert.throws(() => upsert(scope, { title: '回复语言', summary: '请用中文回复' }), /名词短语/);
+  assert.throws(() => upsert(scope, { title: '凭据', summary: '一个 token 的值', body: 'token = sk-abcdefghijklmnopqrst' }), /凭据/);
+  assert.equal(normalizeDraft({ title: 'a', summary: '名词短语' }).kind, 'note');
+  assert.throws(() => normalizeDraft({ title: 'a', summary: '名词短语', kind: 'guess' }), /类型只能是/);
+});
 
-fs.rmSync(home, { recursive: true, force: true });
-console.log('store: all checks passed');
+test('total bytes budget rejects instead of archiving silently', () => {
+  const scope = fresh('budget');
+  const original = LIMITS.totalBytes;
+  LIMITS.totalBytes = 600;
+  try {
+    upsert(scope, { title: '第一条', summary: '占满预算的正文', body: '记'.repeat(100) });
+    assert.throws(() => upsert(scope, { title: '第二条', summary: '再来一条就超了', body: '记'.repeat(100) }), /记忆库已满/);
+    assert.equal(countOf(scope), 1);
+  } finally {
+    LIMITS.totalBytes = original;
+  }
+});
+
+test('lock file from a dead writer is not stolen: busy instead of a guessed write', () => {
+  const scope = fresh('lock');
+  fs.mkdirSync(scope.dir, { recursive: true });
+  const lock = path.join(scope.dir, '.lock');
+  fs.writeFileSync(lock, 'dead:token');
+  const old = new Date(Date.now() - 60_000);
+  fs.utimesSync(lock, old, old);
+  const started = Date.now();
+  assert.throws(() => upsert(scope, { title: '拿不到锁', summary: '锁被别人拿着' }), /正忙/);
+  const waited = Date.now() - started;
+  assert.ok(waited >= 400 && waited < 3000, `锁等待 ${waited}ms`);
+  assert.equal(fs.existsSync(path.join(scope.dir, 'index.json')), false);
+  fs.rmSync(lock, { force: true });
+  const ok = upsert(scope, { title: '拿得到锁', summary: '锁被清掉之后' });
+  assert.equal(ok.merged, false);
+});
+
+test('search finds Chinese queries, when clauses and reports counts', () => {
+  const scope = fresh('search');
+  upsert(scope, { title: '发布顺序', summary: '发版前要按顺序做的事', body: 'a' });
+  upsert(scope, { title: '文案检查', summary: '改完界面跑一遍 lint', when: 'CI 容器里', body: 'b' });
+  const hits = search(scope, '上次发布流程是什么');
+  assert.ok(hits.length >= 1);
+  assert.equal(hits[0].title, '发布顺序');
+  assert.equal(hits[0].scope, 'project');
+  const when = search(scope, 'CI 容器');
+  assert.ok(when.some((item) => item.title === '文案检查'));
+  const rendered = renderIndex(hits);
+  assert.match(rendered.text, /^- mem_[a-z0-9]+ 发布顺序/);
+  assert.match(rendered.text, /第 1 版/);
+  assert.ok(rendered.chars <= 400);
+  assert.deepEqual(search(scope, '完全无关的主题词'), []);
+});
+
+test('archived or 90-day-stale entries render without a summary', () => {
+  const scope = fresh('stale');
+  const item = upsert(scope, { title: '旧条目', summary: '很久没用过的条目', body: 'x' });
+  const index = loadIndex(scope);
+  index.entries[0].lastUsed = new Date(Date.now() - 120 * 24 * 60 * 60 * 1000).toISOString();
+  store.saveIndex(scope, index);
+  const hits = search(scope, '旧条目');
+  assert.equal(hits.length, 1);
+  const rendered = renderIndex(hits);
+  assert.ok(!rendered.text.includes('｜'), rendered.text);
+  assert.equal(rendered.text.split('\n')[0].includes(item.record.id), true);
+});
+
+test('search bumps hits and lastUsed', () => {
+  const scope = fresh('hits');
+  const item = upsert(scope, { title: '常用条目', summary: '经常被翻出来的条目', body: 'x' });
+  search(scope, '常用条目');
+  const record = loadIndex(scope).entries.find((entry) => entry.id === item.record.id);
+  assert.equal(record.hits, 1);
+  assert.ok(Date.parse(record.lastUsed) >= Date.parse(item.record.created));
+  assert.ok(record.lastUsed.endsWith('Z'));
+});
+
+test('readEntry returns the body, and a missing body is an error', () => {
+  const scope = fresh('read');
+  const item = upsert(scope, { title: '读正文', summary: '正文要读得出来', body: '正文内容' });
+  const record = readEntry(scope, item.record.id);
+  assert.equal(record.body, '正文内容');
+  assert.notEqual(readEntry(scope, 'mem_000000000000'), {});
+  assert.equal(readEntry(scope, 'mem_deadbeef0000'), null);
+  fs.rmSync(path.join(scope.dir, 'entries', `${item.record.id}.md`));
+  assert.throws(() => readEntry(scope, item.record.id), /正文缺失/);
+});
+
+test('forget archives both body and record; undo restores the previous version', () => {
+  const scope = fresh('undo');
+  const first = upsert(scope, { title: '会改两次', summary: '需要撤销的一条', body: '第一版正文' });
+  upsert(scope, { id: first.record.id, title: '会改两次', summary: '需要撤销的一条', body: '第二版正文' });
+  const restored = undoChange(scope, first.record.id);
+  assert.equal(restored.mode, 'restored');
+  assert.equal(bodyOf(scope, first.record.id), '第一版正文');
+  assert.equal(loadIndex(scope).entries[0].revision, 3);
+  const again = undoChange(scope, first.record.id);
+  assert.equal(again.mode, 'archived');
+  assert.equal(countOf(scope), 0);
+  const files = fs.readdirSync(path.join(scope.dir, 'archive'));
+  assert.ok(files.includes(`${first.record.id}.md`));
+  assert.ok(files.includes(`${first.record.id}.json`));
+  assert.equal(fs.existsSync(path.join(scope.dir, 'entries', `${first.record.id}.md`)), false);
+  assert.equal(forget(scope, first.record.id), null);
+});
+
+test('suggestion gate, keep, replay and reject', () => {
+  const scope = fresh('candidate');
+  const gate = suggestionGate(scope, { title: '发布前跑文案检查', summary: '发版前先跑 ui 文案 lint' });
+  assert.equal(gate.ok, true);
+  const noted = noteSuggestion(scope, { title: '发布前跑文案检查', summary: '发版前先跑 ui 文案 lint', body: 'node ui-copy-lint.mjs', when: '发布前' });
+  assert.match(noted.id, /^sug_[a-z0-9]+$/);
+  assert.equal(noted.targetId, '');
+  const found = findSuggestion(scope, noted.id);
+  assert.equal(found.when, '发布前');
+  assert.equal(found.suggestionId, noted.id);
+  const kept = acceptCandidate(scope, noted.id, 'op_first');
+  assert.equal(kept.ok, true);
+  assert.equal(kept.mode, 'created');
+  assert.equal(kept.title, '发布前跑文案检查');
+  assert.equal(countOf(scope), 1);
+  assert.equal(suggestionsOf(scope).length, 0);
+  const replay = acceptCandidate(scope, noted.id, 'op_first');
+  assert.equal(replay.ok, true);
+  assert.equal(replay.replay, true);
+  assert.equal(replay.id, kept.id);
+  assert.equal(acceptCandidate(scope, noted.id, 'op_other').ok, false);
+  assert.equal(findSuggestion(scope, noted.id), null);
+  assert.equal(countOf(scope), 1);
+  const third = noteSuggestion(scope, { title: '另一条建议', summary: '用来测试 reject 的候选' });
+  const dropped = rejectCandidate(scope, third.id);
+  assert.equal(dropped.ok, true);
+  assert.equal(rejectCandidate(scope, third.id).ok, false);
+});
+
+test('suggestion without a body never clears the target body', () => {
+  const scope = fresh('candidate-update');
+  const original = upsert(scope, { title: '发布前跑文案检查', summary: '发版前先跑 ui 文案 lint', body: '保留这段正文' });
+  const gate = suggestionGate(scope, { title: '发布前跑文案检查（含全局）', summary: '发版前先跑 ui 文案 lint' });
+  assert.equal(gate.ok, true);
+  assert.equal(gate.target.id, original.record.id);
+  const noted = noteSuggestion(scope, { title: '发布前跑文案检查（含全局）', summary: '发版前先跑 ui 文案 lint', targetId: gate.target.id });
+  const kept = acceptCandidate(scope, noted.id, 'op_update');
+  assert.equal(kept.ok, true);
+  assert.equal(kept.mode, 'updated');
+  assert.equal(kept.id, original.record.id);
+  assert.equal(countOf(scope), 1);
+  assert.equal(bodyOf(scope, original.record.id), '保留这段正文');
+  assert.equal(loadIndex(scope).entries[0].title, '发布前跑文案检查（含全局）');
+  assert.deepEqual(loadIndex(scope).entries[0].aliases, ['发布前跑文案检查']);
+});
+
+test('candidate pointing at a changed entry is refused, not overwritten', () => {
+  const scope = fresh('candidate-stale');
+  const original = upsert(scope, { title: '发布前跑文案检查', summary: '发版前先跑 ui 文案 lint', body: '第一版' });
+  const noted = noteSuggestion(scope, { title: '发布前跑文案检查（含全局）', summary: '发版前先跑 ui 文案 lint', targetId: original.record.id });
+  upsert(scope, { id: original.record.id, title: '发布前跑文案检查', summary: '发版前先跑 ui 文案 lint', body: '第二版' });
+  const kept = acceptCandidate(scope, noted.id, 'op_stale');
+  assert.equal(kept.ok, false);
+  assert.match(kept.reason, /改过/);
+  assert.equal(bodyOf(scope, original.record.id), '第二版');
+});
+
+test('expired candidates are invisible and unusable', () => {
+  const scope = fresh('candidate-ttl');
+  const noted = noteSuggestion(scope, { title: '会过期的建议', summary: '还没确认就过期了' });
+  const index = loadIndex(scope);
+  index.suggestions[0].expiresAt = new Date(Date.now() - 1000).toISOString();
+  store.saveIndex(scope, index);
+  assert.equal(findSuggestion(scope, noted.id), null);
+  assert.equal(acceptCandidate(scope, noted.id, '').ok, false);
+  assert.equal(fs.existsSync(path.join(scope.dir, 'entries')), false);
+});
+
+test('candidate draft is validated like a real entry', () => {
+  const scope = fresh('candidate-bad');
+  assert.throws(() => noteSuggestion(scope, { title: '凭据候选', summary: '一个 token 的值', body: 'ghp_abcdefghijklmnopqrstuvwx' }), /凭据/);
+  assert.throws(() => noteSuggestion(scope, { title: '超大候选', summary: '正文超过单条上限', body: 'x'.repeat(LIMITS.entryBytes + 1) }), /超过/);
+  assert.equal((loadIndex(scope).suggestions || []).length, 0);
+});
+
+test('corrupt index stops reads and writes and stays on disk', () => {
+  const scope = fresh('corrupt');
+  fs.mkdirSync(scope.dir, { recursive: true });
+  const file = path.join(scope.dir, 'index.json');
+  const broken = '{"entries": [';
+  fs.writeFileSync(file, broken);
+  assert.throws(() => loadIndex(scope), /已损坏/);
+  assert.throws(() => upsert(scope, { title: '不该写', summary: '索引坏了就不能写' }), /已损坏/);
+  assert.equal(fs.readFileSync(file, 'utf8'), broken);
+  fs.writeFileSync(file, '{"entries": 3}');
+  assert.throws(() => loadIndex(scope), /结构不对/);
+});
+
+test('capacity trim moves the oldest entries into archive/', () => {
+  const scope = fresh('trim');
+  for (let i = 0; i < LIMITS.entries + 3; i += 1) {
+    upsert(scope, { title: `条目 ${i}`, summary: `第 ${i} 条压容量`, body: `body ${i}`, resolution: 'distinct' });
+  }
+  assert.equal(countOf(scope), LIMITS.entries);
+  const archived = fs.readdirSync(path.join(scope.dir, 'archive'));
+  assert.equal(archived.filter((name) => name.endsWith('.md')).length, 3);
+  assert.equal(archived.filter((name) => name.endsWith('.json')).length, 3);
+});
+
+test('projects and the global layer stay separate', () => {
+  const a = fresh('layer-a');
+  const b = fresh('layer-b');
+  upsert(a, { title: '只在 A 里', summary: '另一个项目看不到' });
+  upsert(globalScope(), { title: '全局条目', summary: '所有项目都能搜到' });
+  assert.equal(search(b, '只在 A 里').some((item) => item.title === '只在 A 里'), false);
+  const global = search(b, '全局条目');
+  assert.equal(global.length, 1);
+  assert.equal(global[0].scope, 'global');
+  const rendered = renderIndex(global);
+  assert.match(rendered.text, /^- \[全局\] mem_/);
+  const removed = forget(b, 'mem_000000000000');
+  assert.equal(removed, null);
+});
+
+// ── 会话引用 ────────────────────────────────────────────────────────────────
+test('citations keep one row per id and drop the oldest', () => {
+  const scope = fresh('cite');
+  const items = Array.from({ length: 25 }, (_, i) => ({
+    id: `mem_${String(i).padStart(12, '0')}`,
+    title: `条目 ${i}`,
+    scope: 'project',
+    revision: 1,
+  }));
+  recordCitations(scope, 'session-cite', items.slice(0, 3));
+  assert.equal(listCitations('session-cite').items.length, 3);
+  recordCitations(scope, 'session-cite', [items[1]]);
+  const deduped = listCitations('session-cite').items;
+  assert.equal(deduped.length, 3);
+  assert.equal(deduped[0].id, items[1].id);
+  recordCitations(scope, 'session-cite', items);
+  const kept = listCitations('session-cite').items;
+  assert.equal(kept.length, LIMITS.citations);
+  assert.equal(kept[0].id, items[0].id);
+});
+
+test('citations refuse a path-like session id', () => {
+  const scope = fresh('cite-bad');
+  assert.deepEqual(recordCitations(scope, '../escape', [{ id: 'mem_aaaaaaaaaaaa', title: '越界' }]), []);
+  assert.deepEqual(listCitations('../../etc/passwd').items, []);
+});
+
+test('citation body reads the entry and rejects a foreign path', () => {
+  const scope = fresh('cite-body');
+  const created = upsert(scope, { title: '引用正文', summary: '点开要看到正文', body: '正文第一行' }).record;
+  recordCitations(scope, 'session-body', [{ ...created, scope: 'project' }]);
+  const row = listCitations('session-body').items[0];
+  assert.equal(row.title, '引用正文');
+  assert.equal('path' in row, false);
+  assert.match(readCitationBody('session-body', created.id).body, /正文第一行/);
+  assert.equal(readCitationBody('session-body', 'mem_999999999999'), null);
+
+  const dir = path.join(store.memoryRoot(), 'sessions');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'session-escape.json'), JSON.stringify({ items: [{ id: 'mem_111111111111', path: '/etc/hosts' }] }));
+  assert.equal(readCitationBody('session-escape', 'mem_111111111111'), null);
+});
+
+test('old citation session files are pruned', () => {
+  const scope = fresh('cite-prune');
+  recordCitations(scope, 'session-old', [{ id: 'mem_000000000001', title: '旧的' }]);
+  const file = path.join(store.memoryRoot(), 'sessions', 'session-old.json');
+  assert.equal(fs.existsSync(file), true);
+  const past = new Date(Date.now() - LIMITS.citationTtlMs - 60_000);
+  fs.utimesSync(file, past, past);
+  recordCitations(scope, 'session-new', [{ id: 'mem_000000000002', title: '新的' }]);
+  assert.equal(fs.existsSync(file), false);
+  assert.equal(listCitations('session-new').items.length, 1);
+});
+
+for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
+console.log(`store.test.mjs: ${passed} passed`);

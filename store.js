@@ -4,22 +4,37 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 /**
- * Hard limits. They are the whole reason this plugin stays small for years:
- * nothing is ever allowed to grow without pushing the oldest entry to archive/.
+ * Hard limits. Nothing grows without either an explicit error or a bounded,
+ * oldest-first archive move — no silent truncation of what the user asked to keep.
  */
 export const LIMITS = {
   entries: 200,
   globalEntries: 40,
   entryBytes: 4096,
-  bodyChars: 3000,
+  recordBytes: 10 * 1024,
   totalBytes: 512 * 1024,
+  historyBytes: 512 * 1024,
+  stateBytes: 2 * 1024 * 1024,
   titleChars: 60,
   whenChars: 60,
   summaryChars: 60,
+  tagChars: 20,
+  tags: 5,
+  lockWaitMs: 500,
   suggestionWindowMs: 48 * 60 * 60 * 1000,
   suggestionTtlMs: 48 * 60 * 60 * 1000,
   pending: 20,
+  pendingBytes: 64 * 1024,
+  receipts: 256,
+  receiptTtlMs: 7 * 24 * 60 * 60 * 1000,
+  citations: 20,
+  citationSessions: 20,
+  citationTtlMs: 30 * 24 * 60 * 60 * 1000,
+  citationBytes: 16 * 1024,
 };
+
+/** Record types the model may pick. Anything else is a schema error, not a guess. */
+export const KINDS = ['preference', 'convention', 'procedure', 'pointer', 'pitfall', 'credential_hint', 'note'];
 
 /** Strings that mean "this is a credential", never a memory. */
 const SECRET_PATTERNS = [
@@ -61,7 +76,7 @@ function entryFile(scope, id) {
 }
 
 function emptyIndex(scope) {
-  return { version: 1, scope: scope.key, entries: [], suggestions: [] };
+  return { version: 1, scope: scope.key, entries: [], suggestions: [], receipts: [] };
 }
 
 /**
@@ -85,6 +100,7 @@ export function loadIndex(scope) {
   }
   if (!data || !Array.isArray(data.entries)) throw new Error(`记忆索引结构不对，已停止读写：${file}`);
   if (!Array.isArray(data.suggestions)) data.suggestions = [];
+  if (!Array.isArray(data.receipts)) data.receipts = [];
   return data;
 }
 
@@ -102,7 +118,12 @@ export function saveIndex(scope, index) {
   index.updated = new Date().toISOString();
   index.totalBytes = index.entries.reduce((sum, item) => sum + (item.bytes || 0), 0)
     + index.suggestions.reduce((sum, item) => sum + Buffer.byteLength(JSON.stringify(item.draft || {})), 0);
-  writeAtomic(indexFile(scope), `${JSON.stringify(index, null, 2)}\n`);
+  const text = `${JSON.stringify(index, null, 2)}\n`;
+  const bytes = Buffer.byteLength(text);
+  if (bytes > LIMITS.stateBytes) {
+    throw new Error(`记忆索引超过 ${LIMITS.stateBytes} 字节，先归档旧的再写`);
+  }
+  writeAtomic(indexFile(scope), text);
   return index;
 }
 
@@ -110,33 +131,38 @@ function sleepSync(ms) {
   try {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   } catch {
-    /* no Atomics: busy fallback below */
+    /* no Atomics: plain wait below */
   }
 }
 
 /**
- * 整个作用域一把锁：两个 DSH 进程共用全局库时，读—改—写必须串行，
- * 否则两个保存都成功、索引只剩一条。
+ * 整个作用域一把锁：两个 DSH 进程共用全局库时，读—改—写必须串行。
+ * 锁里写 ownerToken，只释放自己那把；不按 mtime 抢活进程的锁，
+ * 崩溃留下的锁要人工确认后再删，宁可 busy 也不写坏。
  */
 function withLock(scope, fn) {
   fs.mkdirSync(scope.dir, { recursive: true });
   const file = path.join(scope.dir, '.lock');
+  const token = `${process.pid}:${crypto.randomBytes(4).toString('hex')}`;
+  const deadline = Date.now() + LIMITS.lockWaitMs;
   let fd = null;
-  for (let attempt = 0; attempt < 200 && fd === null; attempt += 1) {
+  while (fd === null) {
     try {
       fd = fs.openSync(file, 'wx');
     } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      try {
-        if (Date.now() - fs.statSync(file).mtimeMs > 10_000) fs.rmSync(file, { force: true });
-      } catch {
-        /* the other process may have just released it */
+      if (error.code !== 'EEXIST') throw new Error(`记忆库加锁失败（${error.code || 'IO'}）：${file}`);
+      if (Date.now() > deadline) {
+        throw new Error(`记忆库正忙（另一个进程在写），稍后再试；若确认没有写入进程，删掉 ${file}`);
       }
-      sleepSync(5);
+      sleepSync(10);
     }
   }
-  if (fd === null) throw new Error('记忆库正被另一个进程写入，稍后再试');
   try {
+    try {
+      fs.writeSync(fd, token);
+    } catch {
+      /* token is advisory; the lock file itself is the mutex */
+    }
     return fn();
   } finally {
     try {
@@ -145,9 +171,9 @@ function withLock(scope, fn) {
       /* already closed */
     }
     try {
-      fs.rmSync(file, { force: true });
+      if (fs.readFileSync(file, 'utf8').trim() === token) fs.rmSync(file, { force: true });
     } catch {
-      /* stale lock is reclaimed by mtime */
+      /* someone else already removed it */
     }
   }
 }
@@ -173,46 +199,75 @@ export function normalizeText(value, max) {
     .slice(0, max);
 }
 
+/** 超限就报错，不 slice：写的人要自己决定删哪句，存进来的东西要完整。 */
+function textField(value, max, label) {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+  if (text.length > max) throw new Error(`${label}超过 ${max} 字，先写短些`);
+  return text;
+}
+
 export function validSummary(summary) {
-  const text = normalizeText(summary, LIMITS.summaryChars);
+  const text = String(summary ?? '').replace(/\s+/g, ' ').trim();
   if (!text) return { ok: false, reason: '摘要为空' };
+  if (text.length > LIMITS.summaryChars) return { ok: false, reason: `摘要超过 ${LIMITS.summaryChars} 字，先写短些` };
   if (IMPERATIVE.test(text)) return { ok: false, reason: '摘要必须写成名词短语，不能写成指令' };
   return { ok: true, text };
 }
 
 /**
  * 所有落盘入口共用的唯一草稿结构与校验：直接保存、提出建议、点 keep 都从这里过。
- * 凭据检查覆盖全部文本字段（正文、场景、标签也同样检查）。
+ * 凭据检查覆盖全部文本字段；正文按 UTF-8 字节检查，不做语义截断。
+ * `has` 记录调用方到底提供了哪些字段，更新时没提供的保持原值。
  */
 export function normalizeDraft(source, options = {}) {
   const draft = typeof source === 'string' ? { title: source } : source && typeof source === 'object' ? source : {};
-  const rawTitle = String(draft.title ?? '').replace(/\s+/g, ' ').trim();
-  const title = rawTitle.slice(0, LIMITS.titleChars);
+  const has = (key) => Object.prototype.hasOwnProperty.call(draft, key) && draft[key] !== undefined;
+  const title = textField(draft.title, LIMITS.titleChars, '标题');
   if (!title) throw new Error('标题为空');
-  if (rawTitle.length > LIMITS.titleChars) {
-    throw new Error(`标题超过 ${LIMITS.titleChars} 字，拆成两条或写短些`);
-  }
+  let summary;
   const rawSummary = String(draft.summary ?? '').replace(/\s+/g, ' ').trim();
-  let summary = rawSummary.slice(0, LIMITS.summaryChars);
-  if (!summary) {
-    if (options.requireSummary === false) summary = title;
-    else throw new Error('摘要为空');
-  }
   if (rawSummary) {
-    const check = validSummary(summary);
+    const check = validSummary(rawSummary);
     if (!check.ok) throw new Error(check.reason);
     summary = check.text;
+  } else if (options.requireSummary === false) {
+    summary = title;
+  } else {
+    throw new Error('摘要为空');
   }
-  const when = normalizeText(draft.when, LIMITS.whenChars);
-  const body = String(draft.body ?? '').trim().slice(0, LIMITS.bodyChars);
-  const kind = typeof draft.kind === 'string' && draft.kind ? draft.kind : 'note';
-  const tags = Array.isArray(draft.tags)
-    ? [...new Set(draft.tags.map((tag) => normalizeText(tag, 20)).filter(Boolean))].slice(0, 5)
-    : [];
+  const when = has('when') ? textField(draft.when, LIMITS.whenChars, '前置条件') : '';
+  const body = String(draft.body ?? '').trim();
+  const bodyBytes = Buffer.byteLength(body);
+  if (bodyBytes > LIMITS.entryBytes) {
+    throw new Error(`正文 ${bodyBytes} 字节，超过单条 ${LIMITS.entryBytes} 字节；先精简，别让尾部条件被截掉`);
+  }
+  const kind = has('kind') ? textField(draft.kind, 20, '类型') : 'note';
+  if (kind && !KINDS.includes(kind)) throw new Error(`类型只能是 ${KINDS.join(' / ')}`);
+  const rawTags = has('tags') ? draft.tags : [];
+  if (!Array.isArray(rawTags)) throw new Error('标签必须是数组');
+  if (rawTags.length > LIMITS.tags) throw new Error(`标签最多 ${LIMITS.tags} 个`);
+  const tags = [...new Set(rawTags.map((tag) => textField(tag, LIMITS.tagChars, '标签')).filter(Boolean))];
   const id = typeof draft.id === 'string' && /^mem_[a-z0-9]+$/.test(draft.id) ? draft.id : '';
+  if (has('id') && !id) throw new Error('id 格式不对');
   const secret = detectSecret([title, summary, when, body, tags.join(' ')].join('\n'));
   if (secret) throw new Error(`疑似凭据（${secret}），只记位置，不记值`);
-  return { id, title, summary, when, body, kind, tags };
+  return {
+    id,
+    title,
+    summary,
+    when,
+    body,
+    kind: kind || 'note',
+    tags,
+    has: {
+      title: has('title'),
+      summary: has('summary'),
+      when: has('when'),
+      body: has('body'),
+      kind: has('kind'),
+      tags: has('tags'),
+    },
+  };
 }
 
 function newId() {
@@ -223,7 +278,7 @@ function readBody(scope, id) {
   try {
     return fs.readFileSync(entryFile(scope, id), 'utf8');
   } catch (error) {
-    if (error.code === 'ENOENT') return '';
+    if (error.code === 'ENOENT') throw new Error(`记忆正文缺失：${id} 在索引里，但正文文件不在了`);
     throw new Error(`记忆正文读不出来（${error.code || 'IO'}）：${id}`);
   }
 }
@@ -232,8 +287,24 @@ function writeBody(scope, id, body) {
   writeAtomic(entryFile(scope, id), body);
 }
 
+function removeBody(scope, id) {
+  try {
+    fs.rmSync(entryFile(scope, id), { force: true });
+  } catch {
+    /* leftover body is harmless; the index no longer references it */
+  }
+}
+
 function entrySize(record, body) {
   return Buffer.byteLength([record.title, record.when, record.summary, (record.tags || []).join(','), body].join('\n'));
+}
+
+function recordSize(record) {
+  return Buffer.byteLength(JSON.stringify({ ...record, versions: [] }));
+}
+
+function activeBytes(index, skipId) {
+  return index.entries.reduce((sum, item) => (item.id === skipId ? sum : sum + (item.bytes || 0)), 0);
 }
 
 function archiveEntry(scope, index, entry) {
@@ -246,7 +317,7 @@ function archiveEntry(scope, index, entry) {
   index.entries = index.entries.filter((item) => item.id !== entry.id);
 }
 
-/** Trim never drops a record it could not archive: a failed move keeps the entry. */
+/** Trim by count only: an entry that would break the byte budget is rejected at write time. */
 export function trimIndex(scope, index) {
   const rank = (item) => item.lastUsed || item.updated || item.created || '';
   const cap = scope.key === 'global' ? LIMITS.globalEntries : LIMITS.entries;
@@ -254,14 +325,6 @@ export function trimIndex(scope, index) {
     const victim = [...index.entries].sort((a, b) => rank(a).localeCompare(rank(b)))[0];
     if (!victim) break;
     archiveEntry(scope, index, victim);
-  }
-  let total = index.entries.reduce((sum, item) => sum + (item.bytes || 0), 0);
-  while (total > LIMITS.totalBytes) {
-    const victim = [...index.entries].sort((a, b) => rank(a).localeCompare(rank(b)))[0];
-    if (!victim) break;
-    const size = victim.bytes || 0;
-    archiveEntry(scope, index, victim);
-    total -= size;
   }
 }
 
@@ -286,7 +349,7 @@ export function similarity(a, b) {
 
 /**
  * 身份只由「标题 / 用过的旧标题 + 前置条件」决定，相似度不授权覆盖。
- * 模糊相似只用来提示候选（similar），不会把两条不同事实并成一条。
+ * 精确同名同条件才算同一条；相近只作为候选返回，让调用方决定。
  */
 export function resolveTarget(entries, draft, whenArg) {
   const title = typeof draft === 'string' ? normalizeText(draft, LIMITS.titleChars) : draft.title;
@@ -300,147 +363,178 @@ export function resolveTarget(entries, draft, whenArg) {
   return null;
 }
 
-/** 没有合并时，把最接近的那条报出来：看得到，才有可能纠正。 */
-export function nearestEntry(entries, title, summary) {
-  let best = null;
+/** 相近线只用于「提示 / 候选」，与合并无关。 */
+export const MERGE = { near: 0.3 };
+
+/** 最多两条最接近的条目：看得到具体 id 和标题，才有可能选对。 */
+export function similarEntries(entries, title, summary, limit = 2) {
+  const rows = [];
   for (const item of entries) {
     const names = [item.title, ...(item.aliases || [])];
     const titleScore = Math.max(0, ...names.map((name) => similarity(name, title)));
     const summaryScore = similarity(item.summary, summary);
     const score = Math.max(titleScore, summaryScore);
-    if (score >= MERGE.near && (!best || score > best.score)) {
-      best = { id: item.id, title: item.title, score };
-    }
+    if (score >= MERGE.near) rows.push({ id: item.id, title: item.title, summary: item.summary, when: item.when || '', score });
   }
-  return best;
+  rows.sort((a, b) => b.score - a.score);
+  return rows.slice(0, limit);
 }
 
-/** 相近线只用于「提示」，与合并无关。 */
-export const MERGE = { near: 0.3 };
-
-function keyOf(line) {
-  const match = /^\s*[-*]\s*([^：:]{1,20})[：:]/.exec(line);
-  return match ? match[1].trim() : null;
+/** 没有合并时，把最接近的那条报出来：看得到，才有可能纠正。 */
+export function nearestEntry(entries, title, summary) {
+  return similarEntries(entries, title, summary, 1)[0] || null;
 }
 
-function splitSections(body) {
-  const blocks = [];
-  let current = { heading: '', lines: [] };
-  for (const line of String(body || '').split('\n')) {
-    if (/^#{1,6}\s+/.test(line)) {
-      if (current.heading || current.lines.length > 0) blocks.push(current);
-      current = { heading: line.trim(), lines: [] };
-      continue;
-    }
-    current.lines.push(line);
-  }
-  if (current.heading || current.lines.length > 0) blocks.push(current);
-  return blocks;
-}
-
-/**
- * 合并只做增添，且同名键只在同一个 Markdown 章节内覆盖：
- * `## 前端` 的端口和 `## 后端` 的端口不是同一件事。
- */
-export function mergeBody(oldBody, incoming) {
-  const oldSections = splitSections(oldBody);
-  const newSections = splitSections(incoming);
-  const seen = new Set();
-  for (const section of newSections) {
-    const target = oldSections.find((item) => item.heading === section.heading);
-    const bucket = target ? target.lines : [];
-    for (const line of section.lines) {
-      const plain = line.replace(/\s+/g, ' ').trim();
-      if (!plain) continue;
-      const key = keyOf(plain);
-      if (key) {
-        const at = bucket.findIndex((item) => keyOf(item.replace(/\s+/g, ' ').trim()) === key);
-        if (at >= 0) bucket[at] = plain;
-        else bucket.push(plain);
-      } else if (!bucket.some((item) => item.replace(/\s+/g, ' ').trim() === plain)) {
-        bucket.push(plain);
-      }
-    }
-    if (!target) oldSections.push({ heading: section.heading, lines: [...bucket] });
-    seen.add(section.heading);
-  }
-  const lines = [];
-  for (const section of oldSections) {
-    if (section.heading) lines.push(section.heading);
-    for (const line of section.lines) if (String(line).trim()) lines.push(line);
-  }
-  return lines.join('\n').slice(0, LIMITS.bodyChars);
-}
-
+/** 旧版本整段保留，字段齐全，恢复时可以连标题与条件一起还原。 */
 function snapshot(record, body) {
   if (!body) return record.versions || [];
-  const versions = [...(record.versions || []), { at: record.updated || record.created || new Date().toISOString(), body: body.slice(0, 1500) }];
-  return versions.slice(-2);
+  const version = {
+    at: record.updated || record.created || new Date().toISOString(),
+    title: record.title,
+    summary: record.summary,
+    when: record.when || '',
+    kind: record.kind || 'note',
+    tags: [...(record.tags || [])],
+    body,
+  };
+  let kept = [...(record.versions || []), version].slice(-2);
+  while (kept.length > 1 && kept.reduce((sum, item) => sum + Buffer.byteLength(item.body), 0) > LIMITS.historyBytes) {
+    kept = kept.slice(1);
+  }
+  return kept;
 }
 
 /**
- * 保存。带 id 就是明确更新那条；不带 id 时只认标题 / 旧标题 + 同一前置条件。
- * 相近但不同名不合并，改在 similar 里报候选 id，让调用方决定用 id 更新。
+ * 一次写入的纯业务部分：校验、身份、字节预算、版本。不改盘（正文写入由调用方在同一把锁里做）。
+ */
+function applyDraft(scope, index, source, now) {
+  const draft = normalizeDraft(source);
+  const distinct = source && source.resolution === 'distinct';
+  let record = draft.id ? index.entries.find((item) => item.id === draft.id) : null;
+  if (draft.id && !record) throw new Error('没有这条记忆，改用新增');
+  let mergedFrom = null;
+  let similarList = [];
+  if (!record) {
+    const hit = resolveTarget(index.entries, draft);
+    if (hit) {
+      record = hit.target;
+      mergedFrom = hit.target.title === draft.title ? null : hit.target.title;
+    } else {
+      similarList = similarEntries(index.entries, draft.title, draft.summary, 2);
+      /** 同名不同前置条件是用户明确表达的另一条，不走确认；只有换个说法的相近标题才拦。 */
+      const sameName = index.entries.some((item) => [item.title, ...(item.aliases || [])]
+        .some((name) => String(name || '').toLowerCase() === draft.title.toLowerCase()));
+      if (similarList.length > 0 && !distinct && !sameName) {
+        return { needsResolution: true, similarList, similar: similarList[0], draft, record: null, merged: false, previousBody: null };
+      }
+    }
+  }
+  if (record) {
+    const oldBody = readBody(scope, record.id);
+    const next = {
+      title: draft.title,
+      summary: draft.summary,
+      when: draft.has.when ? draft.when : record.when || '',
+      kind: draft.has.kind ? draft.kind || 'note' : record.kind || 'note',
+      tags: draft.has.tags ? draft.tags : record.tags || [],
+      body: draft.has.body ? draft.body : oldBody,
+    };
+    const sameTags = JSON.stringify(next.tags) === JSON.stringify(record.tags || []);
+    const noop = next.title === record.title && next.summary === record.summary
+      && next.when === (record.when || '') && next.kind === (record.kind || 'note')
+      && sameTags && next.body === oldBody;
+    if (noop) {
+      return { record, merged: true, mergedFrom: null, similar: null, similarList, draft, noop: true, previousBody: oldBody };
+    }
+    const versions = snapshot(record, oldBody);
+    const titles = [...new Set([...(record.aliases || []), record.title])].slice(-5);
+    const nextRecord = {
+      ...record,
+      ...next,
+      aliases: titles,
+      versions,
+      revision: (record.revision || 1) + 1,
+      updated: now,
+      lastUsed: now,
+      merges: (record.merges || 0) + 1,
+      status: 'active',
+      source: record.source || (source && source.source) || 'user_explicit',
+    };
+    nextRecord.bytes = entrySize(nextRecord, next.body);
+    assertFits(index, nextRecord);
+    writeBody(scope, record.id, next.body);
+    Object.assign(record, nextRecord);
+    return { record, merged: true, mergedFrom, similar: null, similarList, draft, noop: false, previousBody: oldBody };
+  }
+  const created = {
+    id: newId(),
+    title: draft.title,
+    summary: draft.summary,
+    when: draft.when,
+    kind: draft.kind,
+    tags: draft.tags,
+    body: draft.body,
+    aliases: [],
+    created: now,
+    updated: now,
+    lastUsed: now,
+    revision: 1,
+    status: 'active',
+    source: source && source.source === 'observed' ? 'observed' : 'user_explicit',
+    hits: 0,
+    merges: 0,
+    versions: [],
+    bytes: 0,
+  };
+  created.bytes = entrySize(created, created.body);
+  assertFits(index, created);
+  writeBody(scope, created.id, created.body);
+  index.entries.push(created);
+  trimIndex(scope, index);
+  return { record: created, merged: false, mergedFrom: null, similar: similarList[0] || null, similarList, draft, noop: false, previousBody: null };
+}
+
+/** 单条、记录序列化、整库三档预算：新增与更新走同一套。 */
+function assertFits(index, record) {
+  if (record.bytes > LIMITS.entryBytes) {
+    throw new Error(`这一条 ${record.bytes} 字节，超过单条 ${LIMITS.entryBytes} 字节；先精简正文`);
+  }
+  const size = recordSize(record);
+  if (size > LIMITS.recordBytes) {
+    throw new Error(`这一条序列化后 ${size} 字节，超过 ${LIMITS.recordBytes} 字节；减少字段或换更短的标签`);
+  }
+  const total = activeBytes(index, record.id) + record.bytes;
+  if (total > LIMITS.totalBytes) {
+    throw new Error(`记忆库已满：这一条会让总正文到 ${total} 字节，超过 ${LIMITS.totalBytes} 字节；先归档旧的`);
+  }
+}
+
+/**
+ * 保存。带 id 就是明确更新那条（没给的字段保持原值）；不带 id 时只认标题 / 旧标题 + 同一前置条件。
+ * 文本相近不授权覆盖，也不先写一条再更新：返回 needsResolution，调用方决定 distinct 还是按 id 更新。
  */
 export function upsert(scope, source) {
   return withLock(scope, () => {
-    const draft = normalizeDraft(source);
     const index = loadIndex(scope);
     const now = new Date().toISOString();
-    let record = draft.id ? index.entries.find((item) => item.id === draft.id) : null;
-    if (draft.id && !record) throw new Error('没有这条记忆，改用新增');
-    let mergedFrom = null;
-    if (!record) {
-      const hit = resolveTarget(index.entries, draft);
-      if (hit) {
-        record = hit.target;
-        mergedFrom = hit.target.title === draft.title ? null : hit.target.title;
-      }
-    }
-    const similar = record ? null : nearestEntry(index.entries, draft.title, draft.summary);
-    if (record) {
-      const oldBody = readBody(scope, record.id);
-      const body = draft.body ? mergeBody(oldBody, draft.body) : oldBody;
-      record.versions = snapshot(record, oldBody);
-      if (draft.title !== record.title) {
-        record.aliases = [...new Set([...(record.aliases || []), record.title])].slice(-5);
-        record.title = draft.title;
-      }
-      record.summary = draft.summary;
-      record.when = draft.when;
-      record.kind = draft.kind || record.kind;
-      record.tags = draft.tags.length > 0 ? draft.tags : record.tags || [];
-      record.updated = now;
-      record.lastUsed = now;
-      record.merges = (record.merges || 0) + 1;
-      record.hits = record.hits || 0;
-      writeBody(scope, record.id, body);
-      record.bytes = entrySize(record, body);
+    const result = applyDraft(scope, index, source, now);
+    if (!('needsResolution' in result)) result.needsResolution = false;
+    if (result.needsResolution) return result;
+    try {
       saveIndex(scope, index);
-      return { record, merged: true, mergedFrom, similar };
+    } catch (error) {
+      if (result.record && result.previousBody !== null) {
+        try {
+          writeBody(scope, result.record.id, result.previousBody);
+        } catch {
+          /* keep the original error */
+        }
+      } else if (result.record) {
+        removeBody(scope, result.record.id);
+      }
+      throw error;
     }
-    const created = {
-      id: newId(),
-      title: draft.title,
-      when: draft.when,
-      summary: draft.summary,
-      kind: draft.kind,
-      tags: draft.tags,
-      aliases: [],
-      created: now,
-      updated: now,
-      lastUsed: now,
-      hits: 0,
-      merges: 0,
-      versions: [],
-      bytes: 0,
-    };
-    writeBody(scope, created.id, draft.body);
-    created.bytes = entrySize(created, draft.body);
-    index.entries.push(created);
-    trimIndex(scope, index);
-    saveIndex(scope, index);
-    return { record: created, merged: false, mergedFrom: null, similar };
+    return result;
   });
 }
 
@@ -527,10 +621,60 @@ export function forget(scope, id) {
       if (!record) continue;
       archiveEntry(source, index, record);
       saveIndex(source, index);
-      return { id: record.id, title: record.title };
+      return { id: record.id, title: record.title, mode: 'archive' };
     }
     return null;
   });
+}
+
+/** 撤销一次修改：有旧版本就整条还原成新 revision；没有旧版本（新建的）就归档。 */
+export function undoChange(scope, id) {
+  return withLocks([scope, globalScope()], () => {
+    for (const source of [scope, globalScope()]) {
+      const index = loadIndex(source);
+      const record = index.entries.find((item) => item.id === id);
+      if (!record) continue;
+      const versions = record.versions || [];
+      const last = versions[versions.length - 1];
+      if (!last) {
+        archiveEntry(source, index, record);
+        saveIndex(source, index);
+        return { id: record.id, title: record.title, mode: 'archived' };
+      }
+      const currentBody = readBody(source, record.id);
+      const restored = {
+        ...record,
+        title: last.title || record.title,
+        summary: last.summary || record.summary,
+        when: last.when || '',
+        kind: last.kind || record.kind,
+        tags: Array.isArray(last.tags) ? last.tags : record.tags,
+        versions: versions.slice(0, -1),
+        revision: (record.revision || 1) + 1,
+        updated: new Date().toISOString(),
+      };
+      writeBody(source, record.id, last.body);
+      Object.assign(record, restored);
+      record.bytes = entrySize(record, last.body);
+      try {
+        saveIndex(source, index);
+      } catch (error) {
+        writeBody(source, record.id, currentBody);
+        throw error;
+      }
+      return { id: record.id, title: record.title, mode: 'restored' };
+    }
+    return null;
+  });
+}
+
+/** 按 id 在项目层与全局层里找位置，不靠文案猜作用域。 */
+export function locate(scope, id) {
+  for (const source of [scope, globalScope()]) {
+    const record = loadIndex(source).entries.find((item) => item.id === id);
+    if (record) return { scope: source, record };
+  }
+  return null;
 }
 
 function pruneSuggestions(index) {
@@ -541,7 +685,19 @@ function pruneSuggestions(index) {
   });
 }
 
-/** 建议门限：已有同一条或相近的一条就不要再建议；48 小时内只建议一条。 */
+function pruneReceipts(index) {
+  const now = Date.now();
+  index.receipts = (index.receipts || []).filter((item) => {
+    const at = Date.parse(item.at || '');
+    return Number.isFinite(at) && now - at < LIMITS.receiptTtlMs;
+  }).slice(-LIMITS.receipts);
+  return index.receipts;
+}
+
+/**
+ * 建议门限：已有同一条就不再建议；相近的另一条可以建议，但必须带着 targetId
+ * 走候选确认，不能直接改正式条目。
+ */
 export function suggestionGate(scope, source) {
   return withLock(scope, () => {
     const index = loadIndex(scope);
@@ -551,9 +707,9 @@ export function suggestionGate(scope, source) {
     const summary = normalizeText(source?.summary, LIMITS.summaryChars);
     const when = normalizeText(source?.when, LIMITS.whenChars);
     const hit = resolveTarget(index.entries, { title, summary, when });
-    if (hit) return { ok: false, reason: `已有「${hit.target.title}」，用 memory_save 更新它` };
-    const near = nearestEntry(index.entries, title, summary);
-    if (near) return { ok: false, reason: `已有相近条目「${near.title}」，改用 memory_save 更新它` };
+    if (hit) return { ok: false, reason: `已有「${hit.target.title}」，这次不重复建议` };
+    const near = similarEntries(index.entries, title, summary, 1)[0];
+    if (near) return { ok: true, target: { id: near.id, title: near.title, revision: near.revision || 1 } };
     const last = Date.parse(index.lastSuggestedAt || '');
     if (Number.isFinite(last) && Date.now() - last < LIMITS.suggestionWindowMs) {
       return { ok: false, reason: '48 小时内已经建议过一条' };
@@ -562,39 +718,123 @@ export function suggestionGate(scope, source) {
   });
 }
 
-/** 待确认草稿与正式条目走同一个校验器：凭据、大小、必填都在这里拦住，才允许落盘。 */
+/**
+ * 待确认草稿与正式条目走同一个校验器：凭据、大小、必填都在这里拦住。
+ * 草稿在确认前就落盘（本地待确认区），所以撤回/过期都要能查到。
+ */
 export function noteSuggestion(scope, source, decision = 'asked') {
   return withLock(scope, () => {
     const draft = normalizeDraft(source, { requireSummary: false });
     const index = loadIndex(scope);
     pruneSuggestions(index);
     const at = new Date();
-    index.suggestions = [
-      ...(index.suggestions || []),
-      {
-        id: `sug_${crypto.randomBytes(4).toString('hex')}`,
+    const targetId = typeof source?.targetId === 'string' ? source.targetId : '';
+    const target = targetId ? index.entries.find((item) => item.id === targetId) : null;
+    if (targetId && !target) throw new Error('候选指向的条目不存在');
+    const record = {
+      id: `sug_${crypto.randomBytes(4).toString('hex')}`,
+      title: draft.title,
+      at: at.toISOString(),
+      expiresAt: new Date(at.getTime() + LIMITS.suggestionTtlMs).toISOString(),
+      decision,
+      draft: {
         title: draft.title,
-        at: at.toISOString(),
-        expiresAt: new Date(at.getTime() + LIMITS.suggestionTtlMs).toISOString(),
-        decision,
-        draft: { title: draft.title, summary: draft.summary, when: draft.when, body: draft.body, kind: draft.kind, tags: draft.tags },
+        summary: draft.summary,
+        when: draft.when,
+        body: draft.body,
+        kind: draft.kind,
+        tags: draft.tags,
+        targetId: target ? target.id : '',
+        targetRevision: target ? target.revision || 1 : 0,
       },
-    ].slice(-LIMITS.pending);
+    };
+    const next = [...(index.suggestions || []), record];
+    const bytes = next.reduce((sum, item) => sum + Buffer.byteLength(JSON.stringify(item.draft || {})), 0);
+    if (bytes > LIMITS.pendingBytes || next.length > LIMITS.pending) {
+      throw new Error('待确认的候选已满，先处理旧的');
+    }
+    index.suggestions = next;
     index.lastSuggestedAt = at.toISOString();
     saveIndex(scope, index);
-    return { id: index.suggestions[index.suggestions.length - 1].id, title: draft.title, expiresAt: index.suggestions[index.suggestions.length - 1].expiresAt };
+    return {
+      id: record.id,
+      title: draft.title,
+      expiresAt: record.expiresAt,
+      targetId: record.draft.targetId,
+      targetTitle: target ? target.title : '',
+    };
   });
 }
 
-/** 待保留的那条建议：按 id 或标题取，过期/已存下的不再返回。 */
+/** 待保留的那条建议：按 id 取，过期/已存下的不再返回。 */
 export function findSuggestion(scope, key) {
+  const index = loadIndex(scope);
+  pruneSuggestions(index);
+  const item = (index.suggestions || []).find((entry) => entry.id === key && entry.decision === 'asked');
+  if (!item) return null;
+  return { ...item.draft, suggestionId: item.id };
+}
+
+/**
+ * 点「保留」：在同一个锁窗口里按 candidateId 确认、消费候选、写回执。
+ * 已消费的候选不再写第二条；旧的 keep 重放返回原回执。
+ */
+export function acceptCandidate(scope, key, operationId = '') {
   return withLock(scope, () => {
     const index = loadIndex(scope);
     pruneSuggestions(index);
-    const text = normalizeText(key, LIMITS.titleChars);
-    const item = (index.suggestions || []).find((entry) => (entry.id === key || entry.title === text) && entry.decision === 'asked');
-    if (!item) return null;
-    return { ...item.draft, suggestionId: item.id };
+    pruneReceipts(index);
+    const replay = (index.receipts || []).find((item) => (operationId && item.operationId === operationId)
+      || (!operationId && item.candidateId === key && item.status === 'accepted'));
+    if (replay) return { ok: true, replay: true, id: replay.entryId || '', title: replay.title || '', reason: '这条候选已经处理过' };
+    const item = (index.suggestions || []).find((entry) => entry.id === key && entry.decision === 'asked');
+    if (!item) return { ok: false, reason: '候选不存在或已过期' };
+    const draft = item.draft || {};
+    const target = draft.targetId ? index.entries.find((entry) => entry.id === draft.targetId) : null;
+    if (draft.targetId && !target) return { ok: false, reason: '候选要更新的那条记忆已不在了' };
+    if (target && draft.targetRevision && (target.revision || 1) !== draft.targetRevision) {
+      return { ok: false, reason: '那条记忆在你确认前改过了，重新建议一次' };
+    }
+    /** 只把建议里真有的字段交给写入：空正文不覆盖原正文。 */
+    const source = {
+      title: draft.title,
+      summary: draft.summary,
+      when: draft.when || '',
+      kind: draft.kind || 'note',
+      tags: Array.isArray(draft.tags) ? draft.tags : [],
+    };
+    if (draft.body) source.body = draft.body;
+    if (target) source.id = target.id;
+    const now = new Date().toISOString();
+    try {
+      const result = applyDraft(scope, index, source, now);
+      if (result.needsResolution) return { ok: false, reason: '候选与已有条目相近，需要确认', similar: result.similarList };
+      index.suggestions = (index.suggestions || []).filter((entry) => entry.id !== item.id);
+      index.receipts = [...(index.receipts || []), {
+        operationId: operationId || `op_${crypto.randomBytes(6).toString('hex')}`,
+        candidateId: item.id,
+        entryId: result.record.id,
+        title: result.record.title,
+        status: 'accepted',
+        at: now,
+      }].slice(-LIMITS.receipts);
+      saveIndex(scope, index);
+      return { ok: true, replay: false, id: result.record.id, title: result.record.title, mode: result.merged ? 'updated' : 'created' };
+    } catch (error) {
+      throw error;
+    }
+  });
+}
+
+/** 拒绝一个候选：只消费这条草稿，不产生抑制规则。 */
+export function rejectCandidate(scope, key) {
+  return withLock(scope, () => {
+    const index = loadIndex(scope);
+    const before = (index.suggestions || []).length;
+    index.suggestions = (index.suggestions || []).filter((entry) => entry.id !== key);
+    if (index.suggestions.length === before) return { ok: false, reason: '候选不存在或已过期' };
+    saveIndex(scope, index);
+    return { ok: true };
   });
 }
 
@@ -607,11 +847,135 @@ export function renderIndex(entries, budget = 400) {
   for (const item of entries) {
     const last = Date.parse(item.lastUsed || item.updated || item.created || '') || now;
     const stale = now - last > staleMs;
-    const head = `${item.scope === 'global' ? '[全局] ' : ''}${item.id} ${item.title}${item.when ? `（${item.when}）` : ''}`;
+    const head = `${item.scope === 'global' ? '[全局] ' : ''}${item.id} ${item.title}${item.when ? `（${item.when}）` : ''} · 第 ${item.revision || 1} 版`;
     const line = stale ? `- ${head}` : `- ${head}｜${item.summary}`;
     if (used + line.length > budget) break;
     lines.push(line);
     used += line.length + 1;
   }
   return { text: lines.join('\n'), chars: used };
+}
+
+/**
+ * 会话引用：界面「N 条记忆引用」用的派生缓存，不是记忆本体。
+ * 每个会话一个小文件，坏了就整份丢掉重来；记忆本身不受影响。
+ */
+const SESSION_ID = /^[A-Za-z0-9._-]{1,80}$/;
+
+function sessionsDir() {
+  return path.join(memoryRoot(), 'sessions');
+}
+
+function citationFile(sessionId) {
+  return path.join(sessionsDir(), `${sessionId}.json`);
+}
+
+function readSessionFile(sessionId) {
+  if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return null;
+  try {
+    const data = JSON.parse(fs.readFileSync(citationFile(sessionId), 'utf8'));
+    return data && Array.isArray(data.items) ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 只留最近用过的若干个会话文件，旧的按上限与时间清掉。 */
+function pruneSessions(keep) {
+  const dir = sessionsDir();
+  let names;
+  try {
+    names = fs.readdirSync(dir).filter((name) => name.endsWith('.json'));
+  } catch {
+    return;
+  }
+  const rows = names.map((name) => {
+    const file = path.join(dir, name);
+    let time = 0;
+    try {
+      time = fs.statSync(file).mtimeMs;
+    } catch {
+      /* gone already */
+    }
+    return { file, name, time };
+  }).sort((a, b) => b.time - a.time);
+  const now = Date.now();
+  rows.forEach((row, index) => {
+    if (row.name === `${keep}.json`) return;
+    if (index < LIMITS.citationSessions && now - row.time <= LIMITS.citationTtlMs) return;
+    try {
+      fs.rmSync(row.file, { force: true });
+    } catch {
+      /* best effort */
+    }
+  });
+}
+
+/**
+ * 记下「这些条目这次真的被读进了上下文」。同一 id 只留一条，最近的排前面。
+ * 参数里的 scope 是读取时用的项目作用域；正文路径按条目自己的层算。
+ */
+export function recordCitations(scope, sessionId, items) {
+  if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return [];
+  const incoming = (Array.isArray(items) ? items : []).filter((item) => item && /^mem_[a-z0-9]{6,}$/.test(String(item.id || '')));
+  const previous = readSessionFile(sessionId);
+  const rows = new Map();
+  const now = new Date().toISOString();
+  for (const item of incoming) {
+    const source = item.scope === 'global' ? globalScope() : scope;
+    rows.set(item.id, {
+      id: item.id,
+      title: String(item.title || '').slice(0, LIMITS.titleChars),
+      scope: item.scope === 'global' ? 'global' : 'project',
+      revision: Number(item.revision) || 1,
+      when: String(item.when || '').slice(0, LIMITS.whenChars),
+      path: entryFile(source, item.id),
+      at: now,
+    });
+  }
+  for (const item of (previous && previous.items) || []) {
+    if (!item || typeof item.id !== 'string' || rows.has(item.id)) continue;
+    rows.set(item.id, item);
+  }
+  let next = [...rows.values()];
+  while (next.length > 1 && Buffer.byteLength(JSON.stringify(next)) > LIMITS.citationBytes) next = next.slice(0, -1);
+  next = next.slice(0, LIMITS.citations);
+  const text = `${JSON.stringify({ sessionId, cwd: scope.cwd, updatedAt: now, items: next })}\n`;
+  try {
+    writeAtomic(citationFile(sessionId), text);
+  } catch {
+    return next;
+  }
+  pruneSessions(sessionId);
+  return next;
+}
+
+/** 界面要的那几列：不返回正文，也不返回磁盘路径。 */
+export function listCitations(sessionId) {
+  const data = readSessionFile(sessionId);
+  const items = ((data && data.items) || []).map((item) => ({
+    id: item.id,
+    title: item.title,
+    scope: item.scope,
+    revision: item.revision,
+    when: item.when || '',
+    at: item.at,
+  }));
+  return { items, updatedAt: (data && data.updatedAt) || '' };
+}
+
+/** 点开一条时读正文；只认自己记下的路径，且必须落在记忆根目录里。 */
+export function readCitationBody(sessionId, id) {
+  const data = readSessionFile(sessionId);
+  const item = ((data && data.items) || []).find((row) => row && row.id === id);
+  if (!item || typeof item.path !== 'string') return null;
+  const abs = path.resolve(item.path);
+  if (!abs.startsWith(memoryRoot() + path.sep)) return null;
+  let body;
+  try {
+    body = fs.readFileSync(abs, 'utf8');
+  } catch {
+    return null;
+  }
+  return { ...item, body: body.slice(0, LIMITS.entryBytes) };
 }

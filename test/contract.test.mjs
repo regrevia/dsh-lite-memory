@@ -2,145 +2,205 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Readable } from 'node:stream';
+import { EventEmitter } from 'node:events';
 
-const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-'));
-process.env.DSH_HOME = home;
-
+process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-'));
 const { apply } = await import('../index.js');
 const store = await import('../store.js');
 
-const cwd = '/tmp/contract-project';
-const tools = {};
+const ORIGIN = 'http://127.0.0.1:60402';
+const defs = new Map();
 let route = null;
-const webServer = {
-  getOrigin: () => 'http://127.0.0.1:52345',
-  register: ({ path: prefix, handler }) => {
-    assert.equal(prefix, '/lite-memory');
-    route = handler;
-    return () => {};
-  },
-};
+
+const webServer = { getOrigin: () => ORIGIN, register: (entry) => { route = entry; return () => {}; } };
+const effect = (fn) => { const dispose = fn(); return typeof dispose === 'function' ? dispose : () => {}; };
 const ctx = {
-  tools: {
-    register(definition) {
-      tools[definition.name] = definition;
-      return () => {};
-    },
-  },
-  effect(fn) {
-    const dispose = fn();
-    return typeof dispose === 'function' ? dispose : () => {};
-  },
-  inject(deps, callback) {
-    if (deps.includes('webServer')) callback({ webServer, effect: (fn) => fn() });
-  },
+  tools: { register: (def) => { defs.set(def.name, def); return () => {}; } },
+  effect,
+  inject: (deps, callback) => { if (deps.includes('webServer')) callback({ webServer, effect }); return () => {}; },
 };
 apply(ctx);
 
-const call = (name, args, execution = { agent: { cwd } }) => tools[name].execute(args, execution);
+const cwd = path.join(os.tmpdir(), 'lite-memory-contract-project');
+fs.mkdirSync(cwd, { recursive: true });
 
-// 工具契约：五个工具都在，render 拿得到 (args, value)。
-assert.deepEqual(Object.keys(tools).sort(), ['memory_forget', 'memory_read', 'memory_save', 'memory_search', 'memory_suggest']);
-assert.equal(tools.memory_save.parameters.properties.scope.enum.includes('global'), true);
-assert.equal(tools.memory_save.parameters.properties.id.type, 'string');
-assert.equal(tools.memory_suggest.parameters.properties.scope, undefined);
+const exec = (name, args) => defs.get(name).execute(args, { agent: { cwd, session: { id: 'session-contract', header: { cwd } } } });
+const render = (name, args, value) => defs.get(name).output.render(args, value)[0].text;
 
-// 保存 → 结果行来自真实返回值，而不是入参。
-const saved = await call('memory_save', { title: '发布顺序', summary: '发版前要按顺序做的事', body: '- 顺序：tag → push → publish' });
-assert.equal(saved.merged, false);
-assert.equal(saved.scope, 'project');
-const savedBlock = tools.memory_save.output.render({ title: '发布顺序' }, saved);
-assert.equal(Array.isArray(savedBlock), true);
-assert.equal(savedBlock[0].type, 'text');
-assert.match(savedBlock[0].text, /^memory · saved "发布顺序" — 发版前要按顺序做的事$/);
-assert.equal(savedBlock[0].text.includes('undefined'), false);
-
-// 检索：命中数、字数、前缀都来自真实条目。
-const found = await call('memory_search', { query: '上次发布顺序是什么' });
-assert.equal(found.count, 1);
-assert.ok(found.chars > 0);
-const searchBlock = tools.memory_search.output.render({ query: 'x' }, found);
-assert.match(searchBlock[0].text, /^memory · 命中 1 条 · 引用 \d+ 字\n- mem_/);
-assert.equal(searchBlock[0].text.includes('undefined'), false);
-const missBlock = tools.memory_search.output.render({}, { count: 0, chars: 0, text: '' });
-assert.equal(missBlock[0].text, 'memory · 没有命中');
-
-// 读正文：官方契约要 [{ type:'text', text: body }]，不是字符串数组。
-const detail = await call('memory_read', { id: saved.id });
-assert.match(detail.body, /publish/);
-const readBlock = tools.memory_read.output.render({ id: saved.id }, detail);
-assert.equal(readBlock.length, 1);
-assert.equal(typeof readBlock[0].text, 'string');
-assert.match(readBlock[0].text, /publish/);
-assert.match(readBlock[0].text, /「发布顺序」/);
-
-// 同一个标题再存：合并，入口不变。
-const again = await call('memory_save', { title: '发布顺序', summary: '发版前要按顺序做的事', body: '- 例外：只改文档时不发版' });
-assert.equal(again.merged, true);
-assert.equal(again.id, saved.id);
-assert.match(tools.memory_save.output.render({}, again)[0].text, /^memory · merged "发布顺序"/);
-
-// 建议 → 按钮保留：草稿里的 when 一路带进正式条目。
-const suggested = await call('memory_suggest', { title: '发布前跑文案检查', summary: '交付前的文案检查步骤', when: '发布前', body: '- 命令：node scripts/lint.mjs' });
-assert.equal(suggested.asked, true);
-assert.match(tools.memory_suggest.output.render({}, suggested)[0].text, /^memory · suggested "发布前跑文案检查"$/);
-const kept = await post('/lite-memory/keep', { op: 'keep', title: '发布前跑文案检查', cwd });
-assert.equal(kept.status, 200);
-assert.equal(kept.body.ok, true);
-const scope = store.scopeOf(cwd);
-const keptEntry = store.loadIndex(scope).entries.find((item) => item.title === '发布前跑文案检查');
-assert.ok(keptEntry);
-assert.equal(keptEntry.when, '发布前');
-assert.match(store.readEntry(scope, keptEntry.id).body, /lint\.mjs/);
-
-// 点「✕」：按完整标题归档，进 archive/，记录也留着。
-const dropped = await post('/lite-memory/undo', { op: 'undo', title: '发布前跑文案检查', cwd });
-assert.equal(dropped.status, 200);
-assert.equal(store.loadIndex(scope).entries.some((item) => item.title === '发布前跑文案检查'), false);
-assert.ok(fs.existsSync(path.join(scope.dir, 'archive', `${dropped.body.id}.json`)));
-
-// 同名但前置条件不同：按钮拒绝猜，返回 409 而不是删错。
-await call('memory_save', { title: '构建耗时', summary: '本机构建要几分钟', when: 'macOS' });
-await call('memory_save', { title: '构建耗时', summary: '本机构建要几分钟', when: 'CI' });
-const ambiguous = await post('/lite-memory/undo', { op: 'undo', title: '构建耗时', cwd });
-assert.equal(ambiguous.status, 409);
-assert.equal(store.loadIndex(scope).entries.filter((item) => item.title === '构建耗时').length, 2);
-
-// 全局条目：结果行带 [全局]，按钮也只动全局层。
-const globalSaved = await call('memory_save', { title: '回复用中文', summary: '所有项目的中文回复约定', scope: 'global' });
-assert.equal(globalSaved.scope, 'global');
-assert.match(tools.memory_save.output.render({}, globalSaved)[0].text, /\[全局\] "回复用中文"/);
-const globalDropped = await post('/lite-memory/undo', { op: 'undo', title: '回复用中文', cwd, scope: 'global' });
-assert.equal(globalDropped.status, 200);
-assert.equal(store.loadIndex(store.globalScope()).entries.length, 0);
-
-// 路由边界：外部 Origin 拒绝，非 POST 拒绝。
-const forbidden = await post('/lite-memory/undo', { op: 'undo', title: '发布顺序', cwd }, { origin: 'http://evil.test' });
-assert.equal(forbidden.status, 403);
-const wrongMethod = await post('/lite-memory/undo', { op: 'undo', title: '发布顺序', cwd }, { method: 'GET' });
-assert.equal(wrongMethod.status, 405);
-
-fs.rmSync(home, { recursive: true, force: true });
-console.log('contract: tool → render → button 链路 ok');
-
-async function post(url, payload, options = {}) {
-  const raw = JSON.stringify(payload);
-  const req = Readable.from([Buffer.from(raw)]);
+function call(pathname, payload, options = {}) {
+  const req = new EventEmitter();
   req.method = options.method ?? 'POST';
-  req.url = url;
-  req.headers = { origin: options.origin ?? webServer.getOrigin(), 'content-type': 'application/json' };
+  req.url = pathname;
+  req.headers = { origin: options.origin ?? ORIGIN };
+  req.destroy = () => {};
   const res = {
     status: 0,
-    body: '',
-    writeHead(code) {
-      this.status = code;
-    },
-    end(text) {
-      this.body = text;
-    },
+    text: '',
+    writeHead(status) { this.status = status; },
+    end(body) { this.text = body; this.finish(); },
   };
-  await route(req, res);
-  res.body = res.body ? JSON.parse(res.body) : null;
-  return res;
+  const done = new Promise((resolve) => { res.finish = () => resolve(res); });
+  route.handler(req, res);
+  if (req.method === 'POST') {
+    req.emit('data', Buffer.from(JSON.stringify(payload)));
+    req.emit('end');
+  }
+  return done.then((value) => ({ status: value.status, body: JSON.parse(value.text || '{}') }));
 }
+
+const json = (body) => JSON.parse(body);
+
+// ── tool contract ────────────────────────────────────────────────────────────
+const names = ['memory_save', 'memory_suggest', 'memory_search', 'memory_read', 'memory_forget'];
+assert.deepEqual([...defs.keys()].sort(), [...names].sort());
+for (const name of names) {
+  const def = defs.get(name);
+  assert.equal(def.parameters.type, 'object');
+  assert.equal(def.parameters.additionalProperties, false);
+  assert.equal(typeof def.output.render, 'function');
+  assert.equal(typeof def.output.schema, 'object');
+  assert.ok(def.parameters.required.length >= 1);
+}
+
+const saveParams = defs.get('memory_save').parameters.properties;
+assert.deepEqual(saveParams.resolution.enum, ['distinct']);
+assert.equal(saveParams.id.type, 'string');
+assert.deepEqual(saveParams.scope.enum, ['project', 'global']);
+assert.equal(defs.get('memory_suggest').parameters.properties.scope, undefined);
+assert.equal(defs.get('memory_suggest').parameters.properties.resolution, undefined);
+
+// ── save → render, then update ───────────────────────────────────────────────
+const saved = await exec('memory_save', { title: '发布顺序', summary: '发版前要按顺序做的事', body: '第一步' });
+assert.equal(saved.needsResolution, false);
+assert.equal(saved.merged, false);
+assert.equal(saved.scope, 'project');
+assert.equal(typeof saved.id, 'string');
+assert.match(render('memory_save', {}, saved), /^memory · saved "发布顺序" · mem_[a-z0-9]+ · 第 1 版$/);
+
+const merged = await exec('memory_save', { title: '发布顺序', summary: '发版前要按顺序做的事', body: '第一步\n第二步' });
+assert.equal(merged.merged, true);
+assert.equal(merged.id, saved.id);
+assert.equal(merged.revision, 2);
+assert.match(render('memory_save', {}, merged), /^memory · merged "发布顺序" · mem_[a-z0-9]+ · 第 2 版$/);
+
+const patch = await exec('memory_save', { id: saved.id, title: '发布顺序', summary: '发版前要按顺序做的事', when: '发版当天' });
+assert.equal(patch.when, '发版当天');
+assert.match(render('memory_save', {}, patch), /（发版当天）/);
+
+// ── similar title asks before overwriting ────────────────────────────────────
+const probe = await exec('memory_save', { title: '发布顺序是啥', summary: '发版前要按顺序做的事', body: '另一条' });
+assert.equal(probe.needsResolution, true);
+assert.equal(probe.id, '');
+assert.equal(probe.revision, 0);
+assert.ok(probe.similarIds.length > 0);
+const probeText = render('memory_save', {}, probe);
+assert.match(probeText.split('\n')[0], /^memory · 需要确认：「发布顺序是啥」与已有条目相近$/);
+assert.match(probeText, /要更新它，用 id 重存/);
+assert.match(probeText, new RegExp(saved.id));
+const distinct = await exec('memory_save', { title: '发布顺序是啥', summary: '发版前要按顺序做的事', body: '另一条', resolution: 'distinct' });
+assert.equal(distinct.needsResolution, false);
+assert.equal(distinct.merged, false);
+assert.notEqual(distinct.id, saved.id);
+
+// ── search / read / forget ───────────────────────────────────────────────────
+const hits = await exec('memory_search', { query: '发布流程' });
+assert.ok(hits.count >= 1);
+assert.ok(hits.chars > 0);
+const hitText = render('memory_search', {}, hits);
+assert.match(hitText, new RegExp(`^memory · 命中 ${hits.count} 条 · 引用 ${hits.chars} 字\\n- mem_`));
+assert.match(hitText, /第 3 版/);
+const miss = await exec('memory_search', { query: '完全没有出现过的主题' });
+assert.equal(miss.count, 0);
+assert.equal(render('memory_search', {}, miss), 'memory · 没有命中');
+
+const read = await exec('memory_read', { id: saved.id });
+assert.equal(read.body, '第一步\n第二步');
+assert.equal(read.revision, 3);
+assert.match(render('memory_read', {}, read), new RegExp(`^memory · 「发布顺序」（发版当天） · ${saved.id} · 第 3 版`));
+
+const archived = await exec('memory_forget', { id: distinct.id });
+assert.equal(archived.id, distinct.id);
+assert.match(render('memory_forget', {}, archived), new RegExp(`^memory · archived "发布顺序是啥" · ${distinct.id}$`));
+assert.equal(await exec('memory_save', { title: '发布顺序是啥', summary: '发版前要按顺序做的事', body: '第三条' }).then((v) => v.merged), false);
+
+// ── suggestion → keep → replay → reject ──────────────────────────────────────
+const suggested = await exec('memory_suggest', { title: '发布前跑文案检查', summary: '发版前先跑 ui 文案 lint', body: 'node ui-copy-lint.mjs', when: '发布前' });
+assert.equal(suggested.asked, true);
+assert.match(suggested.id, /^sug_[a-z0-9]+$/);
+assert.match(render('memory_suggest', {}, suggested), /^memory · suggested "发布前跑文案检查" · sug_[a-z0-9]+$/);
+
+const duplicate = await exec('memory_suggest', { title: '发布前跑文案检查', summary: '发版前先跑 ui 文案 lint' });
+assert.equal(duplicate.asked, false);
+assert.match(render('memory_suggest', {}, duplicate), /^memory · skipped\n48 小时内已经建议过一条$/);
+
+const kept = await call('/lite-memory/keep', { op: 'keep', candidateId: suggested.id, operationId: 'op_contract', cwd });
+assert.equal(kept.status, 200);
+assert.equal(kept.body.ok, true);
+assert.equal(kept.body.mode, 'created');
+const stored = store.search(store.scopeOf(cwd), '发布前跑文案检查')[0];
+assert.equal(stored.when, '发布前');
+assert.equal(store.readEntry(store.scopeOf(cwd), stored.id).body, 'node ui-copy-lint.mjs');
+
+const replay = await call('/lite-memory/keep', { op: 'keep', candidateId: suggested.id, operationId: 'op_contract', cwd });
+assert.equal(replay.status, 200);
+assert.equal(replay.body.replay, true);
+assert.equal(replay.body.id, kept.body.id);
+const reused = await call('/lite-memory/keep', { op: 'keep', candidateId: suggested.id, operationId: 'op_contract_other', cwd });
+assert.equal(reused.status, 404);
+assert.equal(reused.body.ok, false);
+
+const scope = store.scopeOf(cwd);
+const reset = store.loadIndex(scope);
+reset.lastSuggestedAt = '';
+store.saveIndex(scope, reset);
+const another = await exec('memory_suggest', { title: '另一条待确认建议', summary: '用来测试拒绝的候选' });
+assert.equal(another.asked, true);
+const rejected = await call('/lite-memory/reject', { op: 'reject', candidateId: another.id, cwd });
+assert.equal(rejected.status, 200);
+assert.equal(rejected.body.ok, true);
+
+// ── undo by id; old title-based payloads are refused ─────────────────────────
+const undone = await call('/lite-memory/undo', { op: 'undo', id: kept.body.id, cwd });
+assert.equal(undone.status, 200);
+assert.equal(undone.body.mode, 'archived');
+assert.equal(store.loadIndex(store.scopeOf(cwd)).entries.some((entry) => entry.id === kept.body.id), false);
+const byTitle = await call('/lite-memory/undo', { op: 'undo', title: '发布顺序', cwd });
+assert.equal(byTitle.status, 400);
+const missing = await call('/lite-memory/undo', { op: 'undo', id: 'mem_000000000000', cwd });
+assert.equal(missing.status, 404);
+
+// ── route guards ─────────────────────────────────────────────────────────────
+assert.equal((await call('/lite-memory/keep', { candidateId: 'sug_000000', cwd }, { origin: 'http://evil.example' })).status, 403);
+assert.equal((await call('/lite-memory/keep', { candidateId: 'sug_000000' })).status, 400);
+assert.equal((await call('/lite-memory/keep', { cwd })).status, 400);
+assert.equal((await call('/lite-memory/undo', { cwd })).status, 400);
+assert.equal((await call('/lite-memory/unknown', { cwd })).status, 404);
+assert.equal((await call('/lite-memory/keep', {}, { method: 'GET' })).status, 405);
+
+// ── global layer ─────────────────────────────────────────────────────────────
+const global = await exec('memory_save', { title: '回复用中文', summary: '用户要求回复用中文', scope: 'global' });
+assert.equal(global.scope, 'global');
+assert.match(render('memory_save', {}, global), /^memory · saved \[全局\] "回复用中文" · mem_[a-z0-9]+ · 第 1 版$/);
+const globalSearch = await exec('memory_search', { query: '回复用中文' });
+assert.equal(globalSearch.count, 1);
+assert.match(render('memory_search', {}, globalSearch), /\[全局\] mem_/);
+assert.equal(typeof globalThis.__liteMemoryStats, 'function');
+const stats = globalThis.__liteMemoryStats(cwd);
+assert.ok(stats.count >= 1);
+
+// ── 引用条：会话读过哪几条，点开能拿到正文 ───────────────────────────────────
+const cited = await exec('memory_save', { title: '引用测试', summary: '底部引用条要能点开正文', body: '引用正文第一行' });
+await exec('memory_read', { id: cited.id });
+const cites = await call('/lite-memory/citations', { sessionId: 'session-contract' });
+assert.equal(cites.status, 200);
+assert.ok(cites.body.items.some((item) => item.id === cited.id && item.title === '引用测试'));
+assert.equal(cites.body.items.some((item) => 'path' in item), false);
+const opened = await call('/lite-memory/body', { sessionId: 'session-contract', id: cited.id });
+assert.equal(opened.status, 200);
+assert.match(opened.body.body, /引用正文第一行/);
+assert.equal((await call('/lite-memory/body', { sessionId: 'session-contract', id: 'mem_999999999999' })).status, 404);
+assert.equal((await call('/lite-memory/citations', {})).status, 400);
+assert.equal((await call('/lite-memory/citations', {}, { origin: 'http://evil.example' })).status, 403);
+assert.equal((await call('/lite-memory/citations', {}, { method: 'GET' })).status, 405);
+
+console.log('contract.test.mjs: all passed');
