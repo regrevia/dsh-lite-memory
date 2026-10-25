@@ -1,6 +1,6 @@
 {
   "name": "dsh-lite-memory",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "On-demand memory for the DeepSeek Harness: nothing in the system prompt, one muted line only when something is saved, hit or suggested.",
   "type": "module",
   "main": "index.js",
@@ -8,7 +8,7 @@
     "dsh": ">=0.1.5"
   },
   "scripts": {
-    "test": "node test/store.test.mjs && node test/state.test.mjs && node test/contract.test.mjs"
+    "test": "node test/store.test.mjs && node test/state.test.mjs && node test/view.test.mjs && node test/contract.test.mjs"
   },
   "exports": {
     ".": "./index.js",
@@ -21,6 +21,7 @@
     "index.js",
     "store.js",
     "state.js",
+    "view.js",
     "client.js",
     "cordis.patch.yml",
     "locale",

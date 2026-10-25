@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import * as state from './state.js';
+import * as view from './view.js';
 import { LIMITS, memoryRoot, scopeOf, globalScope } from './state.js';
 
 /**
@@ -57,6 +58,12 @@ function toFlat(entry) {
     tags: Array.isArray(current.keywords) ? [...current.keywords] : [],
     topicKey: current.topicKey || '',
     aliases: Array.isArray(maintenance.retiredNames) ? [...maintenance.retiredNames] : [],
+    triggers: Array.isArray(current.triggers) ? [...current.triggers] : [],
+    applicability: current.applicability || 'all_in_scope',
+    conditions: Array.isArray(current.conditions) ? JSON.parse(JSON.stringify(current.conditions)) : [],
+    selection: current.selection ? JSON.parse(JSON.stringify(current.selection)) : null,
+    links: Array.isArray(current.links) ? current.links.map((link) => ({ type: link.type || 'related', id: link.id })) : [],
+    reviewState: maintenance.reviewState || 'active',
     created: entry.createdAt || '',
     updated: entry.updatedAt || '',
     lastUsed: maintenance.lastUsed || entry.updatedAt || entry.createdAt || '',
@@ -66,7 +73,7 @@ function toFlat(entry) {
     hits: Number(maintenance.hits) || 0,
     merges: Number(maintenance.merges) || 0,
     versions: Array.isArray(maintenance.versions) ? JSON.parse(JSON.stringify(maintenance.versions)) : [],
-    bytes: Buffer.byteLength(current.body || '') + Buffer.byteLength([current.title || '', current.summary || '', (current.keywords || []).join(',')].join('\n')),
+    bytes: entrySize({ title: current.title, summary: current.summary, when: current.when, tags: current.keywords, triggers: current.triggers, topicKey: current.topicKey, applicability: current.applicability, conditions: current.conditions, selection: current.selection, links: current.links }, current.body || ''),
   };
 }
 
@@ -87,15 +94,15 @@ function fromFlat(record, status) {
       when: record.when || '',
       keywords: Array.isArray(record.tags) ? [...record.tags] : [],
       topicKey: record.topicKey || '',
-      triggers: [],
-      applicability: 'all_in_scope',
-      conditions: [],
-      selection: null,
-      links: [],
+      triggers: Array.isArray(record.triggers) ? [...record.triggers] : [],
+      applicability: record.applicability || 'all_in_scope',
+      conditions: Array.isArray(record.conditions) ? JSON.parse(JSON.stringify(record.conditions)) : [],
+      selection: record.selection ? JSON.parse(JSON.stringify(record.selection)) : null,
+      links: Array.isArray(record.links) ? record.links.map((link) => ({ type: link.type || 'related', id: link.id })) : [],
       aliases: [],
     },
     maintenance: {
-      reviewState: 'active',
+      reviewState: record.reviewState === 'legacy_unreviewed' ? 'legacy_unreviewed' : 'active',
       sourceRefs: [],
       retiredNames: Array.isArray(record.aliases) ? [...record.aliases] : [],
       versions: Array.isArray(record.versions) ? JSON.parse(JSON.stringify(record.versions)) : [],
@@ -130,6 +137,7 @@ export function loadIndex(scope) {
     suggestions: JSON.parse(JSON.stringify(loaded.state.candidates || [])),
     receipts: JSON.parse(JSON.stringify(loaded.state.receipts || [])),
     lastSuggestedAt: loaded.state.lastSuggestedAt || '',
+    suppressions: JSON.parse(JSON.stringify(loaded.state.suppressions || [])),
   };
   index.__meta = { exists: loaded.exists, generation: loaded.state.generation, epoch: loaded.state.epoch };
   return index;
@@ -240,7 +248,9 @@ export function normalizeDraft(source, options = {}) {
   if (has('id') && !id) throw new Error('id 格式不对');
   const when = has('when') ? textField(draft.when, LIMITS.whenChars, '前置条件') : '';
   const title = textField(cleanTitle(draft.title), LIMITS.titleChars, '标题');
-  if (!title) throw new Error('标题为空');
+  /** 带 id 是更新：省略的字段保持原值，标题也一样。 */
+  const mayOmitTitle = Boolean(id);
+  if (!title && !mayOmitTitle) throw new Error('标题为空');
   let summary = '';
   const rawSummary = String(draft.summary ?? '').replace(/\s+/g, ' ').trim();
   if (rawSummary) {
@@ -264,7 +274,14 @@ export function normalizeDraft(source, options = {}) {
   if (!Array.isArray(rawTags)) throw new Error('标签必须是数组');
   if (rawTags.length > LIMITS.tags) throw new Error(`标签最多 ${LIMITS.tags} 个`);
   const tags = [...new Set(rawTags.map((tag) => textField(tag, LIMITS.tagChars, '标签')).filter(Boolean))];
-  const secret = detectSecret([title, summary, when, body, tags.join(' ')].join('\n'));
+  /** 结构化字段只走白名单：模型给什么就校验什么，绝不从措辞里推断。 */
+  const triggers = view.normalizeTriggers(draft.triggers);
+  const conditions = view.normalizeConditions(draft.conditions);
+  const selection = view.normalizeSelection(draft.selection);
+  const links = view.normalizeLinks(draft.links, id);
+  const applicability = view.normalizeApplicability(draft.applicability);
+  const topicKey = has('topicKey') ? textField(draft.topicKey, LIMITS.tagChars, '主题') : undefined;
+  const secret = detectSecret([title, summary, when, body, tags.join(' '), topicKey || ''].join('\n'));
   if (secret) throw new Error(`疑似凭据（${secret}），只记位置，不记值`);
   return {
     id,
@@ -274,13 +291,25 @@ export function normalizeDraft(source, options = {}) {
     body,
     kind: kind || 'note',
     tags,
+    triggers,
+    conditions,
+    selection,
+    links,
+    applicability,
+    topicKey,
     has: {
-      title: has('title'),
+      title: has('title') && Boolean(title),
       summary: has('summary'),
       when: has('when'),
       body: has('body'),
       kind: has('kind'),
       tags: has('tags'),
+      triggers: triggers !== undefined,
+      conditions: conditions !== undefined,
+      selection: selection !== undefined,
+      links: links !== undefined,
+      applicability: applicability !== undefined,
+      topicKey: topicKey !== undefined,
     },
   };
 }
@@ -310,7 +339,8 @@ function removeBody(scope, id) {
 }
 
 function entrySize(record, body) {
-  return Buffer.byteLength([record.title, record.when, record.summary, (record.tags || []).join(','), body].join('\n'));
+  const meta = [record.title || '', record.summary || '', record.when || '', (record.tags || []).join(',')].join('\n');
+  return Buffer.byteLength(meta) + Buffer.byteLength(body || '') + Buffer.byteLength(state.fieldsBytesOf(record));
 }
 
 function recordSize(record) {
@@ -416,6 +446,12 @@ function snapshot(record, body) {
     when: record.when || '',
     kind: record.kind || 'note',
     tags: [...(record.tags || [])],
+    triggers: [...(record.triggers || [])],
+    applicability: record.applicability || 'all_in_scope',
+    conditions: JSON.parse(JSON.stringify(record.conditions || [])),
+    selection: record.selection ? JSON.parse(JSON.stringify(record.selection)) : null,
+    links: (record.links || []).map((link) => ({ type: link.type || 'related', id: link.id })),
+    topicKey: record.topicKey || '',
     body,
   };
   let kept = [...(record.versions || []), version].slice(-2);
@@ -423,6 +459,71 @@ function snapshot(record, body) {
     kept = kept.slice(1);
   }
   return kept;
+}
+
+/**
+ * 适用规则的合并：只认显式给过的字段，没给的保持原值；老条目的默认档位重新推断。
+ * 关联目标必须当前存在，缺了就是错，不静默丢掉一条关联。
+ */
+function rulesOf(draft, body, index) {
+  const rules = {
+    triggers: draft.has.triggers ? draft.triggers : [],
+    conditions: draft.has.conditions ? draft.conditions : [],
+    selection: draft.has.selection ? draft.selection : null,
+    links: draft.has.links ? draft.links : [],
+    topicKey: draft.has.topicKey ? draft.topicKey : '',
+  };
+  rules.applicability = view.validateApplicability(draft.has.applicability ? draft.applicability : undefined,
+    rules.conditions, rules.selection, draft.when);
+  for (const link of rules.links) {
+    if (!index.entries.some((item) => item.id === link.id)) throw new Error(`关联目标不存在：${link.id}`);
+  }
+  void body;
+  return rules;
+}
+
+function mergedFields(draft, record, oldBody, index, writeMode = 'patch') {
+  if (writeMode === 'replace_current') {
+    const next = {
+      title: draft.title,
+      summary: draft.summary,
+      when: draft.when,
+      kind: draft.kind || 'note',
+      tags: draft.tags,
+      triggers: draft.has.triggers ? draft.triggers : [],
+      conditions: draft.has.conditions ? draft.conditions : [],
+      selection: draft.has.selection ? draft.selection : null,
+      links: draft.has.links ? draft.links : [],
+      topicKey: draft.has.topicKey ? draft.topicKey : '',
+      body: draft.body,
+    };
+    next.applicability = view.validateApplicability(draft.has.applicability ? draft.applicability : undefined,
+      next.conditions, next.selection, next.when);
+    for (const link of next.links) {
+      if (!index.entries.some((item) => item.id === link.id)) throw new Error(`关联目标不存在：${link.id}`);
+    }
+    return next;
+  }
+  /** 没显式给适用范围就按合并后的字段重算：清掉条件就回到普遍适用，不留悬空 conditional。 */
+  const requested = draft.has.applicability ? draft.applicability : undefined;
+  const next = {
+    title: draft.has.title ? draft.title : record.title,
+    summary: draft.has.summary ? draft.summary : record.summary || '',
+    when: draft.has.when ? draft.when : record.when || '',
+    kind: draft.has.kind ? draft.kind || 'note' : record.kind || 'note',
+    tags: draft.has.tags ? draft.tags : record.tags || [],
+    triggers: draft.has.triggers ? draft.triggers : (record.triggers || []),
+    conditions: draft.has.conditions ? draft.conditions : (record.conditions || []),
+    selection: draft.has.selection ? draft.selection : (record.selection || null),
+    links: draft.has.links ? draft.links : (record.links || []),
+    topicKey: draft.has.topicKey ? draft.topicKey : (record.topicKey || ''),
+    body: draft.has.body ? draft.body : oldBody,
+  };
+  next.applicability = view.validateApplicability(requested, next.conditions, next.selection, next.when);
+  for (const link of next.links) {
+    if (!index.entries.some((item) => item.id === link.id)) throw new Error(`关联目标不存在：${link.id}`);
+  }
+  return next;
 }
 
 /**
@@ -451,20 +552,25 @@ function applyDraft(scope, index, source, now) {
       }
     }
   }
+  const writeMode = source && source.writeMode === 'replace_current' ? 'replace_current' : 'patch';
+  if (record && writeMode === 'replace_current') {
+    for (const key of ['title', 'summary', 'when', 'body', 'kind', 'tags']) {
+      if (!draft.has[key]) throw new Error(`整份替换要给出 ${key}，空值也要显式写`);
+    }
+  }
   if (record) {
     const oldBody = readBody(scope, record.id);
-    const next = {
-      title: draft.title,
-      summary: draft.has.summary ? draft.summary : record.summary || '',
-      when: draft.has.when ? draft.when : record.when || '',
-      kind: draft.has.kind ? draft.kind || 'note' : record.kind || 'note',
-      tags: draft.has.tags ? draft.tags : record.tags || [],
-      body: draft.has.body ? draft.body : oldBody,
-    };
-    const sameTags = JSON.stringify(next.tags) === JSON.stringify(record.tags || []);
+    const next = mergedFields(draft, record, oldBody, index, writeMode);
     const noop = next.title === record.title && next.summary === record.summary
       && next.when === (record.when || '') && next.kind === (record.kind || 'note')
-      && sameTags && next.body === oldBody;
+      && JSON.stringify(next.tags) === JSON.stringify(record.tags || [])
+      && JSON.stringify(next.triggers) === JSON.stringify(record.triggers || [])
+      && JSON.stringify(next.conditions) === JSON.stringify(record.conditions || [])
+      && JSON.stringify(next.selection) === JSON.stringify(record.selection || null)
+      && JSON.stringify(next.links) === JSON.stringify(record.links || [])
+      && (next.topicKey || '') === (record.topicKey || '')
+      && next.applicability === (record.applicability || 'all_in_scope')
+      && next.body === oldBody;
     if (noop) {
       return { record, merged: true, mergedFrom: null, similar: null, similarList, draft, noop: true, previousBody: oldBody, archived: [] };
     }
@@ -488,6 +594,8 @@ function applyDraft(scope, index, source, now) {
     Object.assign(record, nextRecord);
     return { record, merged: true, mergedFrom, similar: null, similarList, draft, noop: false, previousBody: oldBody, archived };
   }
+  if (writeMode === 'replace_current') throw new Error('整份替换要先指明是哪条，不能用来新增');
+  const rules = rulesOf(draft, draft.body, index);
   const created = {
     id: newId(),
     title: draft.title,
@@ -495,6 +603,12 @@ function applyDraft(scope, index, source, now) {
     when: draft.when,
     kind: draft.kind,
     tags: draft.tags,
+    triggers: rules.triggers,
+    applicability: rules.applicability,
+    conditions: rules.conditions,
+    selection: rules.selection,
+    links: rules.links,
+    topicKey: rules.topicKey,
     body: draft.body,
     aliases: [],
     created: now,
@@ -590,7 +704,7 @@ function scoreQuery(item, grams, raw) {
  * 返回的记录带着「本次检索之前」的 lastUsed，给 renderIndex 判断陈旧用；
  * 命中计数在返回前写入，所以同一次调用既改盘又不污染展示。
  */
-export function search(scope, query, limit = 4) {
+export function search(scope, query, limit = 4, options = {}) {
   return withLocks([scope, globalScope()], () => {
     const grams = bigrams(query);
     if (grams.size === 0) return [];
@@ -604,19 +718,12 @@ export function search(scope, query, limit = 4) {
     }
     rows.sort((a, b) => b.score - a.score || String(b.item.lastUsed).localeCompare(String(a.item.lastUsed)));
     const chosen = rows.slice(0, limit);
-    const now = new Date().toISOString();
-    for (const row of chosen) {
-      row.snapshot = { ...row.item, scope: row.source.key === 'global' ? 'global' : 'project' };
-      row.item.hits = (row.item.hits || 0) + 1;
-      row.item.lastUsed = now;
-    }
-    const touched = new Set();
-    for (const row of chosen) {
-      if (touched.has(row.source.dir)) continue;
-      touched.add(row.source.dir);
-      saveIndex(row.source, row.index);
-    }
-    return chosen.map((row) => row.snapshot);
+    /** 检索不改盘：hits/lastUsed 只在用户真的处理过结果时才算数。 */
+    return chosen.map((row) => ({
+      ...row.item,
+      scope: row.source.key === 'global' ? 'global' : 'project',
+      status: view.statusOf(row.item, options.context || {}),
+    }));
   });
 }
 
@@ -624,7 +731,7 @@ export function search(scope, query, limit = 4) {
  * 只读命中：给自动提示用。不改 hits / lastUsed，不落盘。
  * 标题（含旧标题）必须真跟查询有交集，否则长句里零星重合也会冒出提示。
  */
-export function peek(scope, query, limit = 3) {
+export function peek(scope, query, limit = 3, options = {}) {
   const grams = bigrams(query);
   if (grams.size === 0) return [];
   const rows = [];
@@ -641,6 +748,7 @@ export function peek(scope, query, limit = 3) {
       let shared = 0;
       for (const gram of grams) if (pool.has(gram)) shared += 1;
       if (shared === 0) continue;
+      if (options.requireApplicable !== false && !view.canAutoRecall(item, options.context || {})) continue;
       const score = scoreQuery(item, grams, query);
       if (score < 6) continue;
       rows.push({ item, source, score });
@@ -652,39 +760,96 @@ export function peek(scope, query, limit = 3) {
     title: item.title,
     summary: item.summary || '',
     scope: source.key === 'global' ? 'global' : 'project',
+    status: 'ok',
   }));
 }
 
-export function readEntry(scope, id) {
+export function readEntry(scope, id, options = {}) {
   return withLocks([scope, globalScope()], () => {
     for (const source of [scope, globalScope()]) {
       const index = loadIndex(source);
       const record = index.entries.find((item) => item.id === id);
       if (!record) continue;
       const body = readBody(source, id);
-      record.hits = (record.hits || 0) + 1;
-      record.lastUsed = new Date().toISOString();
-      saveIndex(source, index);
-      return { ...record, scope: source.key === 'global' ? 'global' : 'project', body };
+      return {
+        ...record,
+        scope: source.key === 'global' ? 'global' : 'project',
+        body,
+        status: view.statusOf(record, options.context || {}),
+      };
     }
     return null;
   });
 }
 
-/** 归档，不是删除：正文和完整记录一起进 archive/，文件移动成功后才改索引。 */
-export function forget(scope, id) {
+/**
+ * 忘掉一条：archive 或 purge 是两种不同承诺，没点明就不动盘，交给界面问一次。
+ * purge 走 state 的屏障事务：锁内落 intent、旋转 epoch、清受管副本，完成才回成功。
+ */
+export function forget(scope, id, options = {}) {
+  const mode = options.mode;
+  if (mode !== 'archive' && mode !== 'purge') return { id, mode: 'needs_resolution' };
+  return withLocks([scope, globalScope()], () => {
+    for (const source of [scope, globalScope()]) {
+      const index = loadIndex(source);
+      const record = index.entries.find((item) => item.id === id);
+      if (mode === 'archive') {
+        if (!record) continue;
+        archiveEntry(source, index, record);
+        saveIndex(source, index);
+        return { id: record.id, title: record.title, mode: 'archive' };
+      }
+      if (!record) continue;
+      const result = state.purge(source, { ids: [id], operationId: options.operationId });
+      removeBody(source, id);
+      return { id, mode: 'purged', operationId: result.operationId, epoch: result.epoch };
+    }
+    return null;
+  });
+}
+
+/** 直接读邻居：只给当前投影，不缓存目标正文；目标不在了就标 invalid，不拿旧版本顶上。 */
+export function readLinks(scope, id, options = {}) {
   return withLocks([scope, globalScope()], () => {
     for (const source of [scope, globalScope()]) {
       const index = loadIndex(source);
       const record = index.entries.find((item) => item.id === id);
       if (!record) continue;
-      archiveEntry(source, index, record);
-      saveIndex(source, index);
-      return { id: record.id, title: record.title, mode: 'archive' };
+      const links = [];
+      for (const link of view.linksOf(record)) {
+        const target = findCurrent(link.id, scope);
+        if (target) links.push({ type: link.type || 'related', ...target });
+        else links.push({ type: link.type || 'related', id: link.id, status: 'invalid' });
+      }
+      return { id, links, scope: source.key === 'global' ? 'global' : 'project', status: view.statusOf(record, options.context || {}) };
     }
     return null;
   });
 }
+
+/** 关联目标按当前投影现场解引用：先项目层再全局层，归档和删除都算不存在。 */
+function findCurrent(id, scope) {
+  for (const source of [scope, globalScope()]) {
+    let index;
+    try {
+      index = loadIndex(source);
+    } catch {
+      continue;
+    }
+    const record = index.entries.find((item) => item.id === id && item.status !== 'archived');
+    if (!record) continue;
+    return {
+      id: record.id,
+      title: record.title,
+      summary: record.summary || '',
+      scope: source.key === 'global' ? 'global' : 'project',
+      revision: record.revision || 1,
+      status: view.statusOf(record, {}),
+    };
+  }
+  return null;
+}
+
 
 /** 撤销一次修改：有旧版本就整条还原成新 revision；没有旧版本（新建的）就归档。 */
 export function undoChange(scope, id) {
@@ -708,6 +873,12 @@ export function undoChange(scope, id) {
         when: last.when || '',
         kind: last.kind || record.kind,
         tags: Array.isArray(last.tags) ? last.tags : record.tags,
+        triggers: Array.isArray(last.triggers) ? last.triggers : record.triggers || [],
+        applicability: last.applicability || record.applicability || 'all_in_scope',
+        conditions: Array.isArray(last.conditions) ? last.conditions : record.conditions || [],
+        selection: last.selection === undefined ? record.selection || null : last.selection,
+        links: Array.isArray(last.links) ? last.links : record.links || [],
+        topicKey: last.topicKey === undefined ? record.topicKey || '' : last.topicKey,
         body: last.body,
         versions: versions.slice(0, -1),
         revision: (record.revision || 1) + 1,
@@ -737,12 +908,37 @@ export function locate(scope, id) {
   return null;
 }
 
+function forgottenFingerprints(index) {
+  const out = new Set();
+  for (const row of index.suppressions || []) {
+    if (row && row.reason === 'forgotten_source' && typeof row.fingerprint === 'string') out.add(row.fingerprint);
+  }
+  return out;
+}
+
+/** 过期候选清掉；被明确忘掉的来源自动学回来的候选也清掉，不再出现在保留队列。 */
 function pruneSuggestions(index) {
   const now = Date.now();
+  const forgotten = forgottenFingerprints(index);
   index.suggestions = (index.suggestions || []).filter((item) => {
     const expires = Date.parse(item.expiresAt || '');
-    return Number.isFinite(expires) && expires > now;
+    if (!Number.isFinite(expires) || expires <= now) return false;
+    const draft = item.draft || {};
+    const fingerprint = state.fingerprintOf({ title: draft.title || item.title, when: draft.when || item.when });
+    return !forgotten.has(fingerprint);
   });
+}
+
+/** 抑制规则：忘掉的来源永久挡，候选被拒只挡一段时间。只存指纹，不存原文。 */
+function addSuppression(index, { fingerprint, sourceIds = [], reason, at, expiresAt }) {
+  if (!fingerprint) return;
+  const rows = (index.suppressions || []).filter((row) => row.fingerprint !== fingerprint || row.reason !== reason);
+  rows.push({ fingerprint, sourceIds: [...sourceIds].filter((id) => typeof id === 'string'), reason, at, expiresAt });
+  index.suppressions = rows;
+}
+
+function suppressed(index, fingerprint) {
+  return forgottenFingerprints(index).has(fingerprint);
 }
 
 function pruneReceipts(index) {
@@ -766,6 +962,9 @@ export function suggestionGate(scope, source) {
     if (!title) return { ok: false, reason: '没有标题' };
     const summary = normalizeText(source?.summary, LIMITS.summaryChars);
     const when = normalizeText(source?.when, LIMITS.whenChars);
+    if (suppressed(index, state.fingerprintOf({ title, when }))) {
+      return { ok: false, reason: '这个来源你已经明确忘掉了，不再自动建议' };
+    }
     const hit = resolveTarget(index.entries, { title, summary, when });
     if (hit) return { ok: false, reason: `已有「${hit.target.title}」，这次不重复建议` };
     const near = similarEntries(index.entries, title, summary, 1)[0];
@@ -895,13 +1094,22 @@ export function acceptCandidate(scope, key, operationId = '') {
   });
 }
 
-/** 拒绝一个候选：只消费这条草稿，不产生抑制规则。 */
+/** 拒绝一个候选：消费草稿，同时按指纹挡一段时间，避免同一句反复冒出来。 */
 export function rejectCandidate(scope, key) {
   return withLock(scope, () => {
     const index = loadIndex(scope);
-    const before = (index.suggestions || []).length;
+    const item = (index.suggestions || []).find((entry) => entry.id === key);
+    if (!item) return { ok: false, reason: '候选不存在或已过期' };
+    const draft = item.draft || {};
+    const at = new Date();
+    addSuppression(index, {
+      fingerprint: state.fingerprintOf({ title: draft.title || item.title, when: draft.when }),
+      sourceIds: Array.isArray(draft.sourceIds) ? draft.sourceIds : [],
+      reason: 'candidate_rejected',
+      at: at.toISOString(),
+      expiresAt: new Date(at.getTime() + LIMITS.suppressionTtlMs).toISOString(),
+    });
     index.suggestions = (index.suggestions || []).filter((entry) => entry.id !== key);
-    if (index.suggestions.length === before) return { ok: false, reason: '候选不存在或已过期' };
     saveIndex(scope, index);
     return { ok: true };
   });
@@ -916,7 +1124,8 @@ export function renderIndex(entries, budget = 400) {
   for (const item of entries) {
     const last = Date.parse(item.lastUsed || item.updated || item.created || '') || now;
     const stale = now - last > staleMs;
-    const head = `${item.scope === 'global' ? '[全局] ' : ''}${item.id} ${item.title}${item.when ? `（${item.when}）` : ''} · 第 ${item.revision || 1} 版`;
+    const stateTag = item.state === 'needs_context' ? ' · 适用范围待确认' : item.state === 'not_applicable' ? ' · 当前条件不适用' : '';
+    const head = `${item.scope === 'global' ? '[全局] ' : ''}${item.id} ${item.title}${item.when ? `（${item.when}）` : ''} · 第 ${item.revision || 1} 版${stateTag}`;
     const line = stale ? `- ${head}` : `- ${head}｜${item.summary}`;
     if (used + line.length > budget) break;
     lines.push(line);
