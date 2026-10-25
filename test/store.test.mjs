@@ -657,5 +657,83 @@ test('归档条目的彻底删除同样先过屏障，断点收尾后不留正�
   assert.equal(search(scope, '归档删一半', 3, {}).length, 0);
 });
 
+
+test('整层写回不丢来源、检查和学习字段，也不改写未知来源值', () => {
+  const scope = fresh('codec-full');
+  upsert(scope, { title: '代码往返', summary: '整层写回要保住扩展字段', body: '正文' });
+  const saved = stateOf(scope).entries[0];
+  state.transact(scope, {}, (draft) => {
+    const row = draft.entries.find((entry) => entry.id === saved.id);
+    row.origin = 'project_evolution';
+    row.maintenance.sourceRefs = [{ kind: 'message', id: 'msg_1', sessionId: 's1' }];
+    row.maintenance.checks = [{ at: '2026-01-01T00:00:00.000Z', result: 'passed' }];
+    row.maintenance.learning = { state: 'trial', episodeId: 'ep_1', support: 2 };
+    return { changed: true };
+  });
+  const loaded = loadIndex(scope);
+  const flat = loaded.entries[0];
+  assert.equal(flat.origin, 'project_evolution');
+  assert.deepEqual(flat.sourceRefs, [{ kind: 'message', id: 'msg_1', sessionId: 's1' }]);
+  assert.deepEqual(flat.checks, [{ at: '2026-01-01T00:00:00.000Z', result: 'passed' }]);
+  assert.deepEqual(flat.learning, { state: 'trial', episodeId: 'ep_1', support: 2 });
+  upsert(scope, { id: saved.id, summary: '整层写回要保住扩展字段（改过）' });
+  const after = stateOf(scope).entries.find((entry) => entry.id === saved.id);
+  assert.equal(after.origin, 'project_evolution');
+  assert.deepEqual(after.maintenance.sourceRefs, [{ kind: 'message', id: 'msg_1', sessionId: 's1' }]);
+  assert.deepEqual(after.maintenance.checks, [{ at: '2026-01-01T00:00:00.000Z', result: 'passed' }]);
+  assert.deepEqual(after.maintenance.learning, { state: 'trial', episodeId: 'ep_1', support: 2 });
+});
+
+test('只改摘要或正文不会把待核对的范围放宽成普遍适用', () => {
+  const scope = fresh('scope-preserve');
+  const saved = upsert(scope, {
+    title: '发布前检查', summary: '发布前的检查项', when: '发版前', applicability: 'unresolved', body: '旧正文',
+  });
+  assert.equal(saved.record.applicability, 'unresolved');
+  const patched = upsert(scope, { id: saved.record.id, body: '新正文' });
+  assert.equal(patched.record.applicability, 'unresolved');
+  const summary = upsert(scope, { id: saved.record.id, summary: '发布前的检查项（更新）' });
+  assert.equal(summary.record.applicability, 'unresolved');
+  const cleared = upsert(scope, { id: saved.record.id, when: '' });
+  assert.equal(cleared.record.applicability, 'all_in_scope');
+});
+
+test('旧候选 has=true 但条件缺失时拒绝接受并作废候选', () => {
+  const scope = fresh('candidate-broken');
+  const asked = noteSuggestion(scope, {
+    title: '后期配色', summary: '后期统一用暖色', conditions: [{ key: 'taskKind', value: 'video' }],
+  });
+  state.transact(scope, {}, (draft) => {
+    const row = draft.candidates.find((item) => item.id === asked.id);
+    delete row.draft.conditions;
+    return { changed: true };
+  });
+  const result = acceptCandidate(scope, asked.id);
+  assert.equal(result.ok, false);
+  assert.equal(result.invalid, true);
+  assert.match(result.reason, /重新建议/);
+  assert.equal(suggestionsOf(scope).length, 0);
+  assert.equal(countOf(scope), 0);
+});
+
+test('实验来源条目默认不进入检索、正文与关联，只有管理面放行', () => {
+  const scope = fresh('experimental-gate');
+  const normal = upsert(scope, { title: '普通记录', summary: '普通记录可以读', body: '普通正文' });
+  upsert(scope, { title: '实验记录', summary: '实验记录默认不可读', body: '实验正文' });
+  const target = stateOf(scope).entries.find((entry) => entry.current.title === '实验记录');
+  assert.ok(target);
+  state.transact(scope, {}, (draft) => {
+    const row = draft.entries.find((entry) => entry.id === target.id);
+    row.origin = 'project_evolution';
+    row.maintenance.learning = { state: 'paused' };
+    return { changed: true };
+  });
+  assert.equal(search(scope, '实验记录', 4).some((row) => row.id === target.id), false);
+  assert.equal(readEntry(scope, target.id), null);
+  assert.equal(search(scope, '实验记录', 4, { allowExperimental: true }).some((row) => row.id === target.id), true);
+  assert.equal(readEntry(scope, target.id, { allowExperimental: true }).body, '实验正文');
+  assert.ok(readEntry(scope, normal.record.id));
+});
+
 for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
 console.log(`store.test.mjs: ${passed} passed`);

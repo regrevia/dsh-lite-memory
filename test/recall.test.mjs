@@ -303,8 +303,8 @@ assert.notEqual(bootA.provider.text({ agent: agentB, signal: signalB }), prepare
   const win = bootA.debug.windowOf(agent);
   const used = win.bytes;
   assert.ok(used > 0);
-  const turnEnd = bootA.handlers.get('agent/turn-end').at(-1);
-  turnEnd({ agent, turn: 't2' });
+  const turnEnd = bootA.handlers.get('agent/turn-stopping').at(-1);
+  turnEnd({ turn: 't1', signal: sig });
   assert.equal(bootA.provider.text({ agent, signal: sig }), '');
   await bootA.preStep({ agent, signal: sig, turn: 't2' }, enter(human('插件改完怎么让它生效？再确认一下')));
   assert.ok(bootA.provider.text({ agent, signal: sig }).startsWith(HEADER));

@@ -169,6 +169,21 @@ test('S02 符号链接、非 Git 目录、嵌套仓库各归各的', () => {
   assert.notEqual(scopeOf(nested).key, scopeOf(repo).key);
 });
 
+test('P04 Git 查询失败不冒充已确认工程，不用 cwd 兜底学习', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-state-gitfail-'));
+  dirs.push(dir);
+  const previous = process.env.PATH;
+  process.env.PATH = '';
+  try {
+    const resolved = resolveRoot(dir);
+    assert.equal(resolved.source, 'cwd');
+    assert.equal(resolved.confirmed, false);
+    assert.equal(scopeOf(dir).confirmed, false);
+  } finally {
+    process.env.PATH = previous;
+  }
+});
+
 test('S04 全局层从 41 条写到 200 条，一条不少也不拒绝', () => {
   const global = globalScope();
   transact(global, { expectCreate: true }, (draft) => {
