@@ -7,9 +7,9 @@
 
 ## 它是什么 / What it is
 
-给 DeepSeek Harness 的轻量记忆：不写系统提示、不逐轮注入、不扫描文件。记忆只在两种时刻出现——你说「记一下」，或者它命中了一条查过的内容。
+给 DeepSeek Harness 的轻量记忆：不写常驻系统提示、不逐轮注入、不扫描文件。记忆只在两种时刻出现——你说「记一下」，或者这句话跟已有条目真有关（最多三条标题，正文仍按需读）。
 
-Lightweight memory for the DeepSeek Harness. Nothing in the system prompt, nothing injected per turn. Memory appears at exactly two moments: you ask it to remember, or a query matches something already stored.
+Lightweight memory for the DeepSeek Harness. No standing system prompt, nothing injected per turn, no file scanning. Memory appears at exactly two moments: you ask it to remember, or the message genuinely overlaps an existing entry (at most three titles; bodies are read on demand).
 
 ## 触发方式 / Triggers
 
@@ -24,6 +24,8 @@ Lightweight memory for the DeepSeek Harness. Nothing in the system prompt, nothi
 写入时分两层：默认只在这个项目生效；用户说「以后所有项目都这样」才进全局层（上限 40 条），检索时一起查。同一主题在不同前提下用 `when` 区分，各存一条。
 
 触发词：`记住`、`记一下`、`上次`、`规范`、`约定`、`路径`、`凭据怎么取`。
+
+真命中不看触发词：这句话与某条记忆的标题（含旧标题）有重合时，本步多一行「已有记忆可能相关」，最多三条标题和 id；没重合就不出现，不改命中计数，正文要 `memory_read` 才读。
 
 | Case | Behaviour |
 | --- | --- |
