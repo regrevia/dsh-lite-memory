@@ -85,6 +85,16 @@ window.__ModuleLoader__.load({
     const pendingItems = new Map();
     const assignedItems = new Map();
     const tailItems = new Map();
+    /** 会话缓存只在内存里，留最近 200 个就够。 */
+    const SESSION_CAP = 200;
+    const TAIL_CAP = 400;
+    const trimOldest = (map, cap, keepKey) => {
+      while (map.size > cap) {
+        const oldest = map.keys().next().value;
+        if (oldest === keepKey) break;
+        map.delete(oldest);
+      }
+    };
     const noteMemory = (sessionId, text) => {
       if (!sessionId) return;
       const write = WRITE_MARK.test(String(text || ''));
@@ -96,6 +106,7 @@ window.__ModuleLoader__.load({
         queue.push({ id, mark, write });
       }
       pendingItems.set(sessionId, queue);
+      trimOldest(pendingItems, SESSION_CAP, sessionId);
     };
     const takeMemory = (sessionId, key) => {
       const found = { reads: [], writes: [] };
@@ -111,7 +122,9 @@ window.__ModuleLoader__.load({
       }
       pendingItems.set(sessionId, []);
       assignedItems.set(sessionId, seen);
+      trimOldest(assignedItems, SESSION_CAP, sessionId);
       tailItems.set(key, found);
+      trimOldest(tailItems, TAIL_CAP, key);
       return found;
     };
 
@@ -132,7 +145,7 @@ window.__ModuleLoader__.load({
       const line = firstLine(text) ?? RUNNING.memory_suggest;
       const candidateId = idOf(text, 'sug');
       const cwd = typeof props.cwd === 'string' ? props.cwd : '';
-      const canKeep = Boolean(candidateId) && Boolean(cwd) && state === 'idle';
+      const canKeep = Boolean(candidateId) && Boolean(cwd) && (state === 'idle' || state === 'failed');
       const keep = () => {
         if (!canKeep) return;
         if (!operationId.current) operationId.current = newOperationId();
@@ -161,7 +174,7 @@ window.__ModuleLoader__.load({
       const text = props.phase === 'preparing' ? null : settledText(props.block);
       const entryId = idOf(text, 'mem');
       const cwd = typeof props.cwd === 'string' ? props.cwd : '';
-      const canDrop = Boolean(entryId) && Boolean(cwd) && state === 'idle';
+      const canDrop = Boolean(entryId) && Boolean(cwd) && (state === 'idle' || state === 'failed');
       const drop = () => {
         if (!canDrop) return;
         setState('saving');
@@ -195,6 +208,7 @@ window.__ModuleLoader__.load({
       const [open, setOpen] = React.useState(false);
       const [shown, setShown] = React.useState(null);
       const [note, setNote] = React.useState('');
+      const bodySeq = React.useRef(0);
 
       React.useEffect(() => {
         let stopped = false;
@@ -214,12 +228,15 @@ window.__ModuleLoader__.load({
       if (items.length === 0) return null;
 
       const showBody = (item) => {
+        const seq = bodySeq.current + 1;
+        bodySeq.current = seq;
         if (shown && shown.id === item.id) {
           setShown(null);
           return;
         }
         setNote('');
         post('/lite-memory/body', { sessionId, id: item.id }).then((result) => {
+          if (bodySeq.current !== seq) return;
           if (result.ok && result.body && typeof result.body.body === 'string') {
             setShown({ id: item.id, title: result.body.title || item.title, body: result.body.body });
             return;
@@ -229,14 +246,12 @@ window.__ModuleLoader__.load({
         });
       };
 
-      /** 引用只给名字：标题里被拼进来的条件不带来。 */
-      const titleOf = (item) => {
-        const raw = String(item.title || '').split(/\s*[｜|]\s*/)[0].trim().replace(/[（(]$/u, '').trim();
-        return `${item.scope === 'global' ? '[全局] ' : ''}${raw || '记忆'}`;
-      };
+      /** 引用只给名字：标题原样显示，不在这里再切一刀。 */
+      const titleOf = (item) => `${item.scope === 'global' ? '[全局] ' : ''}${String(item.title || '') || '记忆'}`;
       const rows = open ? items.map((item) => h('button', { key: item.id, type: 'button', onClick: () => showBody(item), 'aria-label': `查看记忆 ${item.title}`, style: ITEM }, titleOf(item))) : [];
 
       const toggle = () => {
+        bodySeq.current += 1;
         setOpen(!open);
         setShown(null);
         setNote('');
