@@ -402,5 +402,22 @@ test('old citation session files are pruned', () => {
   assert.equal(listCitations('session-new').items.length, 1);
 });
 
+test('title is identity: separator and pasted condition are cut before saving', () => {
+  const scope = fresh('title-clean');
+  const saved = upsert(scope, {
+    title: 'Chrome 临时 profile 触发「找不到钥匙串」弹窗｜macOS 上由',
+    summary: '临时 profile 起 Chrome 会弹钥匙串窗口',
+    when: 'macOS 上由 agent 启动 Chrome 且用临时 profile 时',
+  });
+  assert.equal(saved.record.title, 'Chrome 临时 profile 触发「找不到钥匙串」弹窗');
+  assert.equal(saved.record.when, 'macOS 上由 agent 启动 Chrome 且用临时 profile 时');
+
+  const pasted = normalizeDraft({ title: '发布顺序 （发版前要按顺序做的事）', summary: '发版前要按顺序做的事', when: '发版前要按顺序做的事' });
+  assert.equal(pasted.title, '发布顺序');
+
+  const whole = normalizeDraft({ title: '发布顺序 发版前要按顺序做的事', summary: '发版前要按顺序做的事', when: '发版前要按顺序做的事' });
+  assert.equal(whole.title, '发布顺序');
+});
+
 for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
 console.log(`store.test.mjs: ${passed} passed`);
