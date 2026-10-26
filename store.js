@@ -1572,8 +1572,9 @@ function findCurrent(id, scope, options = {}) {
     const record = index.entries.find((item) => item.id === id && item.status !== 'archived');
     if (!record) continue;
     if (!readableRecord(record, options, index)) continue;
-    /** 关联目标也按本轮上下文判适用；条件未知、过期或暂停的目标不给标题。 */
-    if (view.statusOf(record, options.context || {}) !== 'ok') continue;
+    /** 关联目标与来源走同一资格门槛：项目归属、学习状态、条件适用缺一不可。 */
+    const gate = view.eligibility(record, options.runtime || {}, 'read', options.now || Date.now());
+    if (!gate.ok || gate.status !== 'ok') continue;
     if (isExperimentalRecord(record) && !view.experimentalUsable(record, options.now)) continue;
     return {
       id: record.id,

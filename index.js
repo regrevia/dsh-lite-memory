@@ -1946,7 +1946,7 @@ export function apply(ctx, config) {
         if (source && !view.eligibility(source.record, gateRuntime, 'read').ok) {
           return { id: '', scope: '', status: 'needs_context', links: '' };
         }
-        const found = readLinks(scope, args.id, { context, allowExperimental });
+        const found = readLinks(scope, args.id, { context, allowExperimental, runtime: gateRuntime, now: Date.now() });
         if (!found) throw new Error(`没有 ${args.id} 这条记忆`);
         if (found.status !== 'ok') {
           const withheld = { id: '', scope: '', status: found.status, links: '' };
