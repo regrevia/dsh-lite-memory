@@ -30,8 +30,11 @@ const SECRET_PATTERNS = [
 
 const SUGGESTION_ID = /^sug_[a-z0-9]{6,}$/;
 
-/** 托管尾巴标记：摘要被截短时，完整原文补在正文末尾，同一份只留一次。 */
-const SUMMARY_TAIL = '\n\n摘要原文：';
+/**
+ * 旧版把超长摘要的原文托管在正文末尾，用这个标记分隔。
+ * 现在只拿它做保守识别：旧正文可以标记待整理，但绝不改写；新写入也不再产生尾巴。
+ */
+const LEGACY_SUMMARY_TAIL = '摘要原文：';
 
 /**
  * 实验来源的条目默认不属于普通记忆读取面：开关关闭、暂停或身份未知时，
@@ -84,6 +87,8 @@ function toFlat(entry) {
     id: entry.id,
     title: current.title || '',
     summary: current.summary || '',
+    /** 超长摘要的完整原句单独托管，不进正文；平铺出来供保存路径与回执核对。 */
+    summaryFull: typeof maintenance.summaryFull === 'string' ? maintenance.summaryFull : '',
     when: current.when || '',
     body: typeof current.body === 'string' ? current.body : '',
     kind: current.kind || 'note',
@@ -117,7 +122,7 @@ function toFlat(entry) {
 
 function fromFlat(record, status) {
   const at = record.updated || record.created || new Date().toISOString();
-  return {
+  const entry = {
     id: record.id,
     revision: Number(record.revision) || 1,
     status: status || (record.status === 'archived' ? 'archived' : 'active'),
@@ -155,6 +160,13 @@ function fromFlat(record, status) {
       lastUsed: record.lastUsed || at,
     },
   };
+  /** 完整摘要是维护区字段：显式给了就覆盖，给了空串就清掉，不给则沿用旧值。 */
+  if (Object.prototype.hasOwnProperty.call(record, 'summaryFull')) {
+    const full = typeof record.summaryFull === 'string' ? record.summaryFull : '';
+    if (full) entry.maintenance.summaryFull = full;
+    else delete entry.maintenance.summaryFull;
+  }
+  return entry;
 }
 
 /**
@@ -168,12 +180,14 @@ export function loadIndex(scope, options = {}) {
   }
   const loaded = state.load(scope, options);
   const entries = loaded.state.entries.filter((entry) => entry.status === 'active').map(toFlat);
-  /** 归档条目热状态里只有元数据，正文在冷存；读的时候再补回来。 */
+  /**
+   * 归档条目只加载元数据，正文留在冷存里按需读：列表、图谱、宫殿、snapshot 都
+   * 不该为了显示标题去读归档正文，更不能因为某个旧归档缺冷存就把整层读失败。
+   */
   const archived = loaded.state.entries.filter((entry) => entry.status === 'archived').map((entry) => {
-    const body = hydrateCold(scope, entry);
     const record = toFlat(entry);
     record.cold = Boolean(entry.maintenance && entry.maintenance[COLD_MARK]);
-    record.coldBody = body;
+    record.coldBody = '';
     return record;
   });
   cacheBodies(scope, loaded.state.entries);
@@ -326,20 +340,18 @@ export function normalizeDraft(source, options = {}) {
   const mayOmitSummary = options.requireSummary === false || Boolean(id);
   if (!summary && !mayOmitSummary) throw new Error('摘要为空');
   /**
-   * 正文是否由调用方显式给出，和「摘要太长所以自动补一份」必须分开。
-   * 否则同名更新会被自动补出的正文当成显式覆盖，把原正文冲掉。
+   * 正文只属于调用方显式给出的内容：摘要超长时不再往正文里塞托管尾巴，
+   * 完整原句单独进维护区（maintenance.summaryFull），正文保持原样。
    */
   const bodyExplicit = has('body');
   const body = bodyExplicit ? String(draft.body ?? '').trim() : '';
-  const autoBody = !bodyExplicit && summaryShortened ? rawSummary : '';
-  const checked = bodyExplicit ? body : autoBody;
-  const bodyBytes = Buffer.byteLength(checked);
-  /** 预算按真正会存进去的正文算：摘要被截短时，托管尾巴也占字节。 */
-  const tailNeeded = Boolean(summaryShortened) && !checked.includes(rawSummary);
-  const storedBytes = bodyBytes + (tailNeeded ? Buffer.byteLength(`${SUMMARY_TAIL}${rawSummary}`) : 0);
+  const summaryFull = summaryShortened ? rawSummary : '';
+  const bodyBytes = Buffer.byteLength(body);
+  /** 预算按真正会存进去的正文 + 完整摘要算：超限就报错，不截断后谎报成功。 */
+  const storedBytes = bodyBytes + Buffer.byteLength(summaryFull);
   if (storedBytes > LIMITS.entryBytes) {
-    throw new Error(autoBody
-      ? `摘要 ${rawSummary.length} 字，超过单条 ${LIMITS.entryBytes} 字节；先拆成两条写，别丢后半段`
+    throw new Error(summaryFull
+      ? `正文 ${bodyBytes} 字节加完整摘要 ${Buffer.byteLength(summaryFull)} 字节，超过单条 ${LIMITS.entryBytes} 字节；先拆成两条写，别丢后半段`
       : `正文 ${bodyBytes} 字节，超过单条 ${LIMITS.entryBytes} 字节；只留原则、判断规则和触发条件`);
   }
   const kind = has('kind') ? textField(draft.kind, 20, '类型') : 'note';
@@ -355,9 +367,8 @@ export function normalizeDraft(source, options = {}) {
   const links = view.normalizeLinks(draft.links, id);
   const applicability = view.normalizeApplicability(draft.applicability);
   const topicKey = has('topicKey') ? textField(draft.topicKey, LIMITS.tagChars, '主题') : undefined;
-  /** 凭据扫描必须覆盖完整原文和托管尾巴：截短后的摘要看不出凭据，原文里有也不行。 */
-  const scannedBody = checked + (tailNeeded ? `${SUMMARY_TAIL}${rawSummary}` : '');
-  const secret = detectSecret([title, summary, rawSummary, when, body, scannedBody, tags.join(' '), topicKey || ''].join('\n'));
+  /** 凭据扫描必须覆盖完整原文：截短后的摘要看不出凭据，原文里有也不行。 */
+  const secret = detectSecret([title, summary, rawSummary, when, body, tags.join(' '), topicKey || ''].join('\n'));
   if (secret) throw new Error(`疑似凭据（${secret}），只记位置，不记值`);
   return {
     id,
@@ -367,7 +378,10 @@ export function normalizeDraft(source, options = {}) {
     body,
     summaryShortened,
     summaryRaw: rawSummary,
-    autoBody,
+    summaryFull,
+    /** 回执字段：完整原句已另存维护区（不是塞进正文）。 */
+    fullTextSaved: Boolean(summaryFull),
+    /** 兼容旧回执：正文里从来没有托管尾巴，这个字段恒为 false。 */
     fullTextInBody: false,
     kind: kind || 'note',
     tags,
@@ -404,9 +418,19 @@ function readBody(scope, id) {
   if (typeof cached === 'string' && cached !== '') return cached;
   const found = state.readEntryBody(scope, id);
   if (!found) throw new Error(`记忆正文缺失：${id} 在索引里，但正文文件不在了`);
-  /** 归档正文不在热状态里：状态里是空串时回冷存读一次，读到就顺手缓存。 */
+  /**
+   * 归档正文不在热状态里：只有真要读这一条正文时才回冷存取，
+   * 缺文件/坏文件都报明确错误，不拿空正文冒充「这条没有正文」。
+   */
   if (!found.body && found.entry && found.entry.status === 'archived') {
-    const payload = readCold(scope, id);
+    let payload = null;
+    try {
+      payload = readCold(scope, id, { required: true });
+    } catch (error) {
+      /** 旧版归档在正文为空时可能没写过冷存：这类老记录按空正文读回，不改写也不再报错。 */
+      const legacy = !(found.entry.maintenance && found.entry.maintenance.coldSaved === true);
+      if (!(legacy && error && error.code === 'cold_missing')) throw error;
+    }
     if (payload && typeof payload.body === 'string' && payload.body) {
       writeBody(scope, id, payload.body);
       return payload.body;
@@ -441,9 +465,12 @@ function coldFileOf(scope, id) {
   return path.join(coldDirOf(scope), `${id}.json`);
 }
 
-function coldPayload(record) {
+function coldPayload(scope, record) {
   return {
+    /** 冷存文件自带身份：读回来先核对是不是这一条、这一层，不靠文件名猜。 */
     id: record.id,
+    scope: scope.key,
+    revision: Number(record.revision) || 1,
     at: new Date().toISOString(),
     body: typeof record.body === 'string' ? record.body : '',
     versions: (Array.isArray(record.versions) ? record.versions : [])
@@ -458,41 +485,37 @@ function writeCold(scope, record) {
   fs.mkdirSync(dir, { recursive: true });
   const file = coldFileOf(scope, record.id);
   const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify(coldPayload(record))}\n`);
+  fs.writeFileSync(tmp, `${JSON.stringify(coldPayload(scope, record))}\n`);
   fs.renameSync(tmp, file);
 }
 
-function readCold(scope, id) {
+/**
+ * 读冷存：文件缺失时按 required 决定返回 null 还是报错；JSON 损坏、身份不符
+ * 一律抛明确错误，绝不静默返回空正文冒充「这条没有正文」。
+ */
+function readCold(scope, id, options = {}) {
+  const required = options.required === true;
+  const file = coldFileOf(scope, id);
   let raw;
   try {
-    raw = fs.readFileSync(coldFileOf(scope, id), 'utf8');
+    raw = fs.readFileSync(file, 'utf8');
   } catch (error) {
-    if (error && error.code === 'ENOENT') return null;
+    if (error && error.code === 'ENOENT') {
+      if (!required) return null;
+      throw new state.StateError('cold_missing', `冷存里没有这条的正文备份（${file}）；先修复冷存再读，不拿空正文顶上`);
+    }
     throw error;
   }
+  let payload;
   try {
-    return JSON.parse(raw);
+    payload = JSON.parse(raw);
   } catch {
-    return null;
+    throw new state.StateError('cold_corrupt', `冷存文件不是合法 JSON（${file}）；先修复再读，不拿空正文顶上`);
   }
-}
-
-/** 归档条目读回冷存正文，旧版本正文按 at 对回；返回补回的正文（没有就是空串）。 */
-function hydrateCold(scope, entry) {
-  if (entry.status !== 'archived' || !(entry.maintenance && entry.maintenance[COLD_MARK])) return '';
-  const payload = readCold(scope, entry.id);
-  if (!payload) return '';
-  const body = typeof payload.body === 'string' ? payload.body : '';
-  if (body) entry.current.body = body;
-  const versions = Array.isArray(entry.maintenance.versions) ? entry.maintenance.versions : [];
-  const stored = new Map((Array.isArray(payload.versions) ? payload.versions : [])
-    .map((row) => [String((row && row.at) || ''), row && row.body]));
-  for (const version of versions) {
-    if (typeof (version && version.body) === 'string' && version.body) continue;
-    const hit = stored.get(String((version && version.at) || ''));
-    if (hit) version.body = hit;
+  if (!payload || typeof payload !== 'object' || payload.id !== id || payload.scope !== scope.key || typeof payload.body !== 'string') {
+    throw new state.StateError('cold_corrupt', `冷存文件记录的条目不匹配这一条或这一层（${file}）；先修复再读，不拿空正文顶上`);
   }
-  return body;
+  return payload;
 }
 
 /** 写回状态前把归档正文摘出去：只有正文/旧版本真变了才重写冷存文件。 */
@@ -515,64 +538,91 @@ function coldStored(scope, record) {
   }
   /** 正文和冷存里的一致就不重写：五百条归档每次保存只动真变过的那几条。 */
   const cached = record.cold === true && known !== null && known === body;
-  if ((body || hasVersionBodies) && !cached) writeCold(scope, { ...record, body });
+  /** 空正文也要落一份冷存：只要标了 coldBody，就必须有自证身份的文件可读回。 */
+  if (!cached) writeCold(scope, { ...record, body });
   return {
     ...record,
     body: '',
     cold: true,
     coldBody: body,
     versions: versions.map((version) => ({ ...(version || {}), body: '' })),
-    maintenance: { ...(record.maintenance || {}), [COLD_MARK]: true },
+    maintenance: { ...(record.maintenance || {}), [COLD_MARK]: true, coldSaved: true },
   };
 }
 
-/** 彻底删除前先清冷存副本：正文冷存在这里，清完 state.purge 才扫描不到残留。 */
-function purgeCold(scope, ids, sentinels) {
-  const dir = coldDirOf(scope);
-  let names = [];
-  try {
-    names = fs.readdirSync(dir);
-  } catch {
-    return;
+/**
+ * 彻底删除是一个事务：先把要删的冷存文件按 id 精确移到层外的隔离区
+ * （state.purge 只扫 scope.dir，所以隔离区必须在层外），state.purge 成功后才丢弃隔离副本；
+ * 失败按错误类型恢复或留待重放收尾。绝不按标题/正文片段扫描别人的冷存文件。
+ */
+const PURGE_TRASH_DIR = '.purge-trash';
+
+function trashDirOf(scope) {
+  const safe = String(scope.key || '').replace(/[^A-Za-z0-9._-]/g, '_') || '_';
+  return path.join(memoryRoot(), PURGE_TRASH_DIR, safe);
+}
+
+/** 只搬走 ids 对应的 <id>.json；别的条目一个字节都不动。 */
+function isolateCold(scope, ids, operationId) {
+  const token = String(operationId || '').replace(/[^A-Za-z0-9._-]/g, '_') || crypto.randomBytes(8).toString('hex');
+  const dir = path.join(trashDirOf(scope), token);
+  const moved = [];
+  for (const id of ids || []) {
+    const from = coldFileOf(scope, id);
+    if (!fs.existsSync(from)) continue;
+    fs.mkdirSync(dir, { recursive: true });
+    const to = path.join(dir, `${id}.json`);
+    fs.renameSync(from, to);
+    moved.push({ from, to });
   }
-  const wanted = new Set((ids || []).map((id) => `${id}.json`));
-  for (const name of names) {
-    const file = path.join(dir, name);
-    if (wanted.has(name)) {
-      fs.rmSync(file, { force: true });
-      continue;
-    }
-    if (!(sentinels || []).length) continue;
-    let raw = '';
+  return { dir, moved };
+}
+
+function restoreCold(isolated) {
+  let restored = true;
+  for (const row of isolated.moved) {
     try {
-      raw = fs.readFileSync(file, 'utf8');
+      fs.renameSync(row.to, row.from);
     } catch {
-      continue;
+      /** 恢复失败就保留整个隔离区：副本还在，重放/人工都能取回，不能顺手删掉。 */
+      restored = false;
     }
-    for (const sentinel of sentinels) {
-      if (typeof sentinel !== 'string' || sentinel.length < 4) continue;
-      const escaped = JSON.stringify(sentinel).slice(1, -1);
-      if (raw.includes(sentinel) || raw.includes(escaped)) {
-        fs.rmSync(file, { force: true });
-        break;
-      }
-    }
+  }
+  if (restored) dropColdQuarantine(isolated);
+}
+
+function dropColdQuarantine(isolated) {
+  try {
+    fs.rmSync(isolated.dir, { recursive: true, force: true });
+  } catch {
+    /** 删不掉隔离目录不影响删除结果，下次收尾再清。 */
   }
 }
 
-/** 要从冷存里扫掉的原文片段：标题、摘要、正文和旧版本正文。 */
-function coldSentinels(records) {
-  const out = [];
-  for (const record of records || []) {
-    if (!record) continue;
-    for (const value of [record.title, record.summary, record.when, record.body, record.topicKey]) {
-      if (typeof value === 'string' && value.length >= 4) out.push(value);
-    }
-    for (const version of Array.isArray(record.versions) ? record.versions : []) {
-      if (version && typeof version.body === 'string' && version.body.length >= 4) out.push(version.body);
-    }
+/** 删除确认后的收尾：清掉这一层隔离区里残留的副本（上一次做到一半留下的）。 */
+function cleanColdQuarantine(scope) {
+  try {
+    fs.rmSync(trashDirOf(scope), { recursive: true, force: true });
+  } catch {
+    /** 收尾清不掉不影响数据正确性。 */
   }
-  return out;
+}
+
+/**
+ * 删除与冷存的一致顺序：隔离 → 发布删除 → 丢弃隔离副本。
+ * 发布失败（例如 purge_pending）时保留隔离副本，留给重放路径收尾。
+ */
+function purgeWithCold(scope, ids, run) {
+  const isolated = isolateCold(scope, ids);
+  try {
+    const result = run();
+    dropColdQuarantine(isolated);
+    return result;
+  } catch (error) {
+    if (error && error.code === 'purge_pending') throw error;
+    restoreCold(isolated);
+    throw error;
+  }
 }
 
 function entrySize(record, body) {
@@ -784,6 +834,7 @@ function snapshot(record, body) {
     at: record.updated || record.created || new Date().toISOString(),
     title: record.title,
     summary: record.summary,
+    summaryFull: typeof record.summaryFull === 'string' ? record.summaryFull : '',
     when: record.when || '',
     kind: record.kind || 'note',
     tags: [...(record.tags || [])],
@@ -828,24 +879,12 @@ function rulesOf(draft, body, index, foreign) {
   return rules;
 }
 
-/** 摘掉正文里托管的摘要原文尾巴：反复改摘要时不能越堆越长。 */
-function stripSummaryTail(text) {
-  let out = String(text || '');
-  for (;;) {
-    const mark = out.lastIndexOf(SUMMARY_TAIL);
-    if (mark < 0) return out;
-    out = out.slice(0, mark);
-  }
-}
-
-/** 长摘要的原文不能丢：正文里没有这段时补在末尾，已有或重写时只留最新一份。 */
-function bodyWithSummaryTail(body, draft) {
-  const current = String(body || '');
-  const raw = String(draft.summaryRaw || '');
-  if (!raw || !draft.summaryShortened) return { body: current, added: false };
-  const base = stripSummaryTail(current);
-  if (base.includes(raw)) return { body: base, added: false };
-  return { body: base ? `${base}${SUMMARY_TAIL}${raw}` : raw, added: true };
+/**
+ * 旧正文里可能留着「摘要原文：」尾巴：只识别、做标记，绝不改写。
+ * 猜不出来哪一段是托管内容，删错就是把用户原话删了。
+ */
+function hasLegacySummaryTail(text) {
+  return typeof text === 'string' && text.includes(LEGACY_SUMMARY_TAIL);
 }
 
 function mergedFields(draft, record, oldBody, index, writeMode = 'patch', foreign) {
@@ -940,11 +979,13 @@ function applyDraft(scope, index, source, now, options = {}) {
   if (record) {
     const oldBody = readBody(scope, record.id);
     const next = mergedFields(draft, record, oldBody, index, writeMode, foreign);
-    const tail = bodyWithSummaryTail(next.body, draft);
-    next.body = tail.body;
-    /** 回执只说真话：摘要原文确实在正文里，才标 fullTextInBody。 */
-    draft.fullTextInBody = Boolean(draft.summaryShortened)
-      && next.body.includes(String(draft.summaryRaw || ''));
+    /** 正文原样保存：摘要再长也不往正文里补尾巴；完整原句进维护区。 */
+    draft.fullTextInBody = false;
+    /** 摘要这次被改过就按本次结果落 summaryFull：改短即清空，没改则保持原值。 */
+    const summaryFull = draft.has.summary
+      ? (draft.summaryShortened ? String(draft.summaryRaw || '') : '')
+      : (typeof record.summaryFull === 'string' ? record.summaryFull : '');
+    draft.fullTextSaved = Boolean(summaryFull);
     const noop = next.title === record.title && next.summary === record.summary
       && next.when === (record.when || '') && next.kind === (record.kind || 'note')
       && JSON.stringify(next.tags) === JSON.stringify(record.tags || [])
@@ -954,7 +995,8 @@ function applyDraft(scope, index, source, now, options = {}) {
       && JSON.stringify(next.links) === JSON.stringify(record.links || [])
       && (next.topicKey || '') === (record.topicKey || '')
       && next.applicability === (record.applicability || 'all_in_scope')
-      && next.body === oldBody;
+      && next.body === oldBody
+      && summaryFull === (typeof record.summaryFull === 'string' ? record.summaryFull : '');
     if (noop) {
       return { record, merged: true, mergedFrom: null, similar: null, similarList, draft, noop: true, previousBody: oldBody, archived: [] };
     }
@@ -963,6 +1005,7 @@ function applyDraft(scope, index, source, now, options = {}) {
     const nextRecord = {
       ...record,
       ...next,
+      summaryFull,
       aliases: titles,
       versions,
       revision: (record.revision || 1) + 1,
@@ -972,6 +1015,11 @@ function applyDraft(scope, index, source, now, options = {}) {
       status: 'active',
       source: record.source || (source && source.source) || 'user_explicit',
     };
+    nextRecord.maintenance = { ...(record.maintenance || {}) };
+    if (summaryFull) nextRecord.maintenance.summaryFull = summaryFull;
+    else delete nextRecord.maintenance.summaryFull;
+    /** 旧正文里的托管尾巴只标记待整理，绝不在这里改写用户正文。 */
+    if (hasLegacySummaryTail(next.body)) nextRecord.maintenance.legacySummaryTail = true;
     nextRecord.bytes = entrySize(nextRecord, next.body);
     const archived = assertFits(scope, index, nextRecord);
     writeBody(scope, record.id, next.body);
@@ -979,15 +1027,16 @@ function applyDraft(scope, index, source, now, options = {}) {
     return { record, merged: true, mergedFrom, similar: null, similarList, draft, noop: false, previousBody: oldBody, archived };
   }
   if (writeMode === 'replace_current') throw new Error('整份替换要先指明是哪条，不能用来新增');
-  const seed = draft.autoBody || draft.body;
-  const tail = bodyWithSummaryTail(seed, draft);
-  const createdBody = tail.body;
-  draft.fullTextInBody = Boolean(draft.summaryShortened) && createdBody.includes(String(draft.summaryRaw || ''));
+  /** 新建也只用调用方给的正文：超长摘要的完整原句进维护区，不混进正文。 */
+  const createdBody = draft.body;
+  draft.fullTextInBody = false;
+  draft.fullTextSaved = Boolean(draft.summaryFull);
   const rules = rulesOf(draft, createdBody, index, foreign);
   const created = {
     id: newId(),
     title: draft.title,
     summary: draft.summary,
+    summaryFull: draft.summaryFull,
     when: draft.when,
     kind: draft.kind,
     tags: draft.tags,
@@ -1008,8 +1057,12 @@ function applyDraft(scope, index, source, now, options = {}) {
     hits: 0,
     merges: 0,
     versions: [],
+    maintenance: {},
     bytes: 0,
   };
+  if (draft.summaryFull) created.maintenance.summaryFull = draft.summaryFull;
+  /** 旧正文里的托管尾巴只标记待整理，绝不改写用户正文。 */
+  if (hasLegacySummaryTail(createdBody)) created.maintenance.legacySummaryTail = true;
   created.bytes = entrySize(created, created.body);
   const archived = assertFits(scope, index, created);
   writeBody(scope, created.id, created.body);
@@ -1419,9 +1472,9 @@ export function forget(scope, id, options = {}) {
       for (const source of [scope, globalScope()]) {
         const pending = state.purgeIntent(source);
         if (!pending) continue;
-        /** 冷存里有待删条目的正文副本：先删掉，state.purge 的残留扫描才收得干净。 */
-        purgeCold(source, pending.ids, []);
-        const result = state.purge(source, { resume: true });
+        /** 冷存里有待删条目的正文副本：先隔离，state.purge 的残留扫描才收得干净。 */
+        const result = purgeWithCold(source, pending.ids, () => state.purge(source, { resume: true }));
+        cleanColdQuarantine(source);
         removeBody(source, id);
         if (pending.ids.includes(id)) {
           replayed = {
@@ -1459,8 +1512,8 @@ export function forget(scope, id, options = {}) {
       }
       if (archived) {
         /** 归档条目也能彻底删除：state.purge 本来就按 id 清整份状态，只是以前没走到这里。 */
-        purgeCold(source, [id], coldSentinels([record]));
-        const result = state.purge(source, { ids: [id], operationId: options.operationId });
+        const result = purgeWithCold(source, [id], () => state.purge(source, { ids: [id], operationId: options.operationId }));
+        cleanColdQuarantine(source);
         removeBody(source, id);
         return {
           id,
@@ -1471,8 +1524,8 @@ export function forget(scope, id, options = {}) {
           scopeKey: source.key,
         };
       }
-      purgeCold(source, [id], coldSentinels([record]));
-      const result = state.purge(source, { ids: [id], operationId: options.operationId });
+      const result = purgeWithCold(source, [id], () => state.purge(source, { ids: [id], operationId: options.operationId }));
+      cleanColdQuarantine(source);
       removeBody(source, id);
       return {
         id,
@@ -1558,6 +1611,7 @@ export function undoChange(scope, id, options = {}) {
         ...record,
         title: last.title || record.title,
         summary: last.summary || record.summary,
+        summaryFull: typeof last.summaryFull === 'string' ? last.summaryFull : '',
         when: last.when || '',
         kind: last.kind || record.kind,
         tags: Array.isArray(last.tags) ? last.tags : record.tags,
@@ -1574,6 +1628,9 @@ export function undoChange(scope, id, options = {}) {
       };
       writeBody(source, record.id, last.body);
       Object.assign(record, restored);
+      record.maintenance = { ...(record.maintenance || {}) };
+      if (record.summaryFull) record.maintenance.summaryFull = record.summaryFull;
+      else delete record.maintenance.summaryFull;
       record.bytes = entrySize(record, last.body);
       try {
         saveIndex(source, index);
@@ -2751,9 +2808,15 @@ function economyOf(ledger) {
 }
 
 /** 给整理器的候选规则：只读、有限，不跨项目。 */
+/** 整理器看到的规则顺序与扣尝试时一致：按状态/最近使用排序，不靠插入顺序。 */
+function orderedLearningRules(index) {
+  const visible = learningRulesOf(index).filter(visibleLearningRule);
+  return learning.orderOrganizerRules(visible, { limit: learning.LIMITS.organizerRules });
+}
+
 export function learningRulesForOrganizer(scope) {
   const index = loadIndex(scope);
-  return learningRulesOf(index).filter(visibleLearningRule).slice(0, 8).map(learningRuleView);
+  return orderedLearningRules(index).map(learningRuleView);
 }
 
 /**
@@ -2789,7 +2852,7 @@ export function beginLearningAttempt(scope, options = {}) {
         generation: index.generation,
         episodeId,
         learning: next,
-        rules: learningRulesOf(index).filter(visibleLearningRule).slice(0, 8).map(learningRuleView),
+        rules: orderedLearningRules(index).map(learningRuleView),
         replayed: result.replayed === true,
       };
     } catch (error) {
@@ -2891,6 +2954,11 @@ export function commitLearning(scope, batch = {}) {
               messageIds: (batch.messageIds || []).slice(-3),
               at,
             };
+            /** 用户原句优先取本次改动带的摘录，其次取整批的：四处回执都能看到原话。 */
+            const excerpt = typeof change.sourceExcerpt === 'string'
+              ? change.sourceExcerpt
+              : (typeof batch.sourceExcerpt === 'string' ? batch.sourceExcerpt : '');
+            if (excerpt) evidence.sourceExcerpt = excerpt;
             merged.learning = {
               ...learning.nextLearningState({
                 existing: flat,
@@ -2924,6 +2992,11 @@ export function commitLearning(scope, batch = {}) {
               messageIds: (batch.messageIds || []).slice(-3),
               at,
             };
+            /** 用户原句优先取本次改动带的摘录，其次取整批的：四处回执都能看到原话。 */
+            const excerpt = typeof change.sourceExcerpt === 'string'
+              ? change.sourceExcerpt
+              : (typeof batch.sourceExcerpt === 'string' ? batch.sourceExcerpt : '');
+            if (excerpt) evidence.sourceExcerpt = excerpt;
             const merged = learning.mergeChange(null, change, { now });
             /** 同主题、同条件的新规则并进已有条目：整理器换个措辞不该长出第二条。 */
             const signature = (list) => (Array.isArray(list) ? list : [])

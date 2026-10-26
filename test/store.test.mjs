@@ -153,14 +153,18 @@ test('oversized body is rejected, old data untouched', () => {
   assert.equal(loadIndex(scope).entries[0].revision, 1);
 });
 
-test('over-long title is an error; over-long summary is truncated but the full text is saved', () => {
+test('over-long title is an error; over-long summary keeps its full text outside the body', () => {
   const scope = fresh('length');
   assert.throws(() => upsert(scope, { title: 't'.repeat(LIMITS.titleChars + 1), summary: '写得短一点' }), /标题超过/);
   const long = '长'.repeat(LIMITS.summaryChars + 1);
   const saved = upsert(scope, { title: '长摘要', summary: long });
   assert.equal(saved.record.summary.length, LIMITS.summaryChars);
-  assert.equal(readEntry(scope, saved.record.id).body, long);
-  assert.equal(saved.draft.fullTextInBody, true);
+  /** 完整原句进维护区，正文保持空：不再往正文里补「摘要原文」尾巴。 */
+  assert.equal(readEntry(scope, saved.record.id).body, '');
+  assert.equal(saved.record.summaryFull, long);
+  assert.equal(readEntry(scope, saved.record.id).maintenance.summaryFull, long);
+  assert.equal(saved.draft.fullTextSaved, true);
+  assert.equal(saved.draft.fullTextInBody, false);
   assert.equal(saved.draft.summaryShortened, true);
 });
 
@@ -269,7 +273,8 @@ test('forget archives both body and record; undo restores the previous version',
   assert.equal(countOf(scope), 0);
   const archived = loadIndex(scope).archived.find((item) => item.id === first.record.id);
   assert.equal(archived.status, 'archived');
-  assert.equal(archived.body, '第一版正文');
+  assert.equal(archived.body, '', '列表只拿归档元数据，不读冷存正文');
+  assert.equal(readEntry(scope, first.record.id).body, '第一版正文', '真要读这一条时才从冷存取');
   const againArchive = forget(scope, first.record.id, { mode: 'archive' });
   assert.equal(againArchive.mode, 'archive');
   assert.equal(againArchive.already, true);
@@ -860,67 +865,117 @@ test('R24 省略正文的更新不覆盖已有正文（按 id 与同名都成立
   assert.equal(bodyOf(scope, id), '旧正文：先看连接数。', '同名更新省略正文时保留原正文');
 });
 
-test('R25 长摘要改动即使只差第 61 个字符也算改过，全文仍保留', () => {
+test('R25 长摘要改动即使只差第 61 个字符也算改过，完整原句另存', () => {
   const scope = fresh('long-summary-change');
   const head = '摘要主体'.repeat(15);
   const first = upsert(scope, { title: '长摘要规则', summary: `${head}甲` });
   const id = first.record.id;
   assert.equal(first.record.summary.length, LIMITS.summaryChars);
-  assert.match(bodyOf(scope, id), /甲$/);
+  assert.equal(bodyOf(scope, id), '', '正文不塞摘要原文');
+  assert.equal(first.record.summaryFull, `${head}甲`);
   const again = upsert(scope, { id, title: '长摘要规则', summary: `${head}乙` });
   assert.equal(again.noop, false, '第 61 个字符变化不能当作没改');
-  const body = bodyOf(scope, id);
-  assert.match(body, /甲/);
-  assert.match(body, /乙/, '新的完整摘要也落盘');
+  assert.equal(bodyOf(scope, id), '');
+  assert.equal(again.record.summaryFull, `${head}乙`, '新的完整摘要也落盘');
+  assert.equal(again.record.maintenance.summaryFull, `${head}乙`);
   assert.equal(again.record.summary.length, LIMITS.summaryChars);
 });
 
-test('R26 显式长正文加短摘要时补上摘要原文，不把两者混成一条', () => {
+test('R26 显式长正文加短摘要时完整原句另存，不混进正文', () => {
   const scope = fresh('body-plus-summary');
   const long = '现场记录'.repeat(20);
   const saved = upsert(scope, { title: '带正文的长摘要', summary: long, body: '显式正文：先复现再改。' });
-  const body = bodyOf(scope, saved.record.id);
-  assert.match(body, /^显式正文：先复现再改。/);
-  assert.match(body, /摘要原文：/);
-  assert.match(body, /现场记录/);
+  const record = readEntry(scope, saved.record.id);
+  assert.equal(record.body, '显式正文：先复现再改。');
+  assert.doesNotMatch(record.body, /摘要原文：/);
+  assert.equal(record.summaryFull, long);
+  assert.equal(record.maintenance.summaryFull, long);
+  assert.equal(saved.draft.fullTextSaved, true);
+  assert.equal(saved.draft.fullTextInBody, false);
 });
 
-
-// ── 长摘要尾巴、凭据、归属、冷归档、lastUsed、未绑作品 ──────────────────
-test('反复改长摘要只留一份「摘要原文」，不会越改越长', () => {
-  const scope = fresh('summary-tail-once');
-  const long = '完整摘要'.repeat(20);
-  const saved = upsert(scope, { title: '反复改的条目', summary: long, body: '第一版正文' });
+// ── 长摘要、用户正文里的「摘要原文：」、凭据、冷存删除 ─────────────────
+test('用户正文里自带「摘要原文：」时原样保留，保存与再次更新都不改写', () => {
+  const scope = fresh('user-tail-text');
+  const body = '用户原话：\n摘要原文：这里本来就是正文的一部分，别动它。';
+  const saved = upsert(scope, { title: '用户写的正文', summary: '用户正文原样保留', body });
   const id = saved.record.id;
-  for (const body of ['第二版正文', '第三版正文', '第四版正文']) {
-    upsert(scope, { id, title: '反复改的条目', summary: long, body });
-  }
-  const body = bodyOf(scope, id);
-  assert.equal((body.match(/摘要原文：/g) || []).length, 1);
-  assert.equal(body, `第四版正文${'\n\n摘要原文：'}${long}`);
-  for (const next of ['甲版摘要内容', '乙版摘要内容']) {
-    upsert(scope, { id, title: '反复改的条目', summary: `${long}${next}`, body: '第四版正文' });
-  }
-  const changed = bodyOf(scope, id);
-  assert.equal((changed.match(/摘要原文：/g) || []).length, 1, '换摘要也只留最新一份原文');
-  assert.match(changed, /乙版摘要内容/);
-  assert.equal(loadIndex(scope).entries[0].bytes <= LIMITS.entryBytes, true);
+  assert.equal(bodyOf(scope, id), body);
+  upsert(scope, { id, title: '用户写的正文', summary: '再更新一次也不动正文', body });
+  assert.equal(bodyOf(scope, id), body, '第二次更新也不能剥离用户正文');
+  assert.equal(readEntry(scope, id).maintenance.legacySummaryTail, true, '旧标记只做待整理提示');
 });
 
-test('只改摘要不写正文时，旧尾巴被替换而不是叠上去', () => {
-  const scope = fresh('summary-tail-summary-only');
-  const head = '摘要主体'.repeat(15);
-  const first = upsert(scope, { title: '只改摘要', summary: `${head}甲` });
-  const id = first.record.id;
-  const sizes = [];
-  for (const tail of ['乙', '丙', '丁']) {
-    upsert(scope, { id, title: '只改摘要', summary: `${head}${tail}` });
-    sizes.push(Buffer.byteLength(bodyOf(scope, id)));
-  }
-  const body = bodyOf(scope, id);
-  assert.equal((body.match(/摘要原文：/g) || []).length, 1);
-  assert.match(body, /丁$/);
-  assert.equal(sizes[1], sizes[2], '改到第三、四版时正文不再变长');
+test('长摘要改短后清掉旧的完整原句，不留托管尾巴', () => {
+  const scope = fresh('summary-cleared');
+  const long = '完整摘要'.repeat(20);
+  const saved = upsert(scope, { title: '先长后短', summary: long });
+  const id = saved.record.id;
+  assert.equal(readEntry(scope, id).summaryFull, long);
+  upsert(scope, { id, title: '先长后短', summary: '改成一句短的' });
+  const record = readEntry(scope, id);
+  assert.equal(record.summaryFull, '');
+  assert.equal(record.maintenance.summaryFull, undefined);
+  assert.equal(record.body, '');
+  assert.equal(stateOf(scope).entries[0].maintenance.summaryFull, undefined, '热状态里也不留旧原文');
+});
+
+test('冷存共享原文片段时只删目标条目，另一条的正文与历史完整', () => {
+  const scope = fresh('cold-shared');
+  const shared = '这段原文两条都用到';
+  const a = upsert(scope, { title: '共享片段 A', summary: '第一条', body: `${shared}，A 的细节` });
+  const b = upsert(scope, { title: '共享片段 B', summary: '第二条', body: `${shared}，B 的细节`, resolution: 'distinct' });
+  upsert(scope, { id: b.record.id, title: '共享片段 B', summary: '第二条改过', body: `${shared}，B 的第二版` });
+  forget(scope, a.record.id, { mode: 'archive' });
+  forget(scope, b.record.id, { mode: 'archive' });
+  const coldA = path.join(scope.dir, 'cold', `${a.record.id}.json`);
+  const coldB = path.join(scope.dir, 'cold', `${b.record.id}.json`);
+  assert.equal(fs.existsSync(coldA), true);
+  assert.equal(fs.existsSync(coldB), true);
+  forget(scope, a.record.id, { mode: 'purge' });
+  assert.equal(fs.existsSync(coldA), false, 'A 的冷存按 id 删除');
+  assert.equal(fs.existsSync(coldB), true, 'B 的冷存一个字都不能动');
+  const left = readEntry(scope, b.record.id);
+  assert.equal(left.body, `${shared}，B 的第二版`);
+  assert.ok(left.versions.length >= 1, 'B 的历史版本还在');
+  assert.match(JSON.stringify(fs.readFileSync(coldB, 'utf8')), /B 的第一版|B 的细节|B 的第二版/);
+  assert.equal(fs.existsSync(path.join(scope.dir, 'cold')), true);
+});
+
+test('冷存缺失、损坏或身份不符时报明确错误，不拿空正文顶上', () => {
+  const scope = fresh('cold-broken');
+  const saved = upsert(scope, { title: '冷存出错', summary: '读回要报错', body: '冷存正文：读回要报错' });
+  const id = saved.record.id;
+  forget(scope, id, { mode: 'archive' });
+  const file = path.join(scope.dir, 'cold', `${id}.json`);
+  const good = fs.readFileSync(file, 'utf8');
+  fs.writeFileSync(file, '{ 不是 json');
+  assert.doesNotThrow(() => loadIndex(scope), '列表不读归档正文，冷存坏了也不能整层失败');
+  assert.throws(() => readEntry(scope, id), /冷存|cold_corrupt/);
+  fs.writeFileSync(file, JSON.stringify({ id: 'other', scope: scope.key, revision: 1, body: '别人的正文' }));
+  assert.throws(() => readEntry(scope, id), /冷存|cold_corrupt/);
+  fs.rmSync(file);
+  assert.throws(() => readEntry(scope, id), /冷存|cold_missing/);
+  fs.writeFileSync(file, good);
+  assert.equal(readEntry(scope, id).body, '冷存正文：读回要报错');
+});
+
+test('归档正文懒加载：列表与 snapshot 不读冷存，只有读到该条正文才报 cold_missing', () => {
+  const scope = fresh('cold-lazy');
+  const saved = upsert(scope, { title: '归档懒读', summary: '列表不读正文', body: '懒加载正文：只有读这一条才取' });
+  const id = saved.record.id;
+  forget(scope, id, { mode: 'archive' });
+  const file = path.join(scope.dir, 'cold', `${id}.json`);
+  assert.equal(fs.existsSync(file), true);
+  fs.rmSync(file);
+  const index = loadIndex(scope);
+  const archived = index.archived.find((row) => row.id === id);
+  assert.ok(archived, '归档元数据照常加载');
+  assert.equal(archived.body, '');
+  assert.equal(archived.coldBody, '');
+  assert.doesNotThrow(() => store.learningSnapshot(scope));
+  assert.equal(search(scope, '归档懒读').length, 0, '列表/搜索只认真在用（active）的记录');
+  assert.throws(() => readEntry(scope, id), /冷存|cold_missing/, '真要读这一条正文时缺冷存就报明确错误');
 });
 
 test('被截掉的摘尾巴里藏凭据也要拒绝', () => {
@@ -1105,6 +1160,57 @@ test('项目层未绑作品的候选也能开始整理并提交成规则', () =>
   });
   assert.equal(foreign.ok, false);
   assert.match(foreign.reason, /缺少作品标识/);
+});
+
+test('整理回执的 evidence 带上用户原句，优先本次改动其次整批', () => {
+  const changeFor = (extra = {}) => ({
+    target: 'new', feedbackType: 'spec_change', topicKey: '口播开头',
+    currentText: '开头三句内给结论。', applicability: 'conditional',
+    conditions: [{ key: 'seriesId', value: '口播' }], evidence: ['u0'], persistence: 'project_candidate',
+    ...extra,
+  });
+  const commitOnce = (scope, batchExcerpt, changeExcerpt) => {
+    assert.equal(setEvolution(scope, true, { operationId: `evo-evidence-${scope.key}` }).ok, true);
+    const started = store.beginLearningAttempt(scope, { episodeId: '', operationId: `start-evidence-${scope.key}` });
+    assert.equal(started.ok, true, started.reason);
+    const committed = store.commitLearning(scope, {
+      operationId: `commit-evidence-${scope.key}`, epoch: started.epoch, episodeId: '', projectId: scope.key,
+      sessionId: 's-evidence', messageIds: ['m1', 'm2'],
+      sourceExcerpt: batchExcerpt,
+      changes: [changeFor(changeExcerpt ? { sourceExcerpt: changeExcerpt } : {})], preparedTargets: [],
+    });
+    assert.equal(committed.ok, true, committed.reason);
+    return loadIndex(scope).entries.find((entry) => entry.origin === 'project_evolution');
+  };
+  const fromBatch = commitOnce(fresh('evidence-batch'), '用户原话：开头别绕，三句内给结论。');
+  assert.equal(fromBatch.learning.sourceExcerpt, '用户原话：开头别绕，三句内给结论。');
+  assert.deepEqual(fromBatch.learning.sourceRefs.at(-1).messageIds, ['m1', 'm2'], 'messageIds 仍是真实消息');
+  const fromChange = commitOnce(fresh('evidence-change'), '整批摘录不该优先', '用户原话：开头三句内给结论，别铺垫。');
+  assert.equal(fromChange.learning.sourceExcerpt, '用户原话：开头三句内给结论，别铺垫。', '本次改动摘录优先');
+});
+
+test('整理器规则顺序与开始整理时一致，按状态/最近使用排而不是插入顺序', () => {
+  const scope = fresh('organizer-order');
+  const on = setEvolution(scope, true, { operationId: 'order-evo-on' });
+  assert.equal(on.ok, true, on.reason);
+  const started = store.beginLearningAttempt(scope, { episodeId: '', operationId: 'order-start' });
+  assert.equal(started.ok, true, started.reason);
+  const changes = ['先写的旧规则', '后写的新规则'].map((topic) => ({
+    target: 'new', feedbackType: 'spec_change', topicKey: topic,
+    currentText: `${topic}：按规则走。`, applicability: 'all_in_scope',
+    evidence: ['u0'], persistence: 'project_candidate',
+  }));
+  const committed = store.commitLearning(scope, {
+    operationId: 'order-commit', epoch: started.epoch, projectId: scope.key,
+    sessionId: 's-order', messageIds: ['m1'], changes, preparedTargets: [],
+  });
+  assert.equal(committed.ok, true, committed.reason);
+  const organizer = store.learningRulesForOrganizer(scope).map((row) => row.id);
+  assert.equal(organizer.length, 2);
+  assert.deepEqual(store.learningRulesForOrganizer(scope).map((row) => row.id), organizer, '顺序确定，重复调用不变');
+  const again = store.beginLearningAttempt(scope, { episodeId: '', operationId: 'order-start-2' });
+  assert.equal(again.ok, true, again.reason);
+  assert.deepEqual(again.rules.map((row) => row.id), organizer, '两处必须同一个顺序');
 });
 
 console.log(`store.test.mjs: ${passed} passed`);
