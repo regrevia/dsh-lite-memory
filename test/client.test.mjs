@@ -36,14 +36,37 @@ const graph = graphOf([
 ]);
 assert.equal(graph.nodes.filter((node) => node.kind === 'memory').length, 3);
 assert.equal(graph.nodes.some((node) => node.id === 'tag:发布'), true);
-assert.equal(graph.nodes.some((node) => node.id === 'tag:环境'), true);
-assert.equal(graph.nodes.some((node) => node.id === 'topic:上线'), true);
-assert.equal(graph.edges.filter((edge) => edge.type === 'tag').length, 3);
+assert.equal(graph.nodes.some((node) => node.id === 'tag:环境'), false);
+assert.equal(graph.nodes.some((node) => node.id === 'topic:上线'), false);
+assert.equal(graph.edges.filter((edge) => edge.type === 'tag').length, 2);
 assert.equal(graph.edges.filter((edge) => edge.type === 'link').length, 1);
 assert.deepEqual(graphOf([{ id: 'mem_aaaaaaaa', title: 'A' }]).nodes[0].x, graphOf([{ id: 'mem_aaaaaaaa', title: 'A' }]).nodes[0].x);
 const pair = graphOf([{ id: 'mem_aaaaaaaa', title: 'A' }, { id: 'mem_bbbbbbbb', title: 'B' }]);
 assert.notEqual(pair.nodes[0].x, pair.nodes[1].x);
 assert.notEqual(pair.nodes[0].y, pair.nodes[1].y);
+
+// 共享标签是组：枢纽点比成员大，成员围着它，孤立记忆留在外圈；被更强组吸收的次要标签不另画。
+const hubNode = graph.nodes.find((node) => node.id === 'tag:发布');
+const memberA = graph.nodes.find((node) => node.id === 'mem_aaaaaaaa');
+const memberC = graph.nodes.find((node) => node.id === 'mem_cccccccc');
+assert.ok(hubNode && memberA && memberC);
+assert.ok(hubNode.radius > memberA.radius + 4, '共享标签枢纽应比成员大');
+assert.ok(Math.hypot(memberA.x - hubNode.x, memberA.y - hubNode.y) < 90, '成员应靠近所属枢纽');
+assert.ok(Math.hypot(memberC.x - hubNode.x, memberC.y - hubNode.y) > 90, '无共享标签的记忆应留在外圈');
+
+// 一条记忆只连自己所属组的枢纽：别的共享标签不画跨组虚线。
+const overlap = graphOf([
+  { id: 'mem_dddddddd', title: 'D', tags: ['X', 'Y'] },
+  { id: 'mem_eeeeeeee', title: 'E', tags: ['X', 'Y'] },
+  { id: 'mem_ffffffff', title: 'F', tags: ['X'] },
+  { id: 'mem_gggggggg', title: 'G', tags: ['Y'] },
+  { id: 'mem_hhhhhhhh', title: 'H', tags: ['Y'] },
+  { id: 'mem_iiiiiiii', title: 'I', tags: ['X'] },
+]);
+const overlapTags = overlap.edges.filter((edge) => edge.type === 'tag').map((edge) => `${edge.from}>${edge.to}`);
+assert.equal(overlapTags.length, 6);
+assert.equal(overlapTags.includes('mem_dddddddd>tag:Y'), false);
+assert.equal(overlapTags.includes('mem_eeeeeeee>tag:Y'), false);
 
 // 经验图谱只按共享的适用条件相连，不画没有依据的关系。
 const rules = [

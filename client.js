@@ -750,69 +750,108 @@ window.__ModuleLoader__.load({
 
     /**
      * 图谱只画真实关系：显式关联，以及记录自己的标签 / 主题。
-     * 位置由 id 决定，同一份记忆每次打开都在同一处。
+     * 标签 / 主题是组：枢纽画大点，成员围在它周围画小点。
+     * 位置由 id 与成员关系决定，同一份数据每次打开都在同一处。
      */
-    /** 位置由 id 决定；同一份数据每次打开都在同一处。 */
     const layoutGraph = (nodes, edges, primaryKind) => {
+      const kindOf = new Map(nodes.map((node) => [node.id, node.kind]));
       const degree = new Map();
+      const linkedOf = new Map();
+      const membersOf = new Map();
+      const addLink = (primaryId, hubId) => {
+        if (!linkedOf.has(primaryId)) linkedOf.set(primaryId, new Set());
+        linkedOf.get(primaryId).add(hubId);
+        if (!membersOf.has(hubId)) membersOf.set(hubId, new Set());
+        membersOf.get(hubId).add(primaryId);
+      };
       for (const edge of edges) {
         degree.set(edge.from, (degree.get(edge.from) || 0) + 1);
         degree.set(edge.to, (degree.get(edge.to) || 0) + 1);
+        if (kindOf.get(edge.from) === primaryKind && kindOf.get(edge.to) !== primaryKind) addLink(edge.from, edge.to);
+        if (kindOf.get(edge.to) === primaryKind && kindOf.get(edge.from) !== primaryKind) addLink(edge.to, edge.from);
+      }
+      const primaries = nodes.filter((node) => node.kind === primaryKind);
+      const hubs = nodes.filter((node) => node.kind !== primaryKind);
+      const weightOf = new Map(hubs.map((hub) => [hub.id, (membersOf.get(hub.id) || EMPTY).size]));
+      const groups = new Map();
+      const assignedHub = new Map();
+      const loose = [];
+      for (const node of primaries) {
+        const options = [...(linkedOf.get(node.id) || EMPTY)]
+          .filter((id) => (weightOf.get(id) || 0) > 1)
+          .sort((a, b) => ((weightOf.get(b) || 0) - (weightOf.get(a) || 0)) || a.localeCompare(b));
+        const hubId = options[0];
+        if (!hubId) { loose.push(node); continue; }
+        if (!groups.has(hubId)) groups.set(hubId, []);
+        groups.get(hubId).push(node);
+        assignedHub.set(node.id, hubId);
       }
       const placed = new Map();
-      const primaries = nodes.filter((node) => node.kind === primaryKind);
-      const count = primaries.length;
-      const spread = 0.55 + Math.min(0.45, count * 0.06);
-      primaries.forEach((node, index) => {
-        const seed = hashOf(node.id);
-        const ring = count <= 1 ? 0 : count <= 8 ? 128 : count <= 18 ? 168 : 206;
-        const wobble = count <= 8 ? 1 : 0.64 + ((seed % 100) / 100) * 0.36;
-        const angle = count <= 1 ? 0 : (index / count) * Math.PI * 2 - Math.PI / 2 + ((seed % 17) / 17) * 0.16;
+      if (primaryKind === 'memory') {
+        for (const [hubId, members] of [...groups]) {
+          if (members.length > 1) continue;
+          for (const member of members) {
+            loose.push(member);
+            assignedHub.delete(member.id);
+          }
+          groups.delete(hubId);
+        }
+      }
+      const clusterList = [...groups.entries()]
+        .sort((a, b) => (b[1].length - a[1].length) || a[0].localeCompare(b[0]));
+      const groupCount = clusterList.length;
+      const ring = groupCount <= 1 ? 0 : groupCount <= 4 ? 150 : groupCount <= 8 ? 182 : 212;
+      const hubRadius = (size) => 8 + Math.min(10, Math.sqrt(size) * 3);
+      const placePrimary = (node, x, y) => {
         placed.set(node.id, {
-          ...node,
-          x: 320 + Math.cos(angle) * ring * 1.22 * wobble * spread,
-          y: 236 + Math.sin(angle) * ring * 0.8 * wobble * spread,
-          radius: 5.5 + Math.min(4, (degree.get(node.id) || 0) * 0.7),
+          ...node, x, y,
+          radius: 3.2 + Math.min(2.2, (degree.get(node.id) || 0) * 0.35),
+        });
+      };
+      clusterList.forEach(([hubId, members], index) => {
+        const seed = hashOf(hubId);
+        const angle = groupCount <= 1
+          ? 0
+          : (index / groupCount) * Math.PI * 2 - Math.PI / 2 + ((seed % 13) / 13) * 0.12;
+        const cx = 320 + Math.cos(angle) * ring * 1.22;
+        const cy = 236 + Math.sin(angle) * ring * 0.8;
+        const hub = hubs.find((node) => node.id === hubId);
+        const radius = hubRadius(members.length);
+        placed.set(hubId, { ...hub, x: cx, y: cy, radius });
+        const orbit = radius + 20 + Math.sqrt(members.length) * 13;
+        const start = ((seed % 360) / 180) * Math.PI;
+        members.forEach((node, memberIndex) => {
+          const step = (memberIndex / members.length) * Math.PI * 2;
+          const wobble = 0.88 + ((hashOf(node.id) % 25) / 100);
+          placePrimary(node, cx + Math.cos(start + step) * orbit * wobble, cy + Math.sin(start + step) * orbit * 0.82 * wobble);
         });
       });
-      const hubs = nodes.filter((node) => node.kind !== primaryKind);
-      const kindOf = new Map(nodes.map((node) => [node.id, node.kind]));
-      const linkedOf = new Map(hubs.map((node) => [node.id, new Set()]));
-      for (const edge of edges) {
-        if (linkedOf.has(edge.from) && kindOf.get(edge.to) === primaryKind) linkedOf.get(edge.from).add(edge.to);
-        if (linkedOf.has(edge.to) && kindOf.get(edge.from) === primaryKind) linkedOf.get(edge.to).add(edge.from);
-      }
-      const groups = new Map();
-      for (const node of hubs) {
-        const linked = [...linkedOf.get(node.id)].sort();
-        const key = linked.length > 0 ? linked.join('|') : `solo:${node.id}`;
-        if (!groups.has(key)) groups.set(key, { linked, hubs: [] });
-        groups.get(key).hubs.push(node);
-      }
-      for (const group of groups.values()) {
-        const points = group.linked.map((id) => placed.get(id)).filter(Boolean);
-        const cx = points.length > 0 ? points.reduce((sum, point) => sum + point.x, 0) / points.length : 320;
-        const cy = points.length > 0 ? points.reduce((sum, point) => sum + point.y, 0) / points.length : 236;
-        const outward = Math.hypot(cx - 320, cy - 236);
-        group.hubs.forEach((node, index) => {
+      if (loose.length > 0) {
+        const orbit = groupCount === 0
+          ? (loose.length <= 1 ? 0 : loose.length <= 8 ? 128 : loose.length <= 18 ? 168 : 206)
+          : ring + 96;
+        loose.forEach((node, index) => {
           const seed = hashOf(node.id);
-          const base = outward > 12
-            ? Math.atan2(cy - 236, cx - 320)
-            : ((seed % 360) / 180) * Math.PI;
-          const angle = base + (index - (group.hubs.length - 1) / 2) * 0.6;
-          const distance = group.linked.length >= 3 && group.hubs.length === 1 ? 0 : 48 + group.hubs.length * 4;
-          placed.set(node.id, {
-            ...node,
-            x: cx + Math.cos(angle) * distance,
-            y: cy + Math.sin(angle) * distance * 0.82,
-            radius: node.kind === 'topic' ? 5 : 4,
-          });
+          const angle = loose.length <= 1
+            ? 0
+            : (index / loose.length) * Math.PI * 2 - Math.PI / 2 + ((seed % 17) / 17) * 0.14;
+          const wobble = loose.length <= 8 ? 1 : 0.64 + ((seed % 100) / 100) * 0.36;
+          placePrimary(node, 320 + Math.cos(angle) * orbit * 1.22 * wobble, 236 + Math.sin(angle) * orbit * 0.8 * wobble);
         });
       }
       return {
         nodes: [...placed.values()],
-        edges: edges.filter((edge) => placed.has(edge.from) && placed.has(edge.to)),
-        people: count,
+        edges: edges.filter((edge) => {
+          if (!placed.has(edge.from) || !placed.has(edge.to)) return false;
+          const fromPrimary = kindOf.get(edge.from) === primaryKind;
+          const toPrimary = kindOf.get(edge.to) === primaryKind;
+          if (fromPrimary && toPrimary) return true;
+          if (primaryKind !== 'memory') return true;
+          if (fromPrimary) return assignedHub.get(edge.from) === edge.to;
+          if (toPrimary) return assignedHub.get(edge.to) === edge.from;
+          return false;
+        }),
+        people: primaries.length,
       };
     };
 
@@ -826,7 +865,7 @@ window.__ModuleLoader__.load({
         for (const tag of Array.isArray(record.tags) ? record.tags : EMPTY) tagCount.set(tag, (tagCount.get(tag) || 0) + 1);
         if (record.topicKey) topicCount.set(record.topicKey, (topicCount.get(record.topicKey) || 0) + 1);
       }
-      const tags = [...tagCount.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 8);
+      const tags = [...tagCount.entries()].filter(([, count]) => count > 1).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 8);
       const topics = [...topicCount.entries()].filter(([, count]) => count > 1).sort((a, b) => b[1] - a[1]).slice(0, 4);
       const nodes = [];
       const edges = [];
@@ -944,16 +983,17 @@ window.__ModuleLoader__.load({
         if (list.length === 0) return { x: 0, y: 0, width: 640, height: 472 };
         let minX = Infinity; let maxX = -Infinity; let minY = Infinity; let maxY = -Infinity;
         for (const node of list) {
-          const half = node.kind === primaryKind ? 62 : 38;
+          const wide = node.kind === primaryKind && (graph.people <= 12 || node.id === selectedId);
+          const half = node.kind === primaryKind ? (wide ? 62 : 10) : 38;
           minX = Math.min(minX, node.x - half);
           maxX = Math.max(maxX, node.x + half);
           minY = Math.min(minY, node.y - 16);
-          maxY = Math.max(maxY, node.y + (node.kind === primaryKind ? 28 : 24));
+          maxY = Math.max(maxY, node.y + (wide ? 28 : node.kind === primaryKind ? 12 : 24));
         }
         const width = Math.max(380, maxX - minX + 36);
         const height = Math.max(250, maxY - minY + 36);
         return { x: (minX + maxX) / 2 - width / 2, y: (minY + maxY) / 2 - height / 2, width, height };
-      }, [graph, primaryKind]);
+      }, [graph, primaryKind, selectedId]);
       if (!props.records || props.records.length === 0) {
         return h('div', {
           style: { flex: 1, minHeight: '220px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' },
@@ -1023,8 +1063,9 @@ window.__ModuleLoader__.load({
           const fill = !isPrimary ? 'var(--dsw-alias-label-secondary)'
             : node.state ? (STAGE_TONE[node.state] || 'var(--dsw-alias-brand-primary)')
               : node.experimental ? 'var(--dsw-alias-state-warn-primary)' : 'var(--dsw-alias-brand-primary)';
-          const showLabel = active || hovered || near || (isPrimary && labelSet) || !isPrimary;
-          const nameChars = active || hovered ? 14 : isPrimary ? 7 : 10;
+          const busy = graph.people > 12;
+          const showLabel = active || hovered || near || !isPrimary || (isPrimary && labelSet && !busy);
+          const nameChars = active || hovered ? 15 : isPrimary ? 8 : 12;
           return h('g', {
             key: node.id,
             transform: `translate(${node.x} ${node.y})`,
@@ -1045,18 +1086,20 @@ window.__ModuleLoader__.load({
             'aria-label': pick ? (node.title || node.label) : undefined,
             style: { cursor: pick ? 'pointer' : 'default', outline: 'none' },
           },
-          h('circle', { r: Math.max(12, node.radius + 6), fill: 'transparent' }),
+          h('circle', { r: Math.max(isPrimary ? 14 : 18, node.radius + 6), fill: 'transparent' }),
           active ? h('circle', { r: node.radius + 5, fill: 'none', stroke: 'var(--dsw-alias-brand-primary)', strokeWidth: 1.4, opacity: 0.5 }) : null,
           h('circle', {
             r: node.radius, fill,
-            opacity: active ? 1 : dimmed ? (isPrimary ? 0.35 : 0.14) : isPrimary ? 0.9 : 0.5,
+            opacity: active ? 1 : dimmed ? (isPrimary ? 0.3 : 0.12) : isPrimary ? 0.88 : 0.68,
             stroke: hovered || near ? 'var(--dsw-alias-brand-primary)' : 'none',
             strokeWidth: hovered || near ? 1.2 : 0,
           }),
           showLabel ? h('text', {
-            y: node.radius + 12, textAnchor: 'middle',
-            fill: active ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-secondary)',
-            fontSize: isPrimary ? 9.5 : 8.5, opacity: active ? 0.95 : 0.72,
+            y: node.radius + (isPrimary ? 11 : 13), textAnchor: 'middle',
+            fill: active || !isPrimary ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-secondary)',
+            fontSize: isPrimary ? 8.5 : 10.5,
+            fontWeight: isPrimary ? 400 : 600,
+            opacity: active ? 0.95 : isPrimary ? 0.7 : 0.82,
             paintOrder: 'stroke', stroke: 'var(--dsw-alias-bg-layer-1)', strokeWidth: 3,
             strokeLinejoin: 'round',
           }, SHORT(node.label, nameChars)) : null,
@@ -1658,11 +1701,13 @@ window.__ModuleLoader__.load({
         records: filtered, total: query ? filtered.length : total,
         selectedId: selectedMemory, onPick: onPickNode,
         onPickHub: (node) => {
+          setSelectedMemory('');
+          setSelectedRule('');
           setQuery(node.kind === 'tag' ? node.label.replace(/^#/, '') : node.label);
           setMemoryView('list');
         },
         emptyText: query ? '没有匹配的记忆' : '还没有记忆', ariaLabel: '记忆关系图',
-        legend: '圆点 记忆 · 小点 标签/主题 · 虚线 关联 · 点任意点筛选或查看',
+        legend: '大点 标签/主题 · 小点 记忆 · 虚线 关联 · 点标签筛选，点记忆看正文',
       }));
       const memoryTab = h('div', { role: 'tabpanel', 'aria-label': '记忆', style: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: '9px' } },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flex: '0 0 auto' } },
@@ -1760,7 +1805,7 @@ window.__ModuleLoader__.load({
         records: filteredRules, total: filteredRules.length, graphOf: ruleGraphOf, primaryKind: 'rule',
         selectedId: selectedRule, onPick: onPickRuleNode,
         emptyText: evolutionEmptyText, ariaLabel: '经验关系图',
-        legend: '圆点 经验 · 小点 条件 · 虚线 共用条件 · 点圆点查看',
+        legend: '大点 条件 · 小点 经验 · 虚线 共用条件 · 点经验查看',
       }));
       const evolutionTab = evolutionFailed ? evolutionFailed : h('div', { role: 'tabpanel', 'aria-label': '自进化', style: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: '9px' } },
         h('div', { style: { ...PANEL_CARD, padding: '9px 11px', display: 'flex', alignItems: 'flex-start', gap: '8px', flex: '0 0 auto' } },
