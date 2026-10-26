@@ -1051,6 +1051,14 @@ export function apply(ctx, config) {
     return text;
   }
 
+  /** 实验正文按条目记有效期：一条到期只撤一条，不把同请求里其他规则一起清掉。 */
+  function experimentTextFrom(parts, now = Date.now()) {
+    if (!parts || !Array.isArray(parts.items)) return '';
+    const items = parts.items.filter((item) => !item.validUntil || now <= Date.parse(String(item.validUntil)));
+    if (!items.length) return '';
+    return `${parts.header}\n${items.map((item) => item.line).join('\n')}${parts.tail || ''}`;
+  }
+
   /** 本轮问题与栏目名的字面相关度：只展示有交集的栏目，交集为空就整段跳过。 */
   function relevantRanges(names, query) {
     const text = String(query || '').toLowerCase();
@@ -1081,7 +1089,7 @@ export function apply(ctx, config) {
 
   /** 读决策 → 一段短提示：未绑定只给栏目索引，已绑定才给规则正文。 */
   function renderExperiment(scope, decision, context, held, win) {
-    if (held && typeof held === 'object') held.validUntil = '';
+    if (held && typeof held === 'object') { held.validUntil = ''; held.experimentParts = null; held.injectedIds = []; }
     if (!experimentStillCurrent(scope, held)) return '';
     if (!decision || decision.kind === 'none') return '';
     if (decision.kind === 'conflict') {
@@ -1100,7 +1108,6 @@ export function apply(ctx, config) {
     const unknown = [];
     const byTopic = new Map();
     let conflict = false;
-    let earliestTrial = 0;
     for (const record of index.entries) {
       if (record.origin !== 'project_evolution') continue;
       if (record.ownerProjectId && record.ownerProjectId !== scope.key) continue;
@@ -1109,10 +1116,6 @@ export function apply(ctx, config) {
       if (learning.state !== 'active' && learning.state !== 'trial') continue;
       /** 试用到期、暂停或身份失效：自动注入与检索、读取用同一档可用性，不能各判各的。 */
       if (!view.experimentalUsable(record, Date.now())) continue;
-      if (learning.state === 'trial') {
-        const until = Date.parse(String(learning.trialUntil || ''));
-        if (Number.isFinite(until) && (!earliestTrial || until < earliestTrial)) earliestTrial = until;
-      }
       const status = view.statusOf(record, context);
       if (status === 'needs_context') { unknown.push(record); continue; }
       if (status !== 'ok') continue;
@@ -1124,8 +1127,7 @@ export function apply(ctx, config) {
     if (conflict) {
       return chargeExperiment(win, '这些实验规则互相冲突，先按用户这次说的做，别叠加对立的规则。');
     }
-    const lines = [];
-    const shown = [];
+    const parts = { header: EXPERIMENT_RULES_HEADER, items: [], tail: held && held.contextId ? `\ncontextId=${held.contextId}` : '' };
     let used = Buffer.byteLength(EXPERIMENT_RULES_HEADER) + 1;
     for (const record of matched.slice(0, 3)) {
       const body = String(record.body || '');
@@ -1141,19 +1143,24 @@ export function apply(ctx, config) {
       const size = Buffer.byteLength(`\n${line}`);
       if (used + size > EXPERIMENT_BYTES) break;
       used += size;
-      lines.push(line);
-      shown.push(record.id);
+      const trialLearning = record.learning && typeof record.learning === 'object' ? record.learning : {};
+      const trialUntil = trialLearning.state === 'trial' && Number.isFinite(Date.parse(String(trialLearning.trialUntil || '')))
+        ? String(trialLearning.trialUntil) : '';
+      parts.items.push({ id: record.id, line, validUntil: trialUntil });
     }
-    if (held) held.injectedIds = shown;
-    if (!lines.length && unknown.length) {
-      const nameLine = unknown.slice(0, 3).map((record) => `- 「${record.title}」 · ${record.id}`).join('\n');
-      return chargeExperiment(win, `有些实验规则的适用条件还没确认，先别当成本轮依据：\n${nameLine}`);
+    if (held) held.injectedIds = parts.items.map((item) => item.id);
+    if (!parts.items.length && unknown.length) {
+      /** 条件没确认的条目只报数量，绝不在模型侧暴露标题。 */
+      return chargeExperiment(win, '有些实验规则的适用条件还没确认，先按用户这次说的做，别把它们当本轮依据。');
     }
-    if (!lines.length) return '';
-    /** 本轮输出带上了哪条试用规则，就把最早到期时间一起冻结；请求中途到期也要停。 */
-    if (held && earliestTrial) held.validUntil = new Date(earliestTrial).toISOString();
-    const tail = held && held.contextId ? `\ncontextId=${held.contextId}` : '';
-    return chargeExperiment(win, `${EXPERIMENT_RULES_HEADER}\n${lines.join('\n')}${tail}`);
+    if (!parts.items.length) return '';
+    if (held) held.experimentParts = parts;
+    /** 兼容旧读取点：整体最早到期只取本轮真正注入的条目，不再被无关试验拖下水。 */
+    if (held) {
+      const deadlines = parts.items.map((item) => Date.parse(String(item.validUntil))).filter(Number.isFinite);
+      if (deadlines.length) held.validUntil = new Date(Math.min(...deadlines)).toISOString();
+    }
+    return chargeExperiment(win, experimentTextFrom(parts));
   }
 
   /** 一次真人请求只路由一次；同一批次重试复用同一 transitionId。 */
@@ -1280,9 +1287,15 @@ export function apply(ctx, config) {
     const query = held.query || trustedQueryOf(resolved.win);
     if (!query) return { ok: false, status: 'needs_context', reason: '本轮还没有可核对的用户消息，先重新问一次当前任务' };
     const ranges = held.ranges || { series: [], taskKinds: [] };
+    /** 自动路由已经选了范围就沿用同一个结果，工具绑定不重新猜一遍，避免两处给出不同任务。 */
+    const routedAnchor = held.anchor && typeof held.anchor === 'object' ? held.anchor : null;
     const hits = [];
-    for (const value of ranges.series || []) if (query.includes(value)) hits.push({ seriesId: value });
-    for (const value of ranges.taskKinds || []) if (query.includes(value)) hits.push({ taskKind: value });
+    if (routedAnchor && routedAnchor.seriesId) hits.push({ seriesId: routedAnchor.seriesId });
+    else if (routedAnchor && routedAnchor.taskKind) hits.push({ taskKind: routedAnchor.taskKind });
+    else {
+      for (const value of ranges.series || []) if (anchor.seriesChosenBy(query, value)) hits.push({ seriesId: value });
+      for (const value of ranges.taskKinds || []) if (anchor.seriesChosenBy(query, value)) hits.push({ taskKind: value });
+    }
     if (hits.length !== 1) {
       const names = [...(ranges.series || []), ...(ranges.taskKinds || [])].slice(0, 3);
       return { ok: false, status: 'needs_context', reason: names.length ? '本轮没有匹配的记忆范围，按当前任务继续' : '本轮没有适用的记忆范围，按当前任务继续' };
@@ -1306,6 +1319,7 @@ export function apply(ctx, config) {
     const preparedState = prepared.get(execution && execution.agent);
     if (preparedState) {
       preparedState.experimentText = text;
+      preparedState.experimentParts = held.experimentParts || null;
       preparedState.validUntil = held.validUntil || '';
     }
     return { ok: true };
@@ -1329,15 +1343,15 @@ export function apply(ctx, config) {
       const epoch = controlStatus(scope).epoch || '';
       if (state.controlEpoch && epoch && state.controlEpoch !== epoch) return '';
       /** 自进化关掉或换过代：关掉前的实验正文不再输出，重开也不复活。 */
-      let evolutionText = state.experimentText;
+      let evolutionText = state.experimentParts ? experimentTextFrom(state.experimentParts) : state.experimentText;
       if (evolutionText) {
         let evolution;
         try { evolution = evolutionStatus(scope); } catch { evolution = null; }
         if (!evolution || evolution.enabled !== true || evolution.compatible === false
           || (state.evolutionEpoch && String(evolution.epoch || '') !== state.evolutionEpoch)) evolutionText = '';
       }
-      /** 准备时还在试用期、请求中途到期：同一请求也不能再输出旧正文。 */
-      if (evolutionText && state.validUntil && Date.now() > Date.parse(String(state.validUntil))) evolutionText = '';
+      /** 没有逐条快照时才退回整段到期判断；有快照就只撤到期的那一条。 */
+      if (evolutionText && !state.experimentParts && state.validUntil && Date.now() > Date.parse(String(state.validUntil))) evolutionText = '';
       return [evolutionText, state.text].filter(Boolean).join('\n\n');
     } catch {
       return '';
@@ -1700,10 +1714,20 @@ export function apply(ctx, config) {
           : value.status === 'memory_disabled'
             ? 'memory · 记忆检索已关闭'
             : value.repeat
-              ? `memory · 本请求已读过「${value.title}」 · ${value.id}`
+              ? 'memory · 本请求已读过这条记忆'
               : value.body
                 ? `memory · ${withTag(value, `「${value.title}」`)}${value.when ? `（${value.when}）` : ''} · ${value.id}${statusLabel(value.status)}\n${value.body}`
-                : `memory · 「${value.title}」的相关记忆\n${value.links || '(无)'}`,
+                : value.links !== undefined && value.status === 'ok'
+                  ? `memory · 「${value.title}」的相关记忆\n${value.links || '(无)'}`
+                  : value.status === 'needs_context'
+                    ? 'memory · 这条记忆的适用条件还没确认'
+                    : value.status === 'not_applicable'
+                      ? 'memory · 这条记忆不适用于当前任务'
+                      : value.status === 'archived'
+                        ? 'memory · 这条记忆已归档'
+                        : value.status === 'gone'
+                          ? 'memory · 这条记忆已不存在'
+                          : 'memory · 当前不能读这条记忆',
       }],
       presentationMeta: (_args, value) => ({
         kind: 'memory-read',
@@ -1729,7 +1753,7 @@ export function apply(ctx, config) {
         const found = readLinks(scope, args.id, { context, allowExperimental });
         if (!found) throw new Error(`没有 ${args.id} 这条记忆`);
         if (found.status !== 'ok') {
-          const withheld = { id: found.id, scope: found.scope, status: found.status, links: '' };
+          const withheld = { id: '', scope: '', status: found.status, links: '' };
           if (win) {
             const bytes = jsonBytes(withheld);
             if (!affordable(win, bytes)) return { id: '', scope: '', status: 'budget_exhausted' };
@@ -1755,22 +1779,22 @@ export function apply(ctx, config) {
       const record = readEntry(scope, args.id, { context, allowExperimental });
       if (!record) throw new Error(`没有 ${args.id} 这条记忆`);
       if (record.origin === 'project_evolution' && record.ownerProjectId && record.ownerProjectId !== scope.key) {
-        return { id: args.id, title: record.title, when: record.when || '', revision: record.revision || 1, scope: record.scope, status: 'not_applicable', body: '' };
+        return { id: '', scope: record.scope, status: 'not_applicable', body: '' };
       }
       if (record.origin === 'project_evolution' && !allowExperimental) {
-        return { id: record.id, title: record.title, when: record.when || '', revision: record.revision || 1, scope: record.scope, status: 'needs_context', body: '' };
+        return { id: '', scope: record.scope, status: 'needs_context', body: '' };
       }
-      /** 暂停、过期或条件不匹配的实验条目只给状态，不给正文。 */
+      /** 暂停、过期或条件不匹配的实验条目只给状态，不给标题和正文。 */
       if (record.origin === 'project_evolution' && !view.experimentalUsable(record)) {
-        return { id: record.id, title: record.title, when: record.when || '', revision: record.revision || 1, scope: record.scope, status: 'needs_context', body: '' };
+        return { id: '', scope: record.scope, status: 'needs_context', body: '' };
       }
       const learningState = record.learning && typeof record.learning === 'object' ? record.learning : {};
       if (record.origin === 'project_evolution' && (learningState.state === 'paused' || learningState.blockedReason)) {
-        return { id: record.id, title: record.title, when: record.when || '', revision: record.revision || 1, scope: record.scope, status: 'needs_context', body: '' };
+        return { id: '', scope: record.scope, status: 'needs_context', body: '' };
       }
-      /** 条件未知或不适用的条目只报状态：正文绝不能绕过自动召回的门槛。 */
+      /** 条件未知或不适用的条目只报状态：正文和标题都不能绕过自动召回的门槛。 */
       if (record.status !== 'ok') {
-        return { id: record.id, title: record.title, when: record.when || '', revision: record.revision || 1, scope: record.scope, status: record.status === 'needs_context' ? 'needs_context' : 'not_applicable', body: '' };
+        return { id: '', scope: record.scope, status: record.status === 'needs_context' ? 'needs_context' : 'not_applicable', body: '' };
       }
       const revision = record.revision || 1;
       const body = String(record.body ?? '');
@@ -2004,6 +2028,7 @@ export function apply(ctx, config) {
               previous.text = snapshot ? snapshot.text : '';
               previous.cards = snapshot ? snapshot.cards : [];
               previous.experimentText = experimentText;
+              previous.experimentParts = win && win.experiment ? (win.experiment.experimentParts || null) : null;
               previous.validUntil = win && win.experiment ? (win.experiment.validUntil || '') : '';
               previous.fingerprint = fingerprint;
             } else {
@@ -2071,6 +2096,7 @@ export function apply(ctx, config) {
       const state = {
         text: snapshot ? snapshot.text : '',
         experimentText: experiment ? experiment.text : '',
+        experimentParts: experiment && experiment.held ? (experiment.held.experimentParts || null) : null,
         validUntil: experiment && experiment.held ? (experiment.held.validUntil || '') : '',
         cards: snapshot ? snapshot.cards : [],
         query,

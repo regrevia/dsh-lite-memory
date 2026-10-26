@@ -500,3 +500,27 @@ for (const [label, query] of [
     assert.equal(next.anchor.seriesId, undefined);
   });
 }
+
+test('R41 旧稿提到但明确换到排查任务时不再绑定旧栏目', () => {
+  const tasks = activeVideoSession();
+  for (const query of ['排查 PostgreSQL 连接池故障，旧稿先放着', '这版数据库连接池配置怎么改']) {
+    const next = anchor.routeTask(tasks, {
+      sessionId: 'sess-switch',
+      batchKey: `rb_${query.length}`,
+      messageIds: ['m2'],
+      query,
+      registeredSeries: ['口播'],
+      now: 2000,
+    });
+    assert.equal(next.decision.kind, 'unbound', query);
+    assert.equal(next.anchor.seriesId, undefined, query);
+  }
+});
+
+test('R42 栏目只被提到、否定或搁置时都不算用户选中', () => {
+  assert.equal(anchor.seriesChosenBy('把口播开头改一下', '口播'), true);
+  assert.equal(anchor.seriesChosenBy('先不做口播了', '口播'), false);
+  assert.equal(anchor.seriesChosenBy('不要按口播的规矩来', '口播'), false);
+  assert.equal(anchor.seriesChosenBy('日志里提到口播吗', '口播'), false);
+  assert.equal(anchor.seriesChosenBy('先放着口播，改数据库', '口播'), false);
+});

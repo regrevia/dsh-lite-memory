@@ -447,3 +447,17 @@ assert.notEqual(bootA.provider.text({ agent: agentB, signal: signalB }), prepare
 }
 
 console.log('recall.test.mjs: ok');
+
+// A20：条件未确认的条目，model 侧读正文只拿状态，不拿标题；面板仍可查。
+{
+  const agent = makeAgent('agent-withheld-read', cwdA);
+  await prepare(bootA, agent, '发布前要检查什么');
+  const row = await bootA.exec('memory_read', { id: unresolved.id }, agent);
+  assert.equal(row.body, '');
+  assert.equal(row.status, 'needs_context');
+  assert.doesNotMatch(JSON.stringify(row), /发布前要检查什么/);
+  assert.doesNotMatch(bootA.render('memory_read', { id: unresolved.id }, row), /发布前要检查什么/);
+  const links = await bootA.exec('memory_read', { id: unresolved.id, view: 'links' }, agent);
+  assert.equal(links.status, 'needs_context');
+  assert.doesNotMatch(JSON.stringify(links), /发布前要检查什么/);
+}

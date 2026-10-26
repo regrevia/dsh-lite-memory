@@ -506,6 +506,38 @@ const scopeOf = (dir) => store.scopeOf(dir);
   assert.equal(runtime.text(agent, sig), '');
 }
 
+/* L19c：一条试用到期只撤这一条，不把同请求里其他可用规则一起清掉。 */
+{
+  const dir = mkdir('trial-parts');
+  const scope = scopeOf(dir);
+  seedRule(scope, {
+    title: '快到期的主题规则',
+    body: '这条试用马上到期。',
+    conditions: [{ key: 'seriesId', value: '口播' }],
+    learning: { state: 'trial', trialUntil: new Date(Date.now() + 700).toISOString() },
+    topicKey: 'theme',
+  });
+  seedRule(scope, {
+    title: '长期口播开头',
+    body: '开场三句内给结论。',
+    conditions: [{ key: 'seriesId', value: '口播' }],
+    learning: { state: 'active' },
+    topicKey: 'opening',
+  });
+  enable(scope, { seriesId: '口播' });
+  const runtime = boot();
+  const agent = makeAgent('a-trial-parts', dir);
+  const sig = signal();
+  await runtime.preStep({ agent, signal: sig, turn: 't1' }, enter(human('这期口播怎么做')));
+  const first = runtime.text(agent, sig);
+  assert.match(first, /快到期的主题规则/);
+  assert.match(first, /长期口播开头/);
+  await new Promise((resolve) => setTimeout(resolve, 900));
+  const later = runtime.text(agent, sig);
+  assert.doesNotMatch(later, /快到期的主题规则/);
+  assert.match(later, /长期口播开头/, '无关的试用到期不该清掉别的规则');
+}
+
 /* L20：自进化关掉后，已经准备好的实验正文立刻不再输出；重开也不复活。 */
 {
   const dir = mkdir('off-after-prepare');

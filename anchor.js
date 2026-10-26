@@ -18,8 +18,14 @@ const TASK_STOP = new Set(['一个','一下','这个','那个','我们','你们'
 const TASK_NOISE = /(继续|再做一期|下一期|再来一期|再开一期|续一集|再拍一期|接着|然后|接下来|现在|帮我|帮忙|这个|这条|这次|上次|之前|刚才|上面|前面|下面|后面|这里|还是|同样|再改|排查|处理|检查|看看|看一下|看下|修复|解决|优化|调整|修改|分析|研究|对比|评估|调研|测试|设计|实现|开发|搭建|部署|定位|复现|查一下|找一下|问题|任务|内容|一下)/g;
 /** 续接词后面还得跟一个动作，才算真正在改旧稿；单说「继续 / 这个 / 之前」不构成复用依据。 */
 const CONTINUATION_ACTION = /(继续|接着|然后|再|还是|同样)\s*(做|改|调|弄|看|写|处理|优化|调整|检查|完成)/;
-/** 明确指向刚才那一版作品的说法，是沿用旧范围的正面证据。 */
-const OLD_WORK_REFERENCE = /(刚才那版|之前那版|上一版|这版|那版|原稿|旧稿)/;
+/** 明确指向刚才那一版作品的说法，是沿用旧范围的正面证据；「这版/那版」只是指示，不算旧稿。 */
+const OLD_WORK_REFERENCE = /(刚才那版|之前那版|上一版|原稿|旧稿)/;
+/** 旧稿被放下、否定或只作为话题提起时，不能因为它出现就恢复旧范围。 */
+const OLD_WORK_PAUSE = /(先放着|放着|放一边|先不|先别|别管|不用管|搁置|暂停|不做了|先不做|不用了)/;
+const OLD_WORK_ACTION = /(继续|接着|再改|改成|改一下|调整|优化|改改|开头|结尾|结构|节奏|语气|口吻|文案|措辞|细节|版本)/;
+/** 创作类与工程类任务的默认判断不同；同一主题从写口播切到排查代码，不能沿用旧栏目。 */
+const CONTENT_INTENT = /(口播|拍摄|录制|剪辑|文案|封面|字幕|直播|视频|选题|脚本|一期|栏目)/;
+const ENGINEERING_INTENT = /(代码|排查|故障|部署|调试|重构|接口|数据库|查询|报错|日志|服务|环境|依赖|测试|配置|修复)/;
 /** 这些词描述的是旧稿的某个方面，不是新对象；不该因为它们出现就撤销旧范围。 */
 const ASPECT_NOISE = /(节奏|速度|风格|语气|口吻|结构|长度|时长|篇幅|配色|字号|字体|标题|文案|措辞|逻辑|细节|开头|结尾|过渡|画面|镜头|音乐|音效|字幕|参数|格式|排版)/g;
 /** 程度、指代和虚词组成的二字片段不是对象证据。 */
@@ -49,9 +55,15 @@ export function looksLikeNewTask(query, previousText) {
   /** 只剩指代或续接词时，必须另有动作才算续接；否则宁可换任务也不沿用旧范围。 */
   if (!next.size) return cue ? !CONTINUATION_ACTION.test(current) : false;
   if (!previous.size) return false;
+  /** 同一主题换了工作类型（口播 → 排查代码）是新任务，不靠对象词重叠判续作。 */
+  const nextKind = CONTENT_INTENT.test(current) ? (ENGINEERING_INTENT.test(current) ? '' : 'content')
+    : (ENGINEERING_INTENT.test(current) ? 'engineering' : '');
+  const previousKind = CONTENT_INTENT.test(previousText) ? (ENGINEERING_INTENT.test(previousText) ? '' : 'content')
+    : (ENGINEERING_INTENT.test(previousText) ? 'engineering' : '');
+  if (nextKind && previousKind && nextKind !== previousKind) return true;
   for (const term of next) if (previous.has(term)) return false;
-  /** 明确指向旧稿（「刚才那版脚本」）是继承的正面证据，即便同时提到新的局部方面。 */
-  if (OLD_WORK_REFERENCE.test(current)) return false;
+  /** 指向旧稿还要有继续改它的动作；「旧稿先放着」「这版数据库配置怎么改」都算新任务。 */
+  if (OLD_WORK_REFERENCE.test(current) && !OLD_WORK_PAUSE.test(current) && OLD_WORK_ACTION.test(current)) return false;
   /**
    * 有实质对象词却跟旧任务没有任何交集：这就是新任务，不因为句首带了
    * 「继续」「这个」就把旧范围连同正文一起搬过来。继承只认对象交集、
@@ -82,6 +94,27 @@ export function isContinuation(query) {
 
 export function isRevision(query) {
   return REVISE_WORDS.test(text(query, 160));
+}
+
+const NEGATED_SERIES = /(不要|不用|别|不按|不照|不是|并非|先不|不做|不搞|忽略|跳过|不管|别提)[^，。；！？\n]{0,10}$/;
+const MENTION_SERIES = /(日志|报错|错误|信息|提到|说到|包含|关键词|这个词|源码|代码|插件|文档|规则名|栏目名|分析)[^，。；！？\n]{0,10}$/;
+const PAUSED_SERIES = /^(先放着|先放|放一边|先不做|不做了|不用了|暂停)/;
+const PAUSED_BEFORE = /(先放着|先放|放一边|先不做|不做了|不用了|暂停)[^，。；！？\n]{0,4}$/;
+/** 提到栏目名不等于选中它：否定、引用、看源码或「先放着」都只是话题，不能建绑定。 */
+export function seriesChosenBy(query, series) {
+  const value = text(query, 400);
+  const name = text(series, 40);
+  if (!value || !name) return false;
+  let from = 0;
+  while (from <= value.length) {
+    const at = value.indexOf(name, from);
+    if (at < 0) return false;
+    const before = value.slice(Math.max(0, at - 14), at);
+    const after = value.slice(at + name.length);
+    if (!NEGATED_SERIES.test(before) && !MENTION_SERIES.test(before) && !PAUSED_BEFORE.test(before) && !PAUSED_SERIES.test(after)) return true;
+    from = at + name.length;
+  }
+  return false;
 }
 
 export function requestBatchKey(messageIds) {
@@ -279,7 +312,7 @@ export function routeTask(tasksInput, input = {}) {
   }
   const registered = (Array.isArray(input.registeredSeries) ? input.registeredSeries : []).map((item) => text(item, 40)).filter(Boolean);
   /** 用户在这句话里点名的栏目优先于旧栏目和项目默认值。 */
-  const namedSeries = registered.find((series) => series && query.includes(series)) || '';
+  const namedSeries = registered.find((series) => seriesChosenBy(query, series)) || '';
   const changedSeries = current && namedSeries && namedSeries !== (current.seriesId || '') ? namedSeries : '';
   const fallbackKind = (currentEpisode && currentEpisode.taskKind)
     || (input.defaults && input.defaults.taskKind) || '';

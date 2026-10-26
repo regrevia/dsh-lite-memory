@@ -849,4 +849,40 @@ test('当前不适用的高相关条目不挤掉后面真能用的条目', () =>
 });
 
 for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
+
+test('R24 省略正文的更新不覆盖已有正文（按 id 与同名都成立）', () => {
+  const scope = fresh('omit-body');
+  const first = upsert(scope, { title: '连接池改法', summary: '旧摘要', body: '旧正文：先看连接数。' });
+  const id = first.record.id;
+  upsert(scope, { id, title: '连接池改法', summary: '新摘要' });
+  assert.equal(bodyOf(scope, id), '旧正文：先看连接数。', 'id 更新省略正文时保留原正文');
+  upsert(scope, { title: '连接池改法', summary: '再新一点' });
+  assert.equal(bodyOf(scope, id), '旧正文：先看连接数。', '同名更新省略正文时保留原正文');
+});
+
+test('R25 长摘要改动即使只差第 61 个字符也算改过，全文仍保留', () => {
+  const scope = fresh('long-summary-change');
+  const head = '摘要主体'.repeat(15);
+  const first = upsert(scope, { title: '长摘要规则', summary: `${head}甲` });
+  const id = first.record.id;
+  assert.equal(first.record.summary.length, LIMITS.summaryChars);
+  assert.match(bodyOf(scope, id), /甲$/);
+  const again = upsert(scope, { id, title: '长摘要规则', summary: `${head}乙` });
+  assert.equal(again.noop, false, '第 61 个字符变化不能当作没改');
+  const body = bodyOf(scope, id);
+  assert.match(body, /甲/);
+  assert.match(body, /乙/, '新的完整摘要也落盘');
+  assert.equal(again.record.summary.length, LIMITS.summaryChars);
+});
+
+test('R26 显式长正文加短摘要时补上摘要原文，不把两者混成一条', () => {
+  const scope = fresh('body-plus-summary');
+  const long = '现场记录'.repeat(20);
+  const saved = upsert(scope, { title: '带正文的长摘要', summary: long, body: '显式正文：先复现再改。' });
+  const body = bodyOf(scope, saved.record.id);
+  assert.match(body, /^显式正文：先复现再改。/);
+  assert.match(body, /摘要原文：/);
+  assert.match(body, /现场记录/);
+});
+
 console.log(`store.test.mjs: ${passed} passed`);

@@ -310,13 +310,17 @@ export function normalizeDraft(source, options = {}) {
   /** 更新（带 id）与候选草稿允许省略摘要；省略表示保持原值，不拿标题补。 */
   const mayOmitSummary = options.requireSummary === false || Boolean(id);
   if (!summary && !mayOmitSummary) throw new Error('摘要为空');
-  /** 摘要只是索引行；首存时摘要放不下，就把完整原句存进正文，不能截掉一半还说保存成功。 */
-  let body = String(draft.body ?? '').trim();
-  const fullTextInBody = !id && !body && summaryShortened;
-  if (fullTextInBody) body = rawSummary;
-  const bodyBytes = Buffer.byteLength(body);
+  /**
+   * 正文是否由调用方显式给出，和「摘要太长所以自动补一份」必须分开。
+   * 否则同名更新会被自动补出的正文当成显式覆盖，把原正文冲掉。
+   */
+  const bodyExplicit = has('body');
+  const body = bodyExplicit ? String(draft.body ?? '').trim() : '';
+  const autoBody = !bodyExplicit && summaryShortened ? rawSummary : '';
+  const checked = bodyExplicit ? body : autoBody;
+  const bodyBytes = Buffer.byteLength(checked);
   if (bodyBytes > LIMITS.entryBytes) {
-    throw new Error(fullTextInBody
+    throw new Error(autoBody
       ? `摘要 ${rawSummary.length} 字，超过单条 ${LIMITS.entryBytes} 字节；先拆成两条写，别丢后半段`
       : `正文 ${bodyBytes} 字节，超过单条 ${LIMITS.entryBytes} 字节；只留原则、判断规则和触发条件`);
   }
@@ -342,7 +346,9 @@ export function normalizeDraft(source, options = {}) {
     when,
     body,
     summaryShortened,
-    fullTextInBody,
+    summaryRaw: rawSummary,
+    autoBody,
+    fullTextInBody: false,
     kind: kind || 'note',
     tags,
     triggers,
@@ -355,7 +361,7 @@ export function normalizeDraft(source, options = {}) {
       title: has('title') && Boolean(title),
       summary: has('summary'),
       when: has('when'),
-      body: has('body') || fullTextInBody,
+      body: bodyExplicit,
       kind: has('kind'),
       tags: has('tags'),
       triggers: triggers !== undefined,
@@ -645,6 +651,14 @@ function rulesOf(draft, body, index, foreign) {
   return rules;
 }
 
+/** 长摘要的尾部不能丢：正文里没有这段时补在末尾，已有则不动。 */
+function bodyWithSummaryTail(body, draft) {
+  const raw = String(draft.summaryRaw || '');
+  const current = String(body || '');
+  if (!raw || !draft.summaryShortened || current.includes(raw)) return { body: current, added: false };
+  return { body: current ? `${current}\n\n摘要原文：${raw}` : raw, added: true };
+}
+
 function mergedFields(draft, record, oldBody, index, writeMode = 'patch', foreign) {
   if (writeMode === 'replace_current') {
     const next = {
@@ -658,8 +672,9 @@ function mergedFields(draft, record, oldBody, index, writeMode = 'patch', foreig
       selection: draft.has.selection ? draft.selection : null,
       links: draft.has.links ? draft.links : [],
       topicKey: draft.has.topicKey ? draft.topicKey : '',
-      body: draft.body,
+      body: bodyWithSummaryTail(draft.body, draft).body,
     };
+    if (next.body !== draft.body) draft.fullTextInBody = true;
     next.applicability = view.validateApplicability(draft.has.applicability ? draft.applicability : undefined,
       next.conditions, next.selection, next.when);
     assertLinksVisible(next.links, index, foreign);
@@ -737,6 +752,9 @@ function applyDraft(scope, index, source, now, options = {}) {
   if (record) {
     const oldBody = readBody(scope, record.id);
     const next = mergedFields(draft, record, oldBody, index, writeMode, foreign);
+    const tail = bodyWithSummaryTail(next.body, draft);
+    next.body = tail.body;
+    if (tail.added) draft.fullTextInBody = true;
     const noop = next.title === record.title && next.summary === record.summary
       && next.when === (record.when || '') && next.kind === (record.kind || 'note')
       && JSON.stringify(next.tags) === JSON.stringify(record.tags || [])
@@ -771,7 +789,11 @@ function applyDraft(scope, index, source, now, options = {}) {
     return { record, merged: true, mergedFrom, similar: null, similarList, draft, noop: false, previousBody: oldBody, archived };
   }
   if (writeMode === 'replace_current') throw new Error('整份替换要先指明是哪条，不能用来新增');
-  const rules = rulesOf(draft, draft.body, index, foreign);
+  const seed = draft.autoBody || draft.body;
+  const tail = bodyWithSummaryTail(seed, draft);
+  const createdBody = tail.body;
+  if (tail.added || draft.autoBody) draft.fullTextInBody = true;
+  const rules = rulesOf(draft, createdBody, index, foreign);
   const created = {
     id: newId(),
     title: draft.title,
@@ -785,7 +807,7 @@ function applyDraft(scope, index, source, now, options = {}) {
     selection: rules.selection,
     links: rules.links,
     topicKey: rules.topicKey,
-    body: draft.body,
+    body: createdBody,
     aliases: [],
     created: now,
     updated: now,
@@ -1253,13 +1275,16 @@ function findCurrent(id, scope, options = {}) {
     const record = index.entries.find((item) => item.id === id && item.status !== 'archived');
     if (!record) continue;
     if (!readableRecord(record, options, index)) continue;
+    /** 关联目标也按本轮上下文判适用；条件未知、过期或暂停的目标不给标题。 */
+    if (view.statusOf(record, options.context || {}) !== 'ok') continue;
+    if (isExperimentalRecord(record) && !view.experimentalUsable(record, options.now)) continue;
     return {
       id: record.id,
       title: record.title,
       summary: record.summary || '',
       scope: source.key === 'global' ? 'global' : 'project',
       revision: record.revision || 1,
-      status: view.statusOf(record, {}),
+      status: 'ok',
     };
   }
   return null;
