@@ -182,9 +182,9 @@ export const LIMITS = {
   entries: 200,
   globalEntries: 200,
   hardEntries: 1000,
-  entryBytes: 1200,
+  entryBytes: 4096,
   recordBytes: 10 * 1024,
-  totalBytes: 512 * 1024,
+  totalBytes: 1024 * 1024,
   historyBytes: 512 * 1024,
   stateBytes: 2 * 1024 * 1024,
   titleChars: 60,
@@ -747,10 +747,12 @@ export function enforceBudget(state, scope) {
     const active = state.entries.filter((entry) => entry.status === 'active');
     const bytes = active.reduce((sum, entry) => sum + entryBytesOf(entry), 0);
     if (active.length <= LIMITS.hardEntries && bytes <= LIMITS.totalBytes) break;
-    const idle = active.filter((entry) => now - entryLastTouch(entry) >= IDLE_MS);
-    const pool = idle.length ? idle : active;
+    /** 用户固定过的规则不参与容量腾挪；只从没固定的条目里选最久没读的。 */
+    const movable = active.filter((entry) => entry.maintenance?.learning?.pinned !== true);
+    if (!movable.length) throw new StateError('budget_exhausted', '记忆库已满，固定住的规则不参与腾挪：先取消固定或精简正文');
+    const idle = movable.filter((entry) => now - entryLastTouch(entry) >= IDLE_MS);
+    const pool = idle.length ? idle : movable;
     const victim = pool.reduce((oldest, entry) => (entryLastTouch(entry) < entryLastTouch(oldest) ? entry : oldest));
-    if (!victim) throw new StateError('budget_exhausted', `记忆库已满：这一条自己就超过 ${LIMITS.totalBytes} 字节正文预算，先精简正文`);
     victim.status = 'archived';
     victim.updatedAt = new Date().toISOString();
     evicted.push({ id: victim.id, title: victim.current.title });

@@ -434,3 +434,46 @@ test('R28 指代加动作的续接仍保留旧任务范围', () => {
   assert.equal(next.anchor.episodeId, previous.episodeId);
   assert.equal(next.anchor.seriesId, '口播');
 });
+
+test('R29 带「继续改」但对象换成新的英文主题时撤销旧范围', () => {
+  const tasks = activeVideoSession();
+  const next = anchor.routeTask(tasks, {
+    sessionId: 'sess-switch',
+    batchKey: 'rb_switch_pg_continue',
+    messageIds: ['m2'],
+    query: '继续改 PostgreSQL 连接池配置',
+    registeredSeries: ['口播'],
+    now: 2000,
+  });
+  assert.equal(next.decision.kind, 'unbound');
+  assert.equal(next.decision.reason, 'new_task');
+  assert.equal(next.anchor.seriesId, undefined);
+});
+
+test('R30 带「调整一下」但对象换了时撤销旧范围', () => {
+  const tasks = activeVideoSession();
+  const next = anchor.routeTask(tasks, {
+    sessionId: 'sess-switch',
+    batchKey: 'rb_switch_pg_adjust',
+    messageIds: ['m2'],
+    query: '调整一下 PostgreSQL 连接池配置',
+    registeredSeries: ['口播'],
+    now: 2000,
+  });
+  assert.equal(next.decision.kind, 'unbound');
+  assert.equal(next.decision.reason, 'new_task');
+});
+
+test('R31 带「继续改」但明确指向新对象动作时撤销旧范围', () => {
+  const tasks = activeVideoSession();
+  const next = anchor.routeTask(tasks, {
+    sessionId: 'sess-switch',
+    batchKey: 'rb_switch_db_code',
+    messageIds: ['m2'],
+    query: '继续改数据库连接超时的处理代码',
+    registeredSeries: ['口播'],
+    now: 2000,
+  });
+  assert.equal(next.decision.kind, 'unbound');
+  assert.equal(next.decision.reason, 'new_task');
+});

@@ -235,6 +235,25 @@ const toggle = (scope, enabled) => store.setMemoryEnabled(scope, enabled, { oper
   assert.equal(afterAdopt.title, '口播结论前置');
 }
 
+/* C07b：只改标题不动正文时保留生效状态与学习依据。 */
+{
+  const dir = mkdir('title-only');
+  const scope = scopeOf(dir);
+  const id = seedRule(scope, '口播开头');
+  state.transact(scope, {}, (draft) => {
+    const row = draft.entries.find((entry) => entry.id === id);
+    row.maintenance.learning = { state: 'active', evidence: [{ text: '三次口播都先改开头' }] };
+    return { changed: true };
+  });
+  const first = store.learningSnapshot(scope).rules[0];
+  const edited = store.editLearningRule(scope, id, { expectedRevision: first.revision, title: '口播开头重命名' });
+  assert.equal(edited.ok, true);
+  const after = store.learningSnapshot(scope).rules[0];
+  assert.equal(after.state, 'active');
+  assert.equal(after.learning.evidence.length, 1);
+  assert.equal(after.title, '口播开头重命名');
+}
+
 /* C08：关闭保留已消耗额度与默认绑定，重开后仍按原额度限额。 */
 {
   const dir = mkdir('preserve-quota');

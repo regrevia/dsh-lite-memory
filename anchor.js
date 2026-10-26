@@ -37,7 +37,7 @@ function taskTerms(value) {
 /** 继承旧任务要有正面证据：新要求与本轮任务没有实质对象交集时，先按新任务处理。 */
 export function looksLikeNewTask(query, previousText) {
   const current = text(query, 200);
-  if (!current || isThanks(current) || isRevision(current)) return false;
+  if (!current || isThanks(current)) return false;
   const next = taskTerms(current);
   const previous = taskTerms(previousText);
   const cue = isContinuation(current) || REFERENCE_WORDS.test(current);

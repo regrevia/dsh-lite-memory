@@ -445,4 +445,61 @@ const scopeOf = (dir) => store.scopeOf(dir);
   assert.doesNotMatch(many.text, /点名|先问|栏目/);
 }
 
+/* L19：试用到期后不再自动注入，和检索、读取用同一档可用性。 */
+{
+  const dir = mkdir('trial-expired');
+  const scope = scopeOf(dir);
+  const id = seedRule(scope, {
+    title: '过期口播规则',
+    body: '这条试用已经到期，不该自动出现。',
+    conditions: [{ key: 'seriesId', value: '口播' }],
+    learning: { state: 'trial', trialUntil: new Date(Date.now() - 60_000).toISOString() },
+  });
+  enable(scope, { seriesId: '口播' });
+  const runtime = boot();
+  const agent = makeAgent('a-trial-expired', dir);
+  const sig = signal();
+  await runtime.preStep({ agent, signal: sig, turn: 't1' }, enter(human('这期口播怎么做')));
+  const text = runtime.text(agent, sig);
+  assert.equal(text.includes('这条试用已经到期，不该自动出现。'), false);
+  const held = runtime.debug.windowOf(agent).experiment;
+  assert.deepEqual(held ? held.injectedIds : [], []);
+}
+
+/* L20：自进化关掉后，已经准备好的实验正文立刻不再输出；重开也不复活。 */
+{
+  const dir = mkdir('off-after-prepare');
+  const scope = scopeOf(dir);
+  seedRule(scope, { title: '口播开头', body: '开场三句内给结论。', conditions: [{ key: 'seriesId', value: '口播' }] });
+  enable(scope, { seriesId: '口播' });
+  const runtime = boot();
+  const agent = makeAgent('a-off-after-prepare', dir);
+  const sig = signal();
+  await runtime.preStep({ agent, signal: sig, turn: 't1' }, enter(human('这期口播怎么做')));
+  assert.match(runtime.text(agent, sig), /开场三句内给结论/);
+  assert.equal(store.setEvolution(scope, false, { operationId: 'evo-off-after-prepare' }).ok, true);
+  assert.equal(runtime.text(agent, sig), '');
+  assert.equal(store.setEvolution(scope, true, { operationId: 'evo-on-again' }).ok, true);
+  assert.equal(runtime.text(agent, sig), '');
+}
+
+/* L21：检索没有可用命中、但有条件未确认的候选时，说清楚而不是回空结果。 */
+{
+  const dir = mkdir('search-withheld');
+  const scope = scopeOf(dir);
+  save(scope, {
+    title: '发布前检查清单',
+    body: '按清单逐项确认。',
+    summary: '发布前逐项确认',
+    applicability: 'unresolved',
+  });
+  const runtime = boot();
+  const agent = makeAgent('a-search-withheld', dir);
+  const value = await runtime.exec('memory_search', { query: '发布前检查' }, agent);
+  assert.equal(value.count, 0);
+  assert.equal(value.status, 'needs_context');
+  assert.equal(value.reasonCode, 'applicability_unresolved');
+  assert.match(value.text, /发布前检查清单/);
+}
+
 console.log('evolution-read.test.mjs: all passed');

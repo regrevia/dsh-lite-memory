@@ -852,7 +852,7 @@ window.__ModuleLoader__.load({
       const unresolved = rule.applicability === 'unresolved'
         || (rule.applicability === 'conditional' && (!Array.isArray(rule.conditions) || rule.conditions.length === 0));
       if (unresolved) return '适用范围待确认，暂不参与回答。';
-      if (rule.state === 'pending') return '尚未参与回答，确认后才会试用。';
+      if (rule.state === 'pending') return '还没生效，采纳后才参与回答。';
       if (rule.state === 'trial') return '在条件匹配的任务中参与参考，到期后暂停。';
       if (rule.state === 'active') return '在适用任务中作为默认参考，当前明确要求优先。';
       return '';
@@ -865,7 +865,7 @@ window.__ModuleLoader__.load({
         if (conditions.length === 0) return '待确认';
         return conditions.map((item) => `${CONDITION_LABEL[item.key] || item.key} ${item.value}`).join('、');
       }
-      return '所有项目';
+      return '本项目内';
     };
 
     const evidenceTextOf = (row) => {
@@ -1267,7 +1267,7 @@ window.__ModuleLoader__.load({
           h(Toggle, { ariaLabel: '自进化', on: Boolean(memoryOn && evolution && evolution.enabled === true), busy: busy || !evolution || !canToggle || !memoryOn, onClick: canToggle && memoryOn ? toggleEvolution : undefined }),
         ),
         h('div', { style: PANEL_MUTED }, '从反馈中整理经验，按需使用'), // ui-copy-ignore 用户指定文案
-        h('div', { style: PANEL_MUTED }, '实验功能'), // ui-copy-ignore 用户指定文案
+        h('div', { style: PANEL_MUTED }, '实验功能，会增加 token 消耗'), // ui-copy-ignore 用户指定文案
       );
       const switchBar = h('div', { style: { display: 'flex', alignItems: 'stretch', gap: '10px', flexWrap: 'wrap', padding: '12px 18px', borderBottom: '1px solid var(--dsw-alias-border-l1)', flex: '0 0 auto' } },
         globalView ? h('div', { style: { ...PANEL_MUTED, padding: '2px 0' } }, '全局记忆只读') : memorySwitch,
@@ -1528,14 +1528,16 @@ window.__ModuleLoader__.load({
       const groups = React.useMemo(() => {
         const list = Array.isArray(refs) ? refs : EMPTY;
         return {
-          reference: list.filter((item) => item.exposure === 'reference'),
+          found: list.filter((item) => item.exposure === 'reference' && item.kind === 'memory-search'),
+          provided: list.filter((item) => item.exposure === 'reference' && item.kind === 'memory-read'),
           update: list.filter((item) => item.exposure === 'update'),
         };
       }, [refs]);
       if (!sessionId && refs.length === 0) return null;
-      if (groups.reference.length === 0 && groups.update.length === 0) return null;
+      if (groups.found.length === 0 && groups.provided.length === 0 && groups.update.length === 0) return null;
       return h('div', { style: TAIL },
-        h(RefSection, { label: '本轮参考', items: groups.reference, sessionId, turnKey: turn }),
+        h(RefSection, { label: '检索发现', items: groups.found, sessionId, turnKey: turn }),
+        h(RefSection, { label: '已提供正文', items: groups.provided, sessionId, turnKey: turn }),
         h(RefSection, { label: '本轮更新', items: groups.update, sessionId, turnKey: turn }),
       );
     };

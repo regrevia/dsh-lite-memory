@@ -635,8 +635,8 @@ const SAVE_PARAMS = {
   properties: {
     id: { type: 'string', description: '要更新的记忆 id（来自搜索结果或相近提示）。同一件事更新时用它，别另建一条' },
     title: { type: 'string', description: `标题：名词短语，用户一眼能认出是哪件事，不超过 ${LIMITS.titleChars} 字。它就是这条记忆的身份` },
-    summary: { type: 'string', description: `一句话说清要记的内容本身——用户只看这一行决定留不留，名词短语，不超过 ${LIMITS.summaryChars} 字` },
-    body: { type: 'string', description: `正文 markdown，整段替换旧正文，不超过 ${LIMITS.entryBytes} 字节。只写原则、判断规则、触发条件和边界；不写像素、字号、层级、颜色、一次性数字或代码片段，这些查当前代码或文档。` },
+    summary: { type: 'string', description: `一句话说清要记的内容本身——用户只看这一行决定留不留，名词短语最好，超长会自动截到这个长度` },
+    body: { type: 'string', description: `正文 markdown，整段替换旧正文，不超过 ${LIMITS.entryBytes} 字节。只写原则、判断规则、触发条件和边界；不写一次性数字或代码片段，这些查当前代码或文档。` },
     when: { type: 'string', description: `前置条件或适用场景（「在哪台机器 / 哪个环境 / 什么情况下」），不超过 ${LIMITS.whenChars} 字。同一标题但前置条件不同，会存成两条，不合并；更新时不给就保留原值` },
     kind: { type: 'string', enum: ['preference', 'convention', 'procedure', 'pointer', 'pitfall', 'credential_hint', 'note'], description: '条目类型；更新时不给就保留原值' },
     tags: { type: 'array', items: { type: 'string' }, description: '最多 5 个标签；更新时不给就保留原值' },
@@ -1070,8 +1070,18 @@ export function apply(ctx, config) {
     });
   }
 
+  /** 实验正文只在「自进化开着，且还是同一代」时可用；关掉再开不能复活旧正文。 */
+  function experimentStillCurrent(scope, held) {
+    let evolution;
+    try { evolution = evolutionStatus(scope); } catch { return false; }
+    if (!evolution || evolution.enabled !== true || evolution.compatible === false) return false;
+    if (held && held.epoch && String(evolution.epoch || '') !== String(held.epoch)) return false;
+    return true;
+  }
+
   /** 读决策 → 一段短提示：未绑定只给栏目索引，已绑定才给规则正文。 */
   function renderExperiment(scope, decision, context, held, win) {
+    if (!experimentStillCurrent(scope, held)) return '';
     if (!decision || decision.kind === 'none') return '';
     if (decision.kind === 'conflict') {
       return chargeExperiment(win, '这些实验规则互相冲突，先按用户这次说的做，别叠加对立的规则。');
@@ -1095,6 +1105,8 @@ export function apply(ctx, config) {
       if (record.reviewState === 'legacy_unreviewed') continue;
       const learning = record.learning && typeof record.learning === 'object' ? record.learning : {};
       if (learning.state !== 'active' && learning.state !== 'trial') continue;
+      /** 试用到期、暂停或身份失效：自动注入与检索、读取用同一档可用性，不能各判各的。 */
+      if (!view.experimentalUsable(record, Date.now())) continue;
       const status = view.statusOf(record, context);
       if (status === 'needs_context') { unknown.push(record); continue; }
       if (status !== 'ok') continue;
@@ -1297,7 +1309,15 @@ export function apply(ctx, config) {
       if (!memoryEnabled(scope)) return '';
       const epoch = controlStatus(scope).epoch || '';
       if (state.controlEpoch && epoch && state.controlEpoch !== epoch) return '';
-      return [state.experimentText, state.text].filter(Boolean).join('\n\n');
+      /** 自进化关掉或换过代：关掉前的实验正文不再输出，重开也不复活。 */
+      let evolutionText = state.experimentText;
+      if (evolutionText) {
+        let evolution;
+        try { evolution = evolutionStatus(scope); } catch { evolution = null; }
+        if (!evolution || evolution.enabled !== true || evolution.compatible === false
+          || (state.evolutionEpoch && String(evolution.epoch || '') !== state.evolutionEpoch)) evolutionText = '';
+      }
+      return [evolutionText, state.text].filter(Boolean).join('\n\n');
     } catch {
       return '';
     }
@@ -1507,6 +1527,7 @@ export function apply(ctx, config) {
           chars: { type: 'integer' },
           text: { type: 'string' },
           status: { type: 'string', enum: ['ok', 'budget_exhausted', 'memory_disabled', 'needs_context'] },
+          reasonCode: { type: 'string' },
           refs: {
             type: 'array',
             items: {
@@ -1558,14 +1579,15 @@ export function apply(ctx, config) {
       }
       const scope = resolved.scope;
       const context = resolved.context;
-      /** 检索只列当前任务真能用的条目；条件未知或不适用就只留状态，不给索引行。 */
-      const hits = search(scope, args.query, (args.limit ?? 3) + 3, {
+      /** 检索只列当前任务真能用的条目；先取全量候选，过滤后再截断，避免不可用条目挤掉后面的命中。 */
+      const limit = args.limit ?? 3;
+      const rawHits = search(scope, args.query, 50, {
         context,
         history: args.history === true,
         allowExperimental: resolved.experimental === true,
-      }).filter((item) => (item.archived || item.status === 'ok')
-        && (!item.ownerProjectId || item.ownerProjectId === scope.key))
-        .slice(0, args.limit ?? 3);
+      }).filter((item) => !item.ownerProjectId || item.ownerProjectId === scope.key);
+      const hits = rawHits.filter((item) => item.archived || item.status === 'ok').slice(0, limit);
+      const withheld = rawHits.filter((item) => !item.archived && item.status !== 'ok');
       const scopeName = scope.key === 'global' ? '' : projectNameOf(scope);
       const shown = hits.map((item) => ({
         ...view.toModelView(item, 'search', { status: item.status || (item.archived ? 'archived' : 'ok') }),
@@ -1575,6 +1597,28 @@ export function apply(ctx, config) {
         const rendered = renderIndex(shown.slice(0, kept));
         return { count: kept, chars: rendered.chars, text: rendered.text, status: 'ok', refs: refsOf(hits.slice(0, kept)) };
       };
+      /** 有匹配但适用条件未确认：明确说清为什么暂时不能用，不要伪装成「没有这条记忆」。 */
+      if (!hits.length && withheld.length) {
+        const lines = withheld.slice(0, 3).map((item) => {
+          const why = item.status === 'needs_context' ? '适用条件还没确认' : '当前任务不适用';
+          return `- 「${item.title}」 · ${item.id}：${why}`;
+        });
+        const value = {
+          count: 0,
+          chars: 0,
+          text: lines.join('\n'),
+          status: 'needs_context',
+          reasonCode: 'applicability_unresolved',
+          refs: [],
+        };
+        if (win) {
+          const bytes = jsonBytes(value);
+          if (!affordable(win, bytes)) return { ...value, status: 'budget_exhausted', text: '' };
+          win.bytes += bytes;
+          win.reads += 1;
+        }
+        return value;
+      }
       /** 没命中是正常结果，不是额度问题；空响应同样记一次本请求开销。 */
       if (!hits.length) {
         const empty = { count: 0, chars: 0, text: '', status: 'ok', refs: [] };
@@ -1995,6 +2039,8 @@ export function apply(ctx, config) {
         clearPrepared(agent);
         return decision;
       }
+      let evolutionEpoch = '';
+      try { evolutionEpoch = String(evolutionStatus(scope).epoch || ''); } catch { evolutionEpoch = ''; }
       const state = {
         text: snapshot ? snapshot.text : '',
         experimentText: experiment ? experiment.text : '',
@@ -2005,6 +2051,7 @@ export function apply(ctx, config) {
         signal,
         fingerprint,
         controlEpoch,
+        evolutionEpoch,
         at: Date.now(),
       };
       prepared.set(agent, state);

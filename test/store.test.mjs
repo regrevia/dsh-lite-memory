@@ -40,24 +40,22 @@ const rawState = (scope) => fs.readFileSync(path.join(scope.dir, 'state.json'), 
 const countOf = (scope) => loadIndex(scope).entries.length;
 const suggestionsOf = (scope) => loadIndex(scope).suggestions;
 
-test('over-specific body is rejected instead of becoming a constraint', () => {
+test('over-specific body is stored, not rejected for naming concrete values', () => {
   const scope = fresh('specific');
-  assert.throws(
-    () => upsert(scope, {
-      title: '自绘菜单',
-      summary: '菜单用应用自绘，不用系统原生',
-      body: '菜单 z-index: 1100；宽度 min(264px, 100vw - 24px)；字号 12px；内边距 10px；圆角 8px。',
-    }),
-    /正文太具体/,
-  );
+  const saved = upsert(scope, {
+    title: '自绘菜单',
+    summary: '菜单用应用自绘，不用系统原生',
+    body: '菜单 z-index: 1100；宽度 min(264px, 100vw - 24px)；字号 12px；内边距 10px；圆角 8px。',
+  });
+  assert.equal(saved.record.title, '自绘菜单');
+  assert.ok(saved.record.body.includes('z-index'));
 });
 
-test('body over the distilled budget is rejected', () => {
+test('a 500-character body is accepted', () => {
   const scope = fresh('toolong');
-  assert.throws(
-    () => upsert(scope, { title: '长正文', summary: '太长就不存', body: '记'.repeat(500) }),
-    /超过单条 1200 字节/,
-  );
+  const saved = upsert(scope, { title: '长正文', summary: '长一点也要存下来', body: '记'.repeat(500) });
+  assert.equal(saved.record.title, '长正文');
+  assert.equal(saved.record.body.length, 500);
 });
 
 test('create then same title merges with full old body kept', () => {
@@ -146,16 +144,16 @@ test('oversized body is rejected, old data untouched', () => {
   assert.equal(loadIndex(scope).entries[0].revision, 1);
 });
 
-test('over-long title and summary are errors, not silent slices', () => {
+test('over-long title is an error; over-long summary is truncated instead', () => {
   const scope = fresh('length');
   assert.throws(() => upsert(scope, { title: 't'.repeat(LIMITS.titleChars + 1), summary: '写得短一点' }), /标题超过/);
-  assert.throws(() => upsert(scope, { title: '长摘要', summary: 's'.repeat(LIMITS.summaryChars + 1) }), /摘要超过/);
-  assert.equal(fs.existsSync(path.join(scope.dir, 'state.json')), false);
+  const saved = upsert(scope, { title: '长摘要', summary: '长'.repeat(LIMITS.summaryChars + 1) });
+  assert.equal(saved.record.summary.length, LIMITS.summaryChars);
 });
 
-test('imperative summary and credentials are rejected', () => {
+test('imperative summary is kept; credentials are still rejected', () => {
   const scope = fresh('validate');
-  assert.throws(() => upsert(scope, { title: '回复语言', summary: '请用中文回复' }), /名词短语/);
+  assert.equal(upsert(scope, { title: '回复语言', summary: '请用中文回复' }).record.summary, '请用中文回复');
   assert.throws(() => upsert(scope, { title: '凭据', summary: '一个 token 的值', body: 'token = sk-abcdefghijklmnopqrst' }), /凭据/);
   assert.equal(normalizeDraft({ title: 'a', summary: '名词短语' }).kind, 'note');
   assert.throws(() => normalizeDraft({ title: 'a', summary: '名词短语', kind: 'guess' }), /类型只能是/);

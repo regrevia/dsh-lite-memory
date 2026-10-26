@@ -23,7 +23,7 @@ Lightweight memory for the DeepSeek Harness. No standing system prompt, nothing 
 
 写入时分两层：默认只在这个项目生效；用户说「以后所有项目都这样」才进全局层（200 条起提示，硬上限 1000 条），检索时一起查。同一主题在不同前提下用 `when` 区分，各存一条。
 
-写入前先蒸馏：标题是结论，正文只留原则、判断规则和触发条件，不把具体尺寸、字号、层级、颜色或一次性数字记进来；需要这些值时按记忆里的指针查当前代码或文档。单条正文超过 1200 字节会被拒绝，先删细节再存。
+写入前先蒸馏：标题是结论，正文只留原则、判断规则和触发条件，不把具体尺寸、字号、层级、颜色或一次性数字记进来；需要这些值时按记忆里的指针查当前代码或文档。单条正文超过 4096 字节会被拒绝，先删细节再存；摘要超长自动截到 60 字。
 
 触发词：`记住`、`记一下`、`上次`、`规范`、`约定`、`路径`、`凭据怎么取`。
 
@@ -39,7 +39,7 @@ Those lines belong to the turn that made them: each turn is rebuilt from its own
 
 Writes land in one of two layers: the current project by default, or the global layer (warns past 200, hard ceiling 1000) when the user says the rule holds for every project. Both layers are searched together, and a `when` field separates the same subject under different preconditions.
 
-Before writing, distill: the title is the conclusion and the body keeps only the principle, decision rule and trigger condition. Concrete dimensions, font sizes, z-index, colors and one-off numbers stay out; the memory points at where to read the current value instead. A body over 1200 bytes is refused, so drop detail before saving.
+Before writing, distill: the title is the conclusion and the body keeps only the principle, decision rule and trigger condition. Concrete dimensions, font sizes, z-index, colors and one-off numbers stay out; the memory points at where to read the current value instead. A body over 4096 bytes is refused, so drop detail before saving; an over-long summary is truncated to 60 characters.
 
 ## 点一下就存 / One click, no turn
 
@@ -80,13 +80,13 @@ On the Memories tab, the search row also switches between list and graph; either
 - **0 依赖**，存储层无定时器、无监听、无网络，只有同步单文件写；写入用一把有超时的锁，别的进程正在写就明确报「忙」，不抢别人的锁。
 - 搜索最多 4 条、400 字；正文只在 `memory_read` 里出现，全文永不进上下文。
 - 普通检索只列当前有效的记录；已经归档或被更新替换的旧说法不混进来，要查历史得在 `memory_search` 里显式要 `history`。
-- 上限：单条正文 1200 字节、整库正文 512 KB、每层 1000 条、标题与摘要各 60 字；每层 200 条只当提示线。90 天未用只留 `id + 标题`。到了硬上限不拒绝新记忆：把同层最久没被读的一条移进归档，保存结果里写明是哪条（正文与完整记录都留着，可人工取回），单条本身超预算才报错；用户明确说「别记」也进归档。文件从不删除。
+- 上限：单条正文 4096 字节、整库正文 1 MB、每层 1000 条、标题与摘要各 60 字；每层 200 条只当提示线。90 天未用只留 `id + 标题`。到了硬上限不拒绝新记忆：把同层最久没被读的一条移进归档，用户固定过的规则不动，保存结果里写明是哪条（正文与完整记录都留着，可人工取回），单条本身超预算才报错；用户明确说「别记」也进归档。文件从不删除。
 - 一个项目一个目录，项目之间互相看不见。
 
 - **Zero dependencies.** The store has no timers, no listeners, no network — just synchronous single-file writes, guarded by a lock that gives up after 500 ms instead of stealing it.
 - Search returns at most 4 hits and 400 characters. Full text only appears in `memory_read`.
 - Normal search lists current entries only; archived notes and superseded wording stay out unless `memory_search` asks for `history`.
-- Limits: 1200 bytes per body, 512 KB of bodies per store, 1000 entries per layer, 60 characters per title or summary; 200 entries per layer is just a warning line. At the hard ceiling a save is never refused: the least recently read entry in the same layer moves to archive and the result names it (body and full record kept, restorable by hand); only an entry that alone exceeds the budget fails. Saying 「别记」 also archives. Files are never deleted.
+- Limits: 4096 bytes per body, 1 MB of bodies per store, 1000 entries per layer, 60 characters per title or summary; 200 entries per layer is just a warning line. At the hard ceiling a save is never refused: the least recently read entry in the same layer moves to archive (pinned rules are never evicted) and the result names it (body and full record kept, restorable by hand); only an entry that alone exceeds the budget fails. Saying 「别记」 also archives. Files are never deleted.
 - One directory per project, so projects never see each other's notes.
 
 ## 项目自进化〔实验〕 / Project self-evolution (experimental)

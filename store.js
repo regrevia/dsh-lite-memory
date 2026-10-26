@@ -27,7 +27,6 @@ const SECRET_PATTERNS = [
 ];
 
 /** A summary is a noun phrase. An imperative turns a note into an instruction. */
-const IMPERATIVE = /^(?:你要|你得|你必须|请|务必|必须|记得|记住|别忘了|do not|don't|please|you (?:must|should|need))/i;
 
 const SUGGESTION_ID = /^sug_[a-z0-9]{6,}$/;
 
@@ -276,19 +275,9 @@ function cleanTitle(value) {
   return String(value ?? '').replace(/\s+/g, ' ').trim();
 }
 
-/** 正文里的实现参数（尺寸/层级/字号）不算记忆：数到三次就要求重写成原则。 */
-const UI_SPEC_PATTERNS = [
-  /\bz-index\s*:\s*-?\d+/gi,
-  /\b(?:padding|margin|gap|font-size|line-height|border-radius|width|height|min-width|max-width|min-height|max-height|box-shadow)\s*:[^;\n]{0,32}\d/gi,
-  /\b\d+(?:\.\d+)?(?:px|rem|em)\b/gi,
-  /\bmin\(\s*\d/gi,
-];
-
 export function validSummary(summary) {
-  const text = String(summary ?? '').replace(/\s+/g, ' ').trim();
+  const text = String(summary ?? '').replace(/\s+/g, ' ').trim().slice(0, LIMITS.summaryChars);
   if (!text) return { ok: false, reason: '摘要为空' };
-  if (text.length > LIMITS.summaryChars) return { ok: false, reason: `摘要超过 ${LIMITS.summaryChars} 字，先写短些` };
-  if (IMPERATIVE.test(text)) return { ok: false, reason: '摘要必须写成名词短语，不能写成指令' };
   return { ok: true, text };
 }
 
@@ -323,10 +312,6 @@ export function normalizeDraft(source, options = {}) {
   const bodyBytes = Buffer.byteLength(body);
   if (bodyBytes > LIMITS.entryBytes) {
     throw new Error(`正文 ${bodyBytes} 字节，超过单条 ${LIMITS.entryBytes} 字节；只留原则、判断规则和触发条件`);
-  }
-  if (has('body')) {
-    const concrete = UI_SPEC_PATTERNS.reduce((count, pattern) => count + (body.match(pattern) || []).length, 0);
-    if (concrete >= 3) throw new Error('正文太具体：记忆只留原则和触发条件，像素、字号、层级这类实现参数留在代码或文档里');
   }
   const kind = has('kind') ? textField(draft.kind, 20, '类型') : 'note';
   if (kind && !KINDS.includes(kind)) throw new Error(`类型只能是 ${KINDS.join(' / ')}`);
@@ -2643,7 +2628,7 @@ export function commitLearning(scope, batch = {}) {
               touched += 1;
               continue;
             }
-            if (currentRules.length + (touched + 1) > learning.LIMITS.rules) throw new Error('项目实验规则已经到上限');
+            if (currentRules.length + 1 > learning.LIMITS.rules) throw new Error('项目实验规则已经到上限');
             const pending = currentRules.filter((entry) => toFlat(entry).learning?.state === 'pending').length;
             if (pending >= learning.LIMITS.pending) throw new Error('待确认候选已经到上限');
             merged.learning = {
@@ -2906,15 +2891,18 @@ export function editLearningRule(scope, id, options = {}) {
         const nextBody = body || flat.body;
         if (nextTitle === flat.title && nextBody === flat.body) return { changed: false };
         const nextCurrent = { ...entry.current, title: nextTitle, body: nextBody };
+        const bodyChanged = nextBody !== flat.body;
         const learningState = { ...(flat.learning || {}) };
         if (!learningState.specDigest) learningState.specDigest = learning.specDigestOf(flat);
-        learningState.versions = [...(Array.isArray(learningState.versions) ? learningState.versions : []),
-          { digest: learningState.specDigest, body: flat.body, at }].slice(-learning.LIMITS.versions);
+        if (bodyChanged) {
+          learningState.versions = [...(Array.isArray(learningState.versions) ? learningState.versions : []),
+            { digest: learningState.specDigest, body: flat.body, at }].slice(-learning.LIMITS.versions);
+          learningState.supportedEpisodeIds = [];
+          learningState.evidence = [];
+        }
         learningState.specDigest = learning.specDigestOf(nextCurrent);
-        learningState.supportedEpisodeIds = [];
-        learningState.evidence = [];
         learningState.updatedAt = at;
-        if (learningState.state === 'active') {
+        if (bodyChanged && learningState.state === 'active') {
           learningState.state = 'trial';
           learningState.trialUntil = new Date(now + learning.LIMITS.trialMs).toISOString();
         }
