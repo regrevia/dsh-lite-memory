@@ -2374,6 +2374,10 @@ export function apply(ctx, config) {
       }
       const parsed = learning.parseOutput(text, { finish, refs: input.refs, rules: input.rules, ranges });
       if (!parsed.ok) throw new Error(parsed.reason);
+      /** 用户已经把要求说成长期规则，模型仍返回空时至少留一条规则，不让这条反馈无声消失。 */
+      const changes = parsed.changes.length
+        ? parsed.changes
+        : (candidate.cue?.explicitLongTerm ? [learning.pendingChangeFrom(candidate)].filter(Boolean) : []);
       const commit = commitLearning(scope, {
         operationId,
         epoch: begin.epoch,
@@ -2384,7 +2388,7 @@ export function apply(ctx, config) {
         messageIds: candidate.messageIds,
         feedbackText: candidate.text,
         dimension: candidate.cue?.dimension || '',
-        changes: parsed.changes,
+        changes,
         preparedTargets,
         usage: learning.usageOf(chunks),
         explicitLongTerm: Boolean(candidate.cue.explicitLongTerm),

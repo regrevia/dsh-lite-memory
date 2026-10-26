@@ -294,6 +294,27 @@ export function selectRules(rules, context = {}) {
 }
 
 /** 构造一次受限调用输入：无工具、无前台历史，只有身份、少量规则和反馈映射。 */
+/** 明确长期要求本身就是可信收集信号：整理器返回空时至少落一条规则，不让它无声消失。 */
+export function pendingChangeFrom(feedback = {}) {
+  const text = String(feedback.text || '').replace(/\r/g, '').trim();
+  if (!text) return null;
+  const lines = text.split('\n').map((line) => line.trim()).filter(Boolean).slice(0, 6);
+  const currentText = lines.join('\n').slice(0, 240);
+  if (!currentText) return null;
+  const first = (lines[0] || currentText).split(/[，。！？；]/)[0].trim();
+  const topicKey = String(feedback.cue?.dimension || first || currentText).slice(0, 60);
+  return {
+    target: 'new',
+    feedbackType: 'spec_change',
+    topicKey,
+    currentText,
+    applicability: 'all_in_scope',
+    conditions: [],
+    evidence: ['u0'],
+    persistence: 'project_candidate',
+  };
+}
+
 export function buildCallInput({ projectId, episodeId, taskKind, seriesId, phase, feedback, rules, ranges, maxBytes = LIMITS.inputBytes } = {}) {
   const refs = { feedback: {}, rules: {} };
   const source = (Array.isArray(rules) ? rules : []).filter((record) => record && record.id);

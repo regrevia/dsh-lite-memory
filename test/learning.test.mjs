@@ -951,6 +951,17 @@ test('L03 反馈类型限制动作：例外/检查点/认可不能写规范', ()
   }
 });
 
+test('L03b 明确长期要求整理为空时也留下规则', () => {
+  const change = learning.pendingChangeFrom({ text: '以后这个项目默认用 pnpm。', cue: { explicitLongTerm: true } });
+  assert.equal(change.target, 'new');
+  assert.equal(change.feedbackType, 'spec_change');
+  assert.equal(change.currentText, '以后这个项目默认用 pnpm。');
+  assert.equal(change.evidence[0], 'u0');
+  const check = learning.validateChange(change, { refs: { feedback: { u0: 'm1' }, rules: {} }, rules: [], ranges: RANGES });
+  assert.equal(check.ok, true, check.reason);
+  assert.equal(learning.pendingChangeFrom({ text: '   ' }), null);
+});
+
 test('L04 先算目标状态再查配额，过期候选可恢复', () => {
   const base = { existing: null, evidence: { episodeId: 'e1', messageIds: ['m1'], sourceExcerpt: '以后都用参数化查询' }, pending: 12, rules: 0, now: 1000 };
   const active = learning.admitChange({ ...base, change: NEW_CHANGE, explicitLongTerm: true });
