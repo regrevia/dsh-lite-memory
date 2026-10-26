@@ -419,6 +419,53 @@ const evoDelete = await call('/lite-memory/evolution', {
 assert.equal(evoDelete.status, 200);
 assert.equal(evoDelete.body.ok, true);
 
+// 管理面成功路径：候选可修改、采纳、暂停、恢复、放弃，每次返回后能继续操作
+const manageSeed = await defs.get('memory_save').execute(
+  { title: '口播收尾', summary: '口播收尾留一句行动', body: '结尾给一句具体行动。' },
+  { agent: evoAgent },
+);
+state.transact(evoReadScope, {}, (draft) => {
+  const row = draft.entries.find((entry) => entry.id === manageSeed.id);
+  row.origin = 'project_evolution';
+  row.current.conditions = [{ key: 'seriesId', value: '口播' }];
+  row.maintenance = { ...(row.maintenance || {}), learning: { state: 'pending', source: 'evolution' } };
+  return { changed: true };
+});
+const manageSnap = await call('/lite-memory/evolution', { sessionId: 'session-evo-read', learningAction: 'snapshot' });
+const manageRule = manageSnap.body.rules.find((rule) => rule.id === manageSeed.id);
+assert.ok(manageRule);
+assert.equal(manageRule.state, 'pending');
+const manageEdit = await call('/lite-memory/evolution', {
+  sessionId: 'session-evo-read', learningAction: 'edit', id: manageSeed.id,
+  expectedRevision: manageRule.revision, body: '结尾给一句具体动作。',
+});
+assert.equal(manageEdit.status, 200);
+assert.equal(manageEdit.body.ok, true);
+const afterManageEdit = (await call('/lite-memory/evolution', { sessionId: 'session-evo-read', learningAction: 'snapshot' })).body.rules.find((rule) => rule.id === manageSeed.id);
+assert.equal(afterManageEdit.state, 'pending');
+assert.equal(afterManageEdit.body, '结尾给一句具体动作。');
+const manageAdopt = await call('/lite-memory/evolution', {
+  sessionId: 'session-evo-read', learningAction: 'adopt', id: manageSeed.id, expectedRevision: afterManageEdit.revision,
+});
+assert.equal(manageAdopt.status, 200);
+assert.equal((await call('/lite-memory/evolution', { sessionId: 'session-evo-read', learningAction: 'snapshot' })).body.rules.find((rule) => rule.id === manageSeed.id).state, 'active');
+const managePause = await call('/lite-memory/evolution', {
+  sessionId: 'session-evo-read', learningAction: 'pause', ids: [manageSeed.id],
+});
+assert.equal(managePause.status, 200);
+assert.equal((await call('/lite-memory/evolution', { sessionId: 'session-evo-read', learningAction: 'snapshot' })).body.rules.find((rule) => rule.id === manageSeed.id).state, 'paused');
+const manageResume = await call('/lite-memory/evolution', {
+  sessionId: 'session-evo-read', learningAction: 'resume', id: manageSeed.id,
+});
+assert.equal(manageResume.status, 200);
+const manageResumed = (await call('/lite-memory/evolution', { sessionId: 'session-evo-read', learningAction: 'snapshot' })).body.rules.find((rule) => rule.id === manageSeed.id);
+assert.equal(manageResumed.state, 'trial');
+const manageDiscard = await call('/lite-memory/evolution', {
+  sessionId: 'session-evo-read', learningAction: 'discard', id: manageSeed.id, expectedRevision: manageResumed.revision,
+});
+assert.equal(manageDiscard.status, 200);
+assert.equal((await call('/lite-memory/evolution', { sessionId: 'session-evo-read', learningAction: 'snapshot' })).body.rules.length, 0);
+
 // ── 关闭项目记忆后：面板只读，管理面写操作全部拒绝，工具也不落盘 ─────────────
 const closedCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-closed-'));
 sessionCwds.set('session-closed', closedCwd);
