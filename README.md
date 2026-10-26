@@ -55,10 +55,12 @@ Each completed turn keeps a few lines under 「已编辑 N 个文件」, built f
 
 The brain icon in the session header opens a centered memory panel. It starts on the current project and can switch to another project or the global layer; switched scopes are read-only and never migrate or create state. The panel draws the graph from real entries, shows the kind breakdown and counts, and lists memories, rules and archived notes on the right; selecting one reads its current body. The project self-evolution switch lives here too and is editable only for the current project.
 
+- 项目记忆总开关关闭后，这个项目不再使用任何记忆（包括全局层）：自动注入、检索、读取、引用、保存全部停，面板只能查看；重新打开后沿用原来的自进化设置。
 - 图谱只按数据画：每条有效记忆一个节点，共享标签和主题做枢纽，显式关联画实线；位置由 id 决定，同一批数据每次一样。
 - 范围只来自服务端枚举的层；不接受客户端拼路径，也不能写别的项目。
 - 关闭后停止整理与晚到写入，已固定的项目规范继续生效，实验成果留在「规则」和「归档」里。
 
+- Turning the project memory switch off stops all memory use in that project, including the global layer: no injection, search, read, citation or save, and the panel is read-only. Turning it back on restores the previous self-evolution setting.
 - The graph is data only: one node per active memory, shared tags and topics as hubs, explicit links as solid edges; positions derive from ids, so the same data looks the same every time.
 - Scopes come only from the server-side list; the page cannot assemble a path or write another project's notes.
 - Turning evolution off stops organizing and late writes; pinned project rules keep working and experimental results stay under Rules and Archive.

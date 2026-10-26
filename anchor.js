@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 export const ANCHOR_STATUSES = ['unbound', 'proposed', 'active', 'continuable', 'ambiguous', 'closed'];
 export const TASK_LIMITS = { sessions: 8, episodes: 12, sourceMessages: 8, idleMs: 7 * 24 * 60 * 60 * 1000, indexBytes: 600 };
 
-const SWITCH_WORDS = /(改做|换个|换一个|现在做|接下来做|新做|另做|开始做|去做|改成)/;
+const SWITCH_WORDS = /(改做|改为|改到|改成|换个|换一个|换成|转到|现在做|接下来做|新做|另做|开始做|去做)/;
 const CONTINUE_WORDS = /(再做一期|下一期|再来一期|再开一期|续一集|再拍一期)/;
 const REVISE_WORDS = /(再改一下|改一版|再改改|调整一下|这版再|继续改)/;
 const THANKS_WORDS = /^(谢谢|多谢|谢了|辛苦了|thanks|thank\s*you)[!！。.～~\s]*$/i;
@@ -229,7 +229,11 @@ export function routeTask(tasksInput, input = {}) {
     }
   }
   const registered = (Array.isArray(input.registeredSeries) ? input.registeredSeries : []).map((item) => text(item, 40)).filter(Boolean);
-  const changedSeries = registered.find((series) => series && series !== (current && current.seriesId) && query.includes(series));
+  /** 用户在这句话里点名的栏目优先于旧栏目和项目默认值。 */
+  const namedSeries = registered.find((series) => series && query.includes(series)) || '';
+  const changedSeries = current && namedSeries && namedSeries !== (current.seriesId || '') ? namedSeries : '';
+  const fallbackKind = (currentEpisode && currentEpisode.taskKind)
+    || (input.defaults && input.defaults.taskKind) || '';
 
   if ((!current || current.status === 'unbound' || current.status === 'proposed') && input.selection && (input.selection.seriesId || input.selection.taskKind)) {
     const transitionId = transitionIdFor(batchKey, current ? current.bindingRevision || 0 : 0);
@@ -269,16 +273,19 @@ export function routeTask(tasksInput, input = {}) {
     const previousRevision = current.bindingRevision || 1;
     const transitionId = transitionIdFor(batchKey, previousRevision);
     const existing = Object.values(tasks.episodes).find((episode) => episode.transitionId === transitionId);
+    /** 「再做一期 Vlog」：继承上一期的任务类型，但栏目换成本句点名的那个。 */
+    const seriesId = changedSeries || currentEpisode.seriesId || '';
+    const status = changedSeries ? 'active' : 'continuable';
     const episode = existing || createEpisode(tasks, {
-      taskKind: currentEpisode.taskKind,
-      seriesId: currentEpisode.seriesId,
+      ...(fallbackKind ? { taskKind: fallbackKind } : {}),
+      ...(seriesId ? { seriesId } : {}),
       phase: 'brief',
-      status: 'continuable',
+      status,
       transitionId,
       previousEpisodeId: currentEpisode.episodeId,
       now,
     });
-    const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status: 'continuable', bindingRevision: tasks.revision, now });
+    const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status, bindingRevision: tasks.revision, now });
     tasks.sessions[sessionId] = anchor;
     return { tasks, anchor, episode, decision: { kind: 'continuation', anchor, inherited: currentEpisode }, changed: true };
   }
@@ -291,21 +298,40 @@ export function routeTask(tasksInput, input = {}) {
   }
 
   if (current && (SWITCH_WORDS.test(query) || changedSeries)) {
-    /** 只有当前请求明确点到已登记的栏目才切过去；否则留无正文作品壳。 */
+    /** 明确点到已登记的栏目就切过去并立即生效；只说「换个」没点栏目才留无正文作品壳。 */
     const nextSeries = changedSeries || '';
     const transitionId = transitionIdFor(batchKey, tasks.revision);
     const existing = Object.values(tasks.episodes).find((episode) => episode.transitionId === transitionId);
+    const status = nextSeries ? 'active' : 'unbound';
     const episode = existing || createEpisode(tasks, {
+      ...(fallbackKind ? { taskKind: fallbackKind } : {}),
       ...(nextSeries ? { seriesId: nextSeries } : {}),
-      status: nextSeries ? 'proposed' : 'unbound',
+      status,
       phase: 'brief',
       transitionId,
       previousEpisodeId: currentEpisode ? currentEpisode.episodeId : '',
       now,
     });
-    const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status: episode.status, bindingRevision: tasks.revision, now });
+    const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status, bindingRevision: tasks.revision, now });
     tasks.sessions[sessionId] = anchor;
     return { tasks, anchor, episode, decision: { kind: nextSeries ? 'selected' : 'unbound', anchor, switched: true }, changed: true };
+  }
+
+  /** 新会话或尚无有效栏目时，本句点名的已登记栏目直接生效，不被项目默认值覆盖。 */
+  if (namedSeries && !changedSeries && (!current || current.status === 'unbound' || current.status === 'proposed')) {
+    const transitionId = transitionIdFor(batchKey, tasks.revision);
+    const existing = Object.values(tasks.episodes).find((episode) => episode.transitionId === transitionId);
+    const episode = existing || createEpisode(tasks, {
+      ...(fallbackKind ? { taskKind: fallbackKind } : {}),
+      seriesId: namedSeries,
+      status: 'active',
+      phase: 'brief',
+      transitionId,
+      now,
+    });
+    const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status: 'active', bindingRevision: tasks.revision, now });
+    tasks.sessions[sessionId] = anchor;
+    return { tasks, anchor, episode, decision: { kind: 'selected', anchor, explicit: true }, changed: true };
   }
 
   if (current && currentEpisode) {

@@ -731,7 +731,8 @@ test('实验来源条目默认不进入检索、正文与关联，只有管理�
   });
   assert.equal(search(scope, '实验记录', 4).some((row) => row.id === target.id), false);
   assert.equal(readEntry(scope, target.id), null);
-  assert.equal(search(scope, '实验记录', 4, { allowExperimental: true }).some((row) => row.id === target.id), true);
+  assert.equal(search(scope, '实验记录', 4, { allowExperimental: true }).some((row) => row.id === target.id), false);
+  assert.equal(search(scope, '实验记录', 4, { allowExperimental: true, history: true }).some((row) => row.id === target.id), true);
   assert.equal(readEntry(scope, target.id, { allowExperimental: true }).body, '实验正文');
   assert.ok(readEntry(scope, normal.record.id));
 });

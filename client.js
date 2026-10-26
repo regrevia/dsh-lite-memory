@@ -831,6 +831,8 @@ window.__ModuleLoader__.load({
       const stats = selected && selected.stats ? selected.stats : { total: 0, experimental: 0, links: 0, tags: 0, archived: 0 };
       const currentKey = current ? current.key : '';
       const selectedKey = selected ? selected.key : '';
+      const control = selected && selected.control ? selected.control : (current && current.control ? current.control : { enabled: true });
+      const memoryOn = control.enabled !== false;
       const evolution = selected && selected.evolution ? selected.evolution : (current ? current.evolution : null);
       const rules = evolution && Array.isArray(evolution.rules) ? evolution.rules : EMPTY;
       const economy = evolution && evolution.economy ? evolution.economy : null;
@@ -876,8 +878,19 @@ window.__ModuleLoader__.load({
         });
       };
 
+      const toggleControl = () => {
+        if (busy || !canToggle) return;
+        setBusy(true);
+        post('/lite-memory/control', { sessionId, enabled: !memoryOn, operationId: newOperationId() }).then((result) => {
+          if (!alive.current) return;
+          setBusy(false);
+          if (result.ok) load(selectedKey);
+          else setNote(failure(result, '开关没有改动'));
+        });
+      };
+
       const toggle = () => {
-        if (busy || !evolution || !canToggle) return;
+        if (busy || !evolution || !canToggle || !memoryOn) return;
         setBusy(true);
         post('/lite-memory/evolution', { sessionId, enabled: !(evolution.enabled === true), operationId: newOperationId() }).then((result) => {
           if (!alive.current) return;
@@ -939,14 +952,22 @@ window.__ModuleLoader__.load({
         ),
         h('div', { style: { ...PANEL_CARD, display: 'flex', flexDirection: 'column', gap: '8px' } },
           h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' } },
-            h('span', { style: { fontSize: '12px', lineHeight: '1.4', fontWeight: 600 } }, '自进化'),
-            h(Toggle, { on: evolution ? evolution.enabled === true : false, busy: busy || !evolution || !canToggle, onClick: canToggle ? toggle : undefined }),
+            h('span', { style: { fontSize: '12px', lineHeight: '1.4', fontWeight: 600 } }, '项目记忆'),
+            h(Toggle, { on: memoryOn, busy: busy || !canToggle, onClick: canToggle ? toggleControl : undefined }),
           ),
-          h('div', { style: PANEL_MUTED }, evolution ? (evolution.enabled ? `已开启 · ${rules.length} 条规则` : '未开启') : '未开启'),
-          evolution && evolution.enabled
+          h('div', { style: PANEL_MUTED }, memoryOn ? '已开启 · 本项目与全局可用' : '已关闭 · 本项目不使用任何记忆'),
+          canToggle ? null : h('div', { style: PANEL_MUTED }, '只读 · 回到当前项目才能改'),
+        ),
+        h('div', { style: { ...PANEL_CARD, display: 'flex', flexDirection: 'column', gap: '8px', opacity: memoryOn ? 1 : 0.55 } },
+          h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' } },
+            h('span', { style: { fontSize: '12px', lineHeight: '1.4', fontWeight: 600 } }, '自进化'),
+            h(Toggle, { on: evolution ? evolution.enabled === true : false, busy: busy || !evolution || !canToggle || !memoryOn, onClick: canToggle && memoryOn ? toggle : undefined }),
+          ),
+          h('div', { style: PANEL_MUTED }, !memoryOn ? '随项目记忆暂停' : evolution ? (evolution.enabled ? `已开启 · ${rules.length} 条规则` : '未开启') : '未开启'),
+          memoryOn && evolution && evolution.enabled
             ? h('div', { style: PANEL_MUTED }, `候选 ${evolution.counts?.pending || 0} · 试用 ${evolution.counts?.trial || 0} · 生效 ${evolution.counts?.active || 0}`)
-            : (canToggle ? h('div', { style: PANEL_MUTED }, '关闭后停止整理，结果保留。') : null),
-          usageLine ? h('div', { style: PANEL_MUTED }, usageLine) : null,
+            : (memoryOn && canToggle ? h('div', { style: PANEL_MUTED }, '关闭后停止整理，结果保留。') : null),
+          memoryOn && usageLine ? h('div', { style: PANEL_MUTED }, usageLine) : null,
           canToggle ? null : h('div', { style: PANEL_MUTED }, '只读 · 回到当前项目才能改'),
         ),
         h('div', { style: { ...PANEL_CARD, display: 'flex', flexDirection: 'column', gap: '9px' } },

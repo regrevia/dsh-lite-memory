@@ -102,7 +102,7 @@ const scopeOf = (dir) => store.scopeOf(dir);
   assert.equal(runtime.debug.windowOf(agent).experiment, null);
 }
 
-/* L02：开关打开但没有任何栏目，先问类型，不猜。 */
+/* L02：开关打开但没有任何栏目，不注入任何领域问题，也不给空上下文。 */
 {
   const dir = mkdir('clarify');
   const scope = scopeOf(dir);
@@ -112,28 +112,48 @@ const scopeOf = (dir) => store.scopeOf(dir);
   const sig = signal();
   await runtime.preStep({ agent, signal: sig, turn: 't1' }, enter(human('这期怎么开头')));
   const text = runtime.text(agent, sig);
-  assert.match(text, /先问用户这期做什么栏目/);
-  assert.match(text, /contextId=ctx_/);
+  assert.equal(text, '');
+  assert.doesNotMatch(text, /栏目|Vlog|口播|视频/);
+  const experiment = runtime.debug.windowOf(agent).experiment;
+  assert.equal(experiment ? experiment.injectedIds.length : 0, 0);
 }
 
 /* L03：未绑定任务只给栏目索引，不超过三条；短规则不进正文。 */
 {
   const dir = mkdir('index');
   const scope = scopeOf(dir);
-  seedRule(scope, { title: '口播开头', body: '开场三句内给结论。', conditions: [{ key: 'seriesId', value: '口播' }] });
-  seedRule(scope, { title: '口播收尾', body: '结尾只留一个行动。', conditions: [{ key: 'seriesId', value: '口播' }] });
+  seedRule(scope, { title: '口播开头', body: '开场三句内给结论。', conditions: [{ key: 'seriesId', value: '口播视频' }] });
+  seedRule(scope, { title: '口播收尾', body: '结尾只留一个行动。', conditions: [{ key: 'seriesId', value: '口播视频' }] });
   seedRule(scope, { title: 'Vlog 节奏', body: '每段不超过二十秒。', conditions: [{ key: 'seriesId', value: 'Vlog' }] });
   enable(scope);
   const runtime = boot();
   const agent = makeAgent('a-index', dir);
   const sig = signal();
-  await runtime.preStep({ agent, signal: sig, turn: 't1' }, enter(human('这期怎么开头')));
+  await runtime.preStep({ agent, signal: sig, turn: 't1' }, enter(human('视频开头怎么改')));
   const text = runtime.text(agent, sig);
-  assert.match(text, /项目里有这些栏目/);
+  assert.match(text, /这些记忆范围可能适用/);
+  assert.doesNotMatch(text, /Vlog/);
   assert.doesNotMatch(text, /开场三句内给结论/);
   const listed = text.split('\n').filter((line) => line.startsWith('- '));
   assert.equal(listed.length <= 3, true);
   assert.equal(Buffer.byteLength(text) <= 600 + 160, true, 'index stays small');
+}
+
+/* L03b：项目有视频栏目，本轮是修代码：无关栏目与选择提示都不进上下文。 */
+{
+  const dir = mkdir('index-unrelated');
+  const scope = scopeOf(dir);
+  seedRule(scope, { title: '口播开头', body: '开场三句内给结论。', conditions: [{ key: 'seriesId', value: '口播' }] });
+  seedRule(scope, { title: 'Vlog 节奏', body: '每段不超过二十秒。', conditions: [{ key: 'seriesId', value: 'Vlog' }] });
+  enable(scope);
+  const runtime = boot();
+  const agent = makeAgent('a-index-unrelated', dir);
+  const sig = signal();
+  await runtime.preStep({ agent, signal: sig, turn: 't1' }, enter(human('修一下 dsh-unlag 的重新载入问题')));
+  const injected = runtime.text(agent, sig);
+  assert.equal(injected, '');
+  const experiment = runtime.debug.windowOf(agent).experiment;
+  assert.equal(experiment ? experiment.injectedIds.length : 0, 0);
 }
 
 /* L04：项目默认绑定后给规则正文，带 id 与版本。 */
@@ -245,6 +265,22 @@ const scopeOf = (dir) => store.scopeOf(dir);
   assert.equal(text.includes('开场三句内给结论'), false);
   const current = Object.values(store.taskState(scope).episodes).find((episode) => episode.status === 'unbound');
   assert.ok(current, 'switch leaves an unbound episode');
+}
+
+/* L09b：明确改为排查数据库后，旧视频规则和栏目提示都不再注入。 */
+{
+  const dir = mkdir('switch-db');
+  const scope = scopeOf(dir);
+  seedRule(scope, { title: '口播开头', body: '开场三句内给结论。', conditions: [{ key: 'seriesId', value: '口播' }] });
+  enable(scope, { seriesId: '口播' });
+  const runtime = boot();
+  const agent = makeAgent('a-switch-db', dir);
+  await runtime.preStep({ agent, signal: signal(), turn: 't1' }, enter(human('这期口播开头')));
+  const sig = signal();
+  await runtime.preStep({ agent, signal: sig, turn: 't2' }, enter(human('这期不做了，改为排查 PostgreSQL 慢查询')));
+  const text = runtime.text(agent, sig);
+  assert.equal(text.includes('开场三句内给结论'), false);
+  assert.equal(/栏目|点名/.test(text), false);
 }
 
 /* L10：没有本请求上下文时，普通检索看不到实验来源。 */
@@ -388,6 +424,25 @@ const scopeOf = (dir) => store.scopeOf(dir);
   const text = runtime.text(agent, sig);
   assert.match(text, /固定发布检查/);
   assert.equal(text.includes('实验规则：发版前先备份'), false);
+}
+
+/* L18：工具绑定零命中/多命中时只回一句读取状态，不要求用户点名栏目。 */
+{
+  const dir = mkdir('bind-none');
+  const scope = scopeOf(dir);
+  seedRule(scope, { title: '口播开头', body: '开场三句内给结论。', conditions: [{ key: 'seriesId', value: '口播' }] });
+  seedRule(scope, { title: 'Vlog 节奏', body: '每段不超过二十秒。', conditions: [{ key: 'seriesId', value: 'Vlog' }] });
+  enable(scope);
+  const runtime = boot();
+  const agent = makeAgent('a-bind-none', dir);
+  await runtime.preStep({ agent, signal: signal(), turn: 't1' }, enter(human('这期怎么开头')));
+  const held = runtime.debug.windowOf(agent).experiment;
+  const none = await runtime.exec('memory_search', { query: '修一下构建脚本', contextId: held.contextId, bindForRequest: true }, agent);
+  assert.equal(none.status, 'needs_context');
+  assert.doesNotMatch(none.text, /点名|先问|栏目/);
+  const many = await runtime.exec('memory_search', { query: '口播和 Vlog 都要', contextId: held.contextId, bindForRequest: true }, agent);
+  assert.equal(many.status, 'needs_context');
+  assert.doesNotMatch(many.text, /点名|先问|栏目/);
 }
 
 console.log('evolution-read.test.mjs: all passed');

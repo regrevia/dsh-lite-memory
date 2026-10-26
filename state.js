@@ -99,6 +99,48 @@ export function evolutionOf(state) {
   };
 }
 
+/**
+ * 项目记忆总开关：缺字段按开启处理，老状态不用迁移。
+ * 它管这一层的所有读取、写入、召回和学习；全局层仍按发起项目判断，不跟着关。
+ */
+export function controlOf(state) {
+  const raw = state && state.control;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { enabled: true, epoch: '', changedAt: '', compatible: true };
+  }
+  return {
+    enabled: raw.enabled !== false,
+    epoch: typeof raw.epoch === 'string' ? raw.epoch : '',
+    changedAt: typeof raw.changedAt === 'string' ? raw.changedAt : '',
+    compatible: true,
+  };
+}
+
+/**
+ * 关总开关只停运行层：保留自进化的设置与已有规则，旋转代次让在途召回、候选和整理全部失效。
+ * 重新打开也换代次，关闭前排队的任务不能在重开后补交。
+ */
+export function applyControl(draft, enabled) {
+  const now = new Date().toISOString();
+  const current = controlOf(draft);
+  const next = Boolean(enabled);
+  if (current.enabled === next) return { changed: false, enabled: next };
+  const config = { enabled: next, epoch: crypto.randomUUID(), changedAt: now };
+  draft.control = config;
+  const evolution = draft.experimental && draft.experimental.projectEvolution;
+  if (evolution && typeof evolution === 'object' && !Array.isArray(evolution)) {
+    evolution.epoch = crypto.randomUUID();
+    evolution.feedbackGeneration = Number.isInteger(evolution.feedbackGeneration) ? evolution.feedbackGeneration + 1 : 1;
+    evolution.tasks = emptyTasks();
+    evolution.learning = emptyLearning();
+  }
+  if (!next) {
+    draft.entries = draft.entries.filter((entry) => !(entry && entry.maintenance && entry.maintenance.learning && entry.maintenance.learning.state === 'pending'));
+    draft.candidates = draft.candidates.filter((row) => !row || row.origin !== 'project_evolution');
+  }
+  return { changed: true, enabled: next, epoch: config.epoch };
+}
+
 /** 开关事务里的纯状态部分：旋转 epoch、推进反馈代次；关闭时把试用条目转暂停待复核。 */
 export function applyEvolution(draft, enabled) {
   const now = new Date().toISOString();
@@ -234,7 +276,10 @@ export function resolveRoot(cwd, options = {}) {
   const explicit = options.projectRoot ? realpathOf(path.resolve(options.projectRoot)) : '';
   if (explicit) return { root: explicit, source: 'configured', confirmed: true };
   const configured = configuredRoot();
-  if (configured) return { root: configured, source: 'configured', confirmed: true };
+  /** 覆盖根只对它所在的子树生效：别的目录不能被一个全局配置并成同一个项目。 */
+  if (configured && (requested === configured || requested.startsWith(`${configured}${path.sep}`))) {
+    return { root: configured, source: 'configured', confirmed: true };
+  }
   const cacheKey = `${options.workspaceDir || ''}\n${requested}`;
   if (rootCache.has(cacheKey)) return rootCache.get(cacheKey);
   let resolved;
@@ -417,6 +462,7 @@ export function emptyState(scope) {
     candidates: [],
     receipts: [],
     suppressions: [],
+    control: { enabled: true, epoch: crypto.randomUUID(), changedAt: now },
     experimental: { projectEvolution: newEvolution() },
   };
 }
@@ -1397,6 +1443,12 @@ export function purge(scope, options = {}) {
       at: now,
     }];
     draft.epoch = intent.toEpoch;
+    /** 彻底删除也要作废本轮实验凭证：旧 contextId / 在途整理不能把刚删的规则带回来。 */
+    const evolution = draft.experimental && draft.experimental.projectEvolution;
+    if (evolution && evolution.enabled === true) {
+      evolution.epoch = crypto.randomUUID();
+      evolution.feedbackGeneration = (Number(evolution.feedbackGeneration) || 0) + 1;
+    }
     draft.generation = loaded.state.generation + 1;
     draft.updatedAt = now;
     validateState(draft);

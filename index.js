@@ -23,6 +23,8 @@ import {
   listCitations,
   readCitationBody,
   evolutionStatus,
+  controlStatus,
+  setMemoryEnabled,
   isExperimentalRecord,
   setEvolution,
   taskState,
@@ -73,6 +75,19 @@ function cwdOf(execution) {
     /* fall through to the process directory */
   }
   return process.cwd();
+}
+
+/** 本项目记忆总开关：读不出来时不擅自关掉，按开处理。 */
+function memoryEnabled(scope) {
+  try {
+    return controlStatus(scope).enabled !== false;
+  } catch {
+    return true;
+  }
+}
+
+function memoryEnabledFor(execution) {
+  return memoryEnabled(scopeOf(cwdOf(execution)));
 }
 
 const REMOTE_PATH = '/lite-memory';
@@ -144,6 +159,7 @@ function keepHandler(webServer, cwdForSession) {
             : pathname === REMOTE_PATH + '/body' ? 'body'
               : pathname === REMOTE_PATH + '/move' ? 'move'
                 : pathname === REMOTE_PATH + '/overview' ? 'overview'
+                  : pathname === REMOTE_PATH + '/control' ? 'control'
                   : pathname === REMOTE_PATH + '/evolution' ? 'evolution'
                   : pathname === REMOTE_PATH + '/resume-move' ? 'resume-move' : '';
     if (!action) return sendJson(res, 404, { ok: false, reason: '未知操作' });
@@ -346,6 +362,14 @@ function keepHandler(webServer, cwdForSession) {
         for (const tag of record.tags) tags.add(tag);
         links += record.links.length;
       }
+      const currentControl = (() => {
+        try { return controlStatus(scope); } catch { return { enabled: true, epoch: '' }; }
+      })();
+      const selectedControl = selectedScope.key === scope.key
+        ? currentControl
+        : (() => {
+          try { return controlStatus(selectedScope); } catch { return { enabled: true, epoch: '' }; }
+        })();
       const selectedEvolution = selectedScope.key === scope.key
         ? currentEvolution
         : (() => {
@@ -357,13 +381,14 @@ function keepHandler(webServer, cwdForSession) {
         })();
       return sendJson(res, 200, {
         ok: true,
-        current: { key: scope.key, label: labelOf(scope), evolution: currentEvolution },
+        current: { key: scope.key, label: labelOf(scope), control: currentControl, evolution: currentEvolution },
         scopes,
         selected: {
           key: selectedScope.key,
           kind: selectedScope.key === 'global' ? 'global' : 'project',
           label: labelOf(selectedScope),
           updatedAt: records.reduce((latest, record) => record.updated > latest ? record.updated : latest, ''),
+          control: selectedControl,
           evolution: selectedEvolution,
           records,
           archived,
@@ -376,6 +401,38 @@ function keepHandler(webServer, cwdForSession) {
           },
         },
       });
+    }
+
+    /**
+     * 本项目记忆总开关：关闭后这层不再召回、检索、读写、学习，也不继承全局记忆。
+     * 自进化设置原样保留，但有效状态随总开关暂停。
+     */
+    if (action === 'control') {
+      const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
+      if (!sessionId) return sendJson(res, 400, { ok: false, reason: '缺少 sessionId' });
+      const cwd = typeof cwdForSession === 'function' ? cwdForSession(sessionId) : '';
+      if (!cwd) return sendJson(res, 409, { ok: false, reason: '这个会话还没有项目目录' });
+      const scope = scopeOf(cwd);
+      if (!scope.confirmed) return sendJson(res, 409, { ok: false, reason: '项目根还没确认，先重新打开这个项目' });
+      const operationId = typeof body.operationId === 'string' ? body.operationId : '';
+      try {
+        const result = typeof body.enabled === 'boolean'
+          ? setMemoryEnabled(scope, body.enabled, { operationId })
+          : { ok: true, ...controlStatus(scope) };
+        if (typeof body.enabled === 'boolean' && result && result.ok !== false && body.enabled === false) {
+          const controller = learningAborts.get(scope.key);
+          if (controller) {
+            try { controller.abort(); } catch { /* already gone */ }
+            learningAborts.delete(scope.key);
+          }
+        }
+        return sendJson(res, result.ok === false ? 409 : 200, {
+          ...result,
+          project: path.basename(scope.cwd || '') || scope.key,
+        });
+      } catch (error) {
+        return sendJson(res, 409, { ok: false, reason: error instanceof Error ? error.message : '记忆开关没有改动' });
+      }
     }
 
     /**
@@ -475,6 +532,11 @@ function keepHandler(webServer, cwdForSession) {
       ? body.candidateId
       : typeof body.suggestionId === 'string' ? body.suggestionId : '';
     const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
+
+    /** 总开关关闭时面板只能看：保留、拒绝、搬移、撤销都不落盘。 */
+    if (!controlStatus(scope).enabled) {
+      return sendJson(res, 409, { ok: false, reason: '本项目记忆已关闭，先在面板打开', code: 'memory_disabled' });
+    }
 
     if (action === 'move' || action === 'resume-move') {
       const operationId = typeof body.operationId === 'string' ? body.operationId : '';
@@ -725,6 +787,8 @@ export function apply(ctx, config) {
   const seenHumans = new Map();
   /** 本轮真人反馈先记在这里，等 turn/end 再决定要不要整理；不跨会话。 */
   const feedbackCandidates = new Map();
+  /** 项目内反馈代次：每来一次新的可整理反馈就加一，旧整理结果必须作废。 */
+  const feedbackRevisions = new Map();
   /** 一个项目同一时间只整理一次；控制器放在模块级供开关路由中止。 */
   const learningJobs = new Map();
 
@@ -796,7 +860,8 @@ export function apply(ctx, config) {
         const index = loadIndex(source);
         const meta = index.__meta || {};
         const evolutionEpoch = index.__evolution && index.__evolution.epoch ? index.__evolution.epoch : '';
-        return `${index.scope}:${meta.storeId || ''}:${index.generation}:${index.epoch}:${evolutionEpoch}`;
+        const controlEpoch = index.__control && index.__control.epoch ? index.__control.epoch : '';
+        return `${index.scope}:${meta.storeId || ''}:${index.generation}:${index.epoch}:${evolutionEpoch}:${controlEpoch}`;
       }).join('|');
     } catch {
       return '';
@@ -865,7 +930,7 @@ export function apply(ctx, config) {
 
   /* ---------------- 项目自进化：任务锚点、读取决策、上下文解析 ---------------- */
 
-  const EXPERIMENT_INDEX_HEADER = '项目里有这些栏目（先问用户这期做哪个，再用 memory_search 带上 contextId 绑定）：';
+  const EXPERIMENT_INDEX_HEADER = '项目里这些记忆范围可能适用当前任务（未绑定）；需要细节再用 memory_search 带上 contextId：';
   const EXPERIMENT_RULES_HEADER = '项目实验规则（只在当前任务条件匹配时适用；细节用 memory_read 取正文，别凭标题猜）：';
   const EXPERIMENT_BYTES = 1200;
   const EXPERIMENT_SHORT_CHARS = 240;
@@ -922,6 +987,25 @@ export function apply(ctx, config) {
     return text;
   }
 
+  /** 本轮问题与栏目名的字面相关度：只展示有交集的栏目，交集为空就整段跳过。 */
+  function relevantRanges(names, query) {
+    const text = String(query || '').toLowerCase();
+    if (!text) return [];
+    const tokens = new Set();
+    for (const word of text.match(/[a-z][a-z0-9_-]{2,}/g) || []) tokens.add(word);
+    for (const run of text.match(/[\u4e00-\u9fff]+/g) || []) {
+      for (let i = 0; i + 2 <= run.length; i += 1) tokens.add(run.slice(i, i + 2));
+    }
+    if (!tokens.size) return [];
+    return (Array.isArray(names) ? names : []).filter((name) => {
+      const value = String(name || '').toLowerCase();
+      if (!value) return false;
+      if (text.includes(value)) return true;
+      for (const token of tokens) if (value.includes(token)) return true;
+      return false;
+    });
+  }
+
   /** 读决策 → 一段短提示：未绑定只给栏目索引，已绑定才给规则正文。 */
   function renderExperiment(scope, decision, context, held, win) {
     if (!decision || decision.kind === 'none') return '';
@@ -929,9 +1013,10 @@ export function apply(ctx, config) {
       return chargeExperiment(win, '这些实验规则互相冲突，先按用户这次说的做，别叠加对立的规则。');
     }
     if (decision.kind === 'index' || decision.kind === 'clarify') {
-      const names = Array.isArray(decision.ranges) ? decision.ranges.filter(Boolean).slice(0, 3) : [];
+      const names = relevantRanges(Array.isArray(decision.ranges) ? decision.ranges.filter(Boolean) : [], held && held.query).slice(0, 3);
+      /** 没有适用栏目就什么也不注入：不拿无关范围冒充当前任务，也不催用户选栏目。 */
+      if (!names.length) return '';
       const tail = held && held.contextId ? `\ncontextId=${held.contextId}` : '';
-      if (!names.length) return chargeExperiment(win, `先问用户这期做什么栏目，别自己猜。${tail}`);
       return chargeExperiment(win, `${EXPERIMENT_INDEX_HEADER}\n${names.map((name) => `- ${name}`).join('\n')}${tail}`);
     }
     let index;
@@ -942,6 +1027,7 @@ export function apply(ctx, config) {
     let conflict = false;
     for (const record of index.entries) {
       if (record.origin !== 'project_evolution') continue;
+      if (record.ownerProjectId && record.ownerProjectId !== scope.key) continue;
       if (record.reviewState === 'legacy_unreviewed') continue;
       const learning = record.learning && typeof record.learning === 'object' ? record.learning : {};
       if (learning.state !== 'active' && learning.state !== 'trial') continue;
@@ -963,8 +1049,9 @@ export function apply(ctx, config) {
       const body = String(record.body || '');
       const short = body && body.length <= EXPERIMENT_SHORT_CHARS && body.split('\n').length <= 4;
       const conditions = conditionLabel(record.conditions);
-      const check = Array.isArray(learning.checkpoints) && learning.checkpoints[0]?.text
-        ? `；核对：${String(learning.checkpoints[0].text).slice(0, 24)}`
+      const checkpoint = record.learning && Array.isArray(record.learning.checkpoints) ? record.learning.checkpoints[0] : null;
+      const check = checkpoint && checkpoint.text
+        ? `；核对：${String(checkpoint.text).slice(0, 40)}`
         : '';
       const line = short
         ? `- 「${record.title}」${conditions ? `（${conditions}）` : ''} · ${record.id} · 第 ${record.revision || 1} 版：${body}${check}`
@@ -1022,9 +1109,11 @@ export function apply(ctx, config) {
     });
     const contextId = anchor.contextIdFor(scope.key, batchKey, crypto.randomUUID().slice(0, 8));
     const episode = routed.tasks && routed.tasks.episodes ? routed.tasks.episodes[routed.anchor.episodeId] : null;
+    let epoch = '';
+    try { epoch = String(evolutionStatus(scope).epoch || ''); } catch { epoch = ''; }
     const held = {
-      contextId, projectKey: scope.key, sessionId, batchKey, messageIds,
-      context, anchor: routed.anchor, ranges, decision,
+      contextId, projectKey: scope.key, sessionId, batchKey, messageIds, query,
+      context, anchor: routed.anchor, ranges, decision, epoch,
       episodeUpdatedAt: episode ? episode.updatedAt : '', injectedIds: [],
       at: Date.now(),
     };
@@ -1048,26 +1137,47 @@ export function apply(ctx, config) {
     if (!win) return { ok: false, status: 'needs_context', reason: '这个请求的上下文已经过期，先重新问一次当前任务' };
     const held = win.contexts.get(contextId);
     if (!held) return { ok: false, status: 'needs_context', reason: '这个上下文已经过期，先重新问一次当前任务' };
+    /** 凭据只在当轮、当次开关代次内有效：换轮、关闭、重开或过期都不再放行旧正文。 */
+    const expired = (reason) => {
+      win.contexts.delete(contextId);
+      if (win.experiment && win.experiment.contextId === contextId) win.experiment = null;
+      return { ok: false, status: 'needs_context', reason };
+    };
+    if (held.projectKey !== scope.key) return expired('这个上下文属于另一个项目');
+    if (held.sessionId && held.sessionId !== String(win.sessionId || '')) return expired('这个上下文已经过期，先重新问一次当前任务');
+    if (!held.batchKey || held.batchKey !== anchor.requestBatchKey(win.messageIds || [])) {
+      return expired('这个上下文已经过期，先重新问一次当前任务');
+    }
+    let evolution;
+    try { evolution = evolutionStatus(scope); } catch { return expired('当前项目状态读不出来，先重新问一次当前任务'); }
+    if (!evolution || evolution.enabled !== true || evolution.compatible === false) {
+      return expired('项目自进化已经关闭，先重新问一次当前任务');
+    }
+    if (held.epoch && evolution.epoch !== held.epoch) {
+      return expired('项目自进化重新开过，先重新问一次当前任务');
+    }
     return { ok: true, scope, win, context: held.context, experimental: true, held, contextId };
   }
 
-  /** 工具模式没有自动索引时，按本轮真人消息现开一个请求上下文，仍要前台点名栏目才绑定。 */
+  /** 工具模式没有自动索引时，按本轮真人消息现开一个请求上下文，只按问题与记忆范围的字面关系判断。 */
   function toolContextFor(execution) {
     const win = windowOf(execution && execution.agent);
     if (!win || !win.sessionId || !Array.isArray(win.messageIds) || win.messageIds.length === 0) return '';
-    let status;
-    try { status = evolutionStatus(scopeOf(cwdOf(execution))); } catch { return ''; }
-    if (!status || status.enabled !== true || status.compatible === false) return '';
     const scope = scopeOf(cwdOf(execution));
     if (scope.confirmed !== true) return '';
+    let status;
+    try { status = evolutionStatus(scope); } catch { return ''; }
+    if (!status || status.enabled !== true || status.compatible === false) return '';
     const batchKey = anchor.requestBatchKey(win.messageIds);
-    const held = win.experiment && win.experiment.batchKey === batchKey ? win.experiment : null;
+    const held = win.experiment && win.experiment.batchKey === batchKey && win.experiment.epoch === status.epoch
+      ? win.experiment
+      : null;
     if (held) return held.contextId;
     const contextId = anchor.contextIdFor(scope.key, batchKey, crypto.randomUUID().slice(0, 8));
     const created = {
       contextId, projectKey: scope.key, sessionId: win.sessionId, batchKey,
       messageIds: win.messageIds.slice(), context: view.trustedContext(scope, {}),
-      anchor: null, ranges: rangesOf(scope), decision: { kind: 'none' }, at: Date.now(),
+      anchor: null, ranges: rangesOf(scope), decision: { kind: 'none' }, epoch: status.epoch, at: Date.now(),
     };
     win.experiment = created;
     win.contexts.set(contextId, created);
@@ -1083,7 +1193,7 @@ export function apply(ctx, config) {
     for (const value of ranges.taskKinds || []) if (query.includes(value)) hits.push({ taskKind: value });
     if (hits.length !== 1) {
       const names = [...(ranges.series || []), ...(ranges.taskKinds || [])].slice(0, 3);
-      return { ok: false, status: 'needs_context', reason: names.length ? `先在问题里点名一个栏目：${names.join('、')}` : '先说要做的栏目' };
+      return { ok: false, status: 'needs_context', reason: names.length ? '本轮没有匹配的记忆范围，按当前任务继续' : '本轮没有适用的记忆范围，按当前任务继续' };
     }
     let tasks;
     try { tasks = taskState(resolved.scope); } catch { return { ok: false, status: 'needs_context', reason: '任务状态还没读出来' }; }
@@ -1170,7 +1280,9 @@ export function apply(ctx, config) {
       render: (_args, value) => [{
         type: 'text',
         text: value.needsScope
-          ? value.reason === 'unconfirmed_project'
+          ? value.reason === 'memory_disabled'
+            ? 'memory · 本项目记忆已关闭，先在面板打开'
+            : value.reason === 'unconfirmed_project'
             ? `memory · 当前目录还不能确认属于哪个项目：「${value.title}」\n先确认项目根目录，或显式 scope="global"`
             : `memory · 归属还没定：「${value.title}」\n补 memoryClass（personal_preference / project_fact / environment_fact / portable_procedure）或显式 scope；设备事实还要给设备条件`
           : value.existingId
@@ -1184,6 +1296,13 @@ export function apply(ctx, config) {
     },
     execute: async (args, execution) => {
       const projectScope = scopeOf(cwdOf(execution));
+      if (!memoryEnabled(projectScope)) {
+        return {
+          id: '', title: String(args.title || ''), summary: '', when: '', revision: 0,
+          merged: false, changed: false, scope: '', needsScope: true, reason: 'memory_disabled',
+          needsResolution: false, similarIds: '', similar: '', archived: '',
+        };
+      }
       const saved = saveEntry(projectScope, { ...args, writeMode: args.mode || 'patch' });
       if (saved.needsScope) {
         return {
@@ -1289,6 +1408,7 @@ export function apply(ctx, config) {
     },
     execute: async (args, execution) => {
       const scope = scopeOf(cwdOf(execution));
+      if (!memoryEnabled(scope)) return { asked: false, reason: '本项目记忆已关闭' };
       const gate = suggestionGate(scope, args);
       if (!gate.ok) return { asked: false, reason: gate.reason };
       const noted = noteSuggestion(scope, gate.target ? { ...args, targetId: gate.target.id } : args);
@@ -1324,8 +1444,9 @@ export function apply(ctx, config) {
                 scope: { type: 'string' },
                 revision: { type: 'integer' },
                 status: { type: 'string' },
+                origin: { type: 'string' },
               },
-              required: ['id', 'title', 'scope', 'revision', 'status'],
+              required: ['id', 'title', 'scope', 'revision', 'status', 'origin'],
               additionalProperties: false,
             },
           },
@@ -1347,7 +1468,7 @@ export function apply(ctx, config) {
       }],
     },
     execute: async (args, execution) => {
-      if (recallMode() === 'off') return { count: 0, chars: 0, text: '', status: 'memory_disabled', refs: [] };
+      if (recallMode() === 'off' || !memoryEnabledFor(execution)) return { count: 0, chars: 0, text: '', status: 'memory_disabled', refs: [] };
       const agent = execution?.agent;
       const win = windowOf(agent);
       if (win && !affordable(win, 0)) return { count: 0, chars: 0, text: '', status: 'budget_exhausted', refs: [] };
@@ -1446,7 +1567,7 @@ export function apply(ctx, config) {
       }),
     },
     execute: async (args, execution) => {
-      if (recallMode() === 'off') return { id: '', scope: '', status: 'memory_disabled' };
+      if (recallMode() === 'off' || !memoryEnabledFor(execution)) return { id: '', scope: '', status: 'memory_disabled' };
       const resolved = resolveRequestContext(execution, args.contextId);
       if (!resolved.ok) return { id: '', scope: '', status: resolved.status || 'needs_context' };
       const scope = resolved.scope;
@@ -1472,10 +1593,16 @@ export function apply(ctx, config) {
       }
       const record = readEntry(scope, args.id, { context, allowExperimental });
       if (!record) throw new Error(`没有 ${args.id} 这条记忆`);
+      if (record.origin === 'project_evolution' && record.ownerProjectId && record.ownerProjectId !== scope.key) {
+        return { id: args.id, title: record.title, when: record.when || '', revision: record.revision || 1, scope: record.scope, status: 'not_applicable', body: '' };
+      }
       if (record.origin === 'project_evolution' && !allowExperimental) {
         return { id: record.id, title: record.title, when: record.when || '', revision: record.revision || 1, scope: record.scope, status: 'needs_context', body: '' };
       }
-      /** 暂停或条件不匹配的实验条目只给状态，不给正文。 */
+      /** 暂停、过期或条件不匹配的实验条目只给状态，不给正文。 */
+      if (record.origin === 'project_evolution' && !view.experimentalUsable(record)) {
+        return { id: record.id, title: record.title, when: record.when || '', revision: record.revision || 1, scope: record.scope, status: 'needs_context', body: '' };
+      }
       const learningState = record.learning && typeof record.learning === 'object' ? record.learning : {};
       if (record.origin === 'project_evolution' && (learningState.state === 'paused' || learningState.blockedReason)) {
         return { id: record.id, title: record.title, when: record.when || '', revision: record.revision || 1, scope: record.scope, status: 'needs_context', body: '' };
@@ -1528,14 +1655,16 @@ export function apply(ctx, config) {
           id: { type: 'string' },
           title: { type: 'string' },
           scope: { type: 'string' },
-          mode: { type: 'string', enum: ['archive', 'purged', 'needs_resolution', 'purge_pending'] },
+          mode: { type: 'string', enum: ['archive', 'purged', 'needs_resolution', 'purge_pending', 'memory_disabled'] },
         },
         required: ['id', 'mode'],
         additionalProperties: false,
       },
       render: (_args, value) => [{
         type: 'text',
-        text: value.mode === 'purged'
+        text: value.mode === 'memory_disabled'
+          ? 'memory · 本项目记忆已关闭，先在面板打开'
+          : value.mode === 'purged'
           ? `memory · forgotten "${value.title}" · ${value.id}`
           : value.mode === 'purge_pending'
             ? `memory · 清除未完成 · ${value.id}，重启后会继续`
@@ -1553,6 +1682,7 @@ export function apply(ctx, config) {
     },
     execute: async (args, execution) => {
       const scope = scopeOf(cwdOf(execution));
+      if (!memoryEnabled(scope)) return { id: String(args.id || ''), title: '', scope: '', mode: 'memory_disabled' };
       const located = locate(scope, args.id);
       if (!located && !args.mode) throw new Error(`没有 ${args.id} 这条记忆`);
       if (!args.mode) {
@@ -1584,6 +1714,7 @@ export function apply(ctx, config) {
       }
       if (!dropped) throw new Error(`没有 ${args.id} 这条记忆`);
       const layerKey = dropped.scopeKey || (located ? located.scope.key : scope.key);
+      if (dropped.mode === 'purged') revokeLearningUse(layerKey);
       return {
         id: dropped.id,
         title: dropped.title || (located ? located.record.title : ''),
@@ -1670,6 +1801,10 @@ export function apply(ctx, config) {
         }
         previous.signal = signal;
         const scope = scopeOf(cwdOf({ agent }));
+        if (!memoryEnabled(scope)) {
+          clearPrepared(agent);
+          return decision;
+        }
         const fingerprint = fingerprintOf(scope);
         /** 指纹拿不到就当作已失效：不拿旧任务内容硬撑这一步。 */
         if (!fingerprint) {
@@ -1717,16 +1852,18 @@ export function apply(ctx, config) {
         return decision;
       }
       const scope = scopeOf(cwd);
-      const context = view.trustedContext(scope, {});
-      const fingerprint = fingerprintOf(scope);
-      const experiment = experimentFor(scope, { sessionId, query, batchKey: anchor.requestBatchKey(ids), messageIds: ids, win });
-      const remembered = experiment && experiment.held
-        ? rememberFeedback(scope, sessionId, fresh, experiment.held)
-        : null;
-      if (remembered && remembered.paused) {
+      if (!memoryEnabled(scope)) {
         clearPrepared(agent);
         return decision;
       }
+      const context = view.trustedContext(scope, {});
+      const fingerprint = fingerprintOf(scope);
+      const batchKey = anchor.requestBatchKey(ids);
+      dropStaleCandidate(sessionId, batchKey);
+      const experiment = experimentFor(scope, { sessionId, query, batchKey, messageIds: ids, win });
+      const remembered = experiment && experiment.held
+        ? rememberFeedback(scope, sessionId, fresh, experiment.held, turn)
+        : null;
       const snapshot = projectRecall(scope, query, context, win);
       if (generation !== generations.get(agent)) return decision;
       /** 超时或被取消：这一步不留半旧卡片，下一真人请求重新投影。 */
@@ -1734,7 +1871,8 @@ export function apply(ctx, config) {
         clearPrepared(agent);
         return decision;
       }
-      if (!snapshot && !(experiment && experiment.text)) {
+      /** 实验上下文即使本轮零注入也要留着：工具绑定后同一请求还能补上规则。 */
+      if (!snapshot && !experiment) {
         clearPrepared(agent);
         return decision;
       }
@@ -1768,8 +1906,19 @@ export function apply(ctx, config) {
 
   /* ---------------- 项目自进化：一次短整理，先扣频次，再走提交门禁 ---------------- */
 
-  /** 反馈只来自本轮真人消息；初始任务、工具成功、沉默都不算。 */
-  function rememberFeedback(scope, sessionId, messages, held) {
+  /** 只清不属于当前这批人类消息的旧候选：新一轮开始后，上一轮没整理完的反馈不能再落盘。 */
+  function dropStaleCandidate(sessionId, batchKey) {
+    const prior = feedbackCandidates.get(sessionId);
+    if (prior && prior.candidate && prior.candidate.batchKey !== batchKey) {
+      feedbackCandidates.delete(sessionId);
+    }
+  }
+
+  /**
+   * 反馈只来自本轮真人消息；初始任务、工具成功、沉默都不算。
+   * 解析目标由整理器完成：不在这里暂停所有已注入规则，避免一次 BGM 纠正打掉开头和字幕。
+   */
+  function rememberFeedback(scope, sessionId, messages, held, turn) {
     let candidate;
     try {
       candidate = learning.candidateFrom({
@@ -1779,21 +1928,22 @@ export function apply(ctx, config) {
     if (!candidate) return null;
     candidate.cwd = scope.cwd;
     candidate.episodeUpdatedAt = held.episodeUpdatedAt || '';
-    let paused = false;
-    const injected = Array.isArray(held.injectedIds) ? held.injectedIds.filter(Boolean).slice(0, 8) : [];
-    if (candidate.cue.negative && injected.length) {
-      try {
-        const result = pauseLearningRules(scope, injected, {
-          by: 'feedback',
-          reason: 'feedback_pending',
-          operationId: `pause_${candidate.episodeId}_${candidate.messageIds.join('_')}`.slice(0, 120),
-        });
-        paused = Boolean(result && result.ok && result.changed);
-      } catch { paused = false; }
-    }
-    feedbackCandidates.set(sessionId, { scope, candidate, held, paused, at: Date.now() });
+    candidate.batchKey = held.batchKey || '';
+    candidate.turn = String(turn || '');
+    const revision = (feedbackRevisions.get(scope.key) || 0) + 1;
+    feedbackRevisions.set(scope.key, revision);
+    candidate.feedbackRevision = revision;
+    const prior = feedbackCandidates.get(sessionId);
+    feedbackCandidates.set(sessionId, {
+      scope,
+      candidate,
+      held,
+      session: prior && prior.session ? prior.session : null,
+      queued: Boolean(prior && prior.queued),
+      at: Date.now(),
+    });
     while (feedbackCandidates.size > 8) feedbackCandidates.delete(feedbackCandidates.keys().next().value);
-    return { candidate, paused };
+    return { candidate };
   }
 
   /** 只认前台最近一次真实请求的路线；拿不到就宁可这次不整理。 */
@@ -1877,6 +2027,10 @@ export function apply(ctx, config) {
         else if (chunk && chunk.type === 'finish' && chunk.reason) finish = chunk.reason;
       }
       if (sawTool) throw new Error('整理返回了工具调用');
+      /** 运行期间用户又给了新反馈：旧结果不能覆盖新纠正，直接作废，等排队的下一次整理。 */
+      if ((feedbackRevisions.get(scope.key) || 0) !== candidate.feedbackRevision) {
+        throw new Error('反馈已更新，这次整理作废');
+      }
       const parsed = learning.parseOutput(text, { finish, refs: input.refs, rules: input.rules, ranges });
       if (!parsed.ok) throw new Error(parsed.reason);
       const commit = commitLearning(scope, {
@@ -1919,6 +2073,42 @@ export function apply(ctx, config) {
     }
   }
 
+  /** 启动一次整理；结束后再看同项目是否还排着一条候选。 */
+  function startOrganizer(scope, session, pending) {
+    const job = { controller: learningAborts.get(scope.key) || null };
+    learningJobs.set(scope.key, job);
+    void organize(scope, session, pending)
+      .catch(() => { /* 整理失败不影响会话 */ })
+      .finally(() => {
+        if (learningJobs.get(scope.key) === job) learningJobs.delete(scope.key);
+        drainOrganizer(scope.key);
+      });
+  }
+
+  /** 彻底删除后中止该层在途整理并丢掉候选：不让旧结果复活已删规则。 */
+  function revokeLearningUse(layerKey) {
+    for (const [scopeKey, controller] of learningAborts) {
+      if (layerKey !== 'global' && scopeKey !== layerKey) continue;
+      try { controller.abort(); } catch { /* already settled */ }
+    }
+    for (const [sessionId, pending] of feedbackCandidates) {
+      if (layerKey !== 'global' && pending?.scope?.key !== layerKey) continue;
+      feedbackCandidates.delete(sessionId);
+    }
+  }
+
+  /** 忙碌时保留一条最新候选，不丢用户刚说的纠正；同一项目仍只跑一个整理。 */
+  function drainOrganizer(scopeKey) {
+    if (learningJobs.has(scopeKey)) return;
+    for (const [sessionId, pending] of feedbackCandidates) {
+      if (!pending || !pending.scope || pending.scope.key !== scopeKey) continue;
+      feedbackCandidates.delete(sessionId);
+      if (!pending.session) return;
+      startOrganizer(pending.scope, pending.session, pending);
+      return;
+    }
+  }
+
   /** 只在正常完成的人类回合后调度，一次一个项目；永不阻塞事件派发。 */
   function scheduleOrganizer(session, event) {
     const reason = event && event.data ? event.data.reason : null;
@@ -1927,14 +2117,18 @@ export function apply(ctx, config) {
     if (!sessionId) return;
     const pending = feedbackCandidates.get(sessionId);
     if (!pending) return;
+    const eventTurn = event.data && event.data.turn !== undefined ? String(event.data.turn) : '';
+    if (eventTurn && pending.candidate && pending.candidate.turn && eventTurn !== pending.candidate.turn) {
+      feedbackCandidates.delete(sessionId);
+      return;
+    }
+    pending.session = session;
+    if (learningJobs.has(pending.scope.key)) {
+      pending.queued = true;
+      return;
+    }
     feedbackCandidates.delete(sessionId);
-    const scope = pending.scope;
-    if (learningJobs.has(scope.key)) return;
-    const job = { controller: learningAborts.get(scope.key) || null };
-    learningJobs.set(scope.key, job);
-    void organize(scope, session, pending)
-      .catch(() => { /* 整理失败不影响会话 */ })
-      .finally(() => { if (learningJobs.get(scope.key) === job) learningJobs.delete(scope.key); });
+    startOrganizer(pending.scope, session, pending);
   }
 
   if (typeof ctx.on === 'function') ctx.on('agent/disposed', (payload) => {
@@ -1955,6 +2149,11 @@ export function apply(ctx, config) {
     if (!signal) return;
     const agent = signalAgents.get(signal);
     if (agent) clearPrepared(agent);
+    /** 被取消或被中断的回合不保留反馈候选，下一句「谢谢」不能把没说完的纠正写进去。 */
+    if (signal.aborted === true && agent) {
+      const sessionId = String(agent?.session?.id ?? '');
+      if (sessionId) feedbackCandidates.delete(sessionId);
+    }
     signalAgents.delete(signal);
   });
 

@@ -180,7 +180,9 @@ test('B01 调用输入不超过 8 KiB 且只有本地引用', () => {
     ranges: { taskKinds: ['video'], series: ['口播'] },
   });
   assert.ok(input.bytes <= 8192, `bytes=${input.bytes}`);
-  assert.equal(input.rules.length, 6);
+  assert.equal(input.rules.length >= 1, true);
+  assert.equal(input.rules.length <= 6, true);
+  assert.equal(input.prompt.includes(long), false);
   assert.equal(input.refs.feedback.u0, 'm1');
   assert.equal(input.refs.rules.r0, 'mem_0');
   assert.equal(input.messages.length, 1);
@@ -470,7 +472,7 @@ test('P02 两个独立作品后升为已生效，单次只到试用', () => {
   const version = ruleOf(scope, id).revision;
   const rules = [{ ref: 'r0', id, revision: version, conditions: [{ key: 'seriesId', value: '口播' }] }];
   const refs = { feedback: { u0: 'b1' }, rules: { r0: id } };
-  const check = parsed({ target: 'r0', feedbackType: 'spec_change', currentText: '开头三句内先给结论。', evidence: ['u0'] }, { rules, refs });
+  const check = parsed({ target: 'r0', feedbackType: 'spec_change', currentText: NEW_CHANGE.currentText, evidence: ['u0'] }, { rules, refs });
   const second = store.commitLearning(scope, {
     operationId: 'learn_promote',
     epoch: begin(scope, two).epoch,

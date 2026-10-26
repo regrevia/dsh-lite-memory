@@ -96,6 +96,7 @@ function toFlat(entry) {
     revision: Number(entry.revision) || 1,
     status: entry.status === 'archived' ? 'archived' : 'active',
     origin: entry.origin || 'user_explicit',
+    ownerProjectId: typeof entry.ownerProjectId === 'string' ? entry.ownerProjectId : '',
     hits: Number(maintenance.hits) || 0,
     merges: Number(maintenance.merges) || 0,
     versions: Array.isArray(maintenance.versions) ? cloneJson(maintenance.versions) : [],
@@ -115,6 +116,7 @@ function fromFlat(record, status) {
     revision: Number(record.revision) || 1,
     status: status || (record.status === 'archived' ? 'archived' : 'active'),
     origin: typeof record.origin === 'string' && record.origin ? record.origin : 'user_explicit',
+    ownerProjectId: record.ownerProjectId || '',
     createdAt: record.created || at,
     updatedAt: at,
     current: {
@@ -176,6 +178,7 @@ export function loadIndex(scope, options = {}) {
     suppressions: JSON.parse(JSON.stringify(loaded.state.suppressions || [])),
     __evolution: state.evolutionOf(loaded.state),
     __tasks: anchor.normalizeTasks(state.evolutionOf(loaded.state).tasks),
+    __control: state.controlOf(loaded.state),
     __exists: loaded.exists === true,
   };
   index.__meta = {
@@ -434,6 +437,17 @@ function bigrams(text) {
   return out;
 }
 
+/** 只靠这类高频两字词重合不算相关：查询里的实词必须自己命中。 */
+const STOP_GRAMS = new Set([
+  '这个', '那个', '怎么', '什么', '可以', '需要', '我们', '你们', '一下', '现在',
+  '然后', '还是', '就是', '已经', '没有', '不是', '要是', '如果', '因为', '所以',
+  '的话', '这里', '那里', '一个', '一些', '这样', '那样', '看看', '帮我看', '继续',
+]);
+
+const asciiWordsOf = (text) => normalizeText(text, 400).toLowerCase().match(/[a-z][a-z0-9_-]{1,}/g) || [];
+
+const wordIn = (pool, word) => new RegExp(`(^|[^a-z0-9])${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^a-z0-9])`).test(pool);
+
 /** 查询按空格/标点切成段：多段按关键词处理，整句仍按相关度处理。 */
 function queryRuns(query) {
   return normalizeText(query, 400)
@@ -463,6 +477,13 @@ function matchesRun(item, runs) {
   let qualified = 0;
   let substantial = 0;
   for (const run of runs) {
+    /** 英文按整词匹配：git 不能因为共享 gi/it 就命中 digital。 */
+    if (/^[a-z][a-z0-9_-]+$/.test(run)) {
+      if (!wordIn(pool, run)) continue;
+      qualified += 1;
+      substantial += 1;
+      continue;
+    }
     const grams = bigrams(run);
     if (grams.size === 0) continue;
     let hit = 0;
@@ -842,21 +863,64 @@ function scoreQuery(item, grams, raw) {
     [(item.triggers || []).join(' '), MATCH_WEIGHT.tags],
   ];
   let score = 0;
+  let substantive = 0;
   for (const [text, weight] of fields) {
     if (!text) continue;
     const pool = bigrams(text);
     let shared = 0;
-    for (const gram of grams) if (pool.has(gram)) shared += 1;
+    for (const gram of grams) {
+      if (!pool.has(gram)) continue;
+      shared += 1;
+      if (!STOP_GRAMS.has(gram)) substantive += 1;
+    }
     score += shared * weight;
   }
   const plain = normalizeText(raw, 200).toLowerCase().replace(/\s+/g, '');
   if (plain && normalizeText(item.title, 200).toLowerCase().replace(/\s+/g, '').includes(plain)) score += 5;
   /** 触发词命中按整词算：用户说的那句话里带着它，就该搜得到。 */
-  if (plain && (item.triggers || []).some((trigger) => {
+  const triggerHit = Boolean(plain) && (item.triggers || []).some((trigger) => {
     const text = normalizeText(trigger, 200).toLowerCase().replace(/\s+/g, '');
     return Boolean(text) && plain.includes(text);
-  })) score += 4;
+  });
+  if (triggerHit) score += 4;
+  /** 纯英文查询必须按整词命中，避免 git 命中 digital 这种字面巧合；混合查询仍按中文实词判断。 */
+  const words = asciiWordsOf(raw);
+  const hasCjk = /[\u4e00-\u9fff]/.test(String(raw || ''));
+  if (words.length && !hasCjk) {
+    const pool = fields.map(([text]) => fieldText(text)).join('\n');
+    if (!words.some((word) => wordIn(pool, word))) return 0;
+  }
+  /** 只重合了「这个」「怎么」这类词，不算命中；触发词命中仍算。 */
+  if (substantive === 0 && !triggerHit && words.length === 0) return 0;
   return score;
+}
+
+/** 项目记忆总开关：读当前层，缺字段按开启。 */
+export function controlStatus(scope) {
+  const index = loadIndex(scope);
+  return { ...(index.__control || state.controlOf(null)) };
+}
+
+export function setMemoryEnabled(scope, enabled, options = {}) {
+  return withLock(scope, () => {
+    const before = loadIndex(scope);
+    const operationId = typeof options.operationId === 'string' ? options.operationId : '';
+    let applied = null;
+    try {
+      state.transact(scope, {
+        operationId,
+        expectCreate: !before.__exists,
+        expected: before.__exists ? { generation: before.generation, epoch: before.epoch } : null,
+      }, (draft) => {
+        applied = state.applyControl(draft, enabled);
+        return applied.changed ? { changed: true } : { changed: false };
+      });
+    } catch (error) {
+      if (error && error.code === 'conflict') return { ok: false, reason: '项目状态刚被改过，重试一次', retry: true };
+      return { ok: false, reason: error instanceof Error ? error.message : '记忆开关没有改动' };
+    }
+    return { ok: true, changed: Boolean(applied && applied.changed), ...controlStatus(scope) };
+  });
 }
 
 /**
@@ -872,13 +936,26 @@ export function evolutionStatus(scope) {
     const phase = record.learning && typeof record.learning === 'object' ? record.learning.state : '';
     if (phase === 'active' || phase === 'trial' || phase === 'paused') counts[phase] += 1;
   }
-  return { ...config, counts };
+  const control = index.__control || state.controlOf(null);
+  return {
+    ...config,
+    /** 模型可见的 enabled 是有效值：总开关关掉时，自进化一律不运行。 */
+    enabled: config.enabled === true && control.enabled === true,
+    configuredEnabled: config.enabled === true,
+    memoryEnabled: control.enabled === true,
+    ownerProject: config.ownerProject || '',
+    counts,
+  };
 }
 
 export function setEvolution(scope, enabled, options = {}) {
   return withLock(scope, () => {
     const before = loadIndex(scope);
     const config = before.__evolution || {};
+    /** 关总开关后不能再打开自进化；关闭自进化只是管理操作，允许落盘。 */
+    if (enabled === true && !(before.__control || state.controlOf(null)).enabled) {
+      return { ok: false, reason: '先开启本项目记忆，再开自进化' };
+    }
     if (config.compatible === false) {
       return { ok: false, reason: '实验配置版本不认，先不要改动开关', compatible: false };
     }
@@ -913,6 +990,7 @@ export function taskState(scope) {
 export function saveTaskState(scope, tasks, options = {}) {
   return withLock(scope, () => {
     const before = loadIndex(scope);
+    if (!(before.__control || state.controlOf(null)).enabled) return { ok: false, reason: '本项目记忆已关闭' };
     if (!before.__evolution.enabled) return { ok: false, reason: '实验还没开启' };
     const next = anchor.normalizeTasks(tasks);
     const operationId = typeof options.operationId === 'string' ? options.operationId : '';
@@ -964,6 +1042,9 @@ export function search(scope, query, limit = 4, options = {}) {
       const collect = (pool, archived) => {
         for (const item of pool) {
           if (!readableRecord(item, options, index)) continue;
+          /** 已暂停、已过期或待确认的学习规则不进入检索结果，除非明确要病史。 */
+          if (options.allowExperimental === true && options.history !== true
+            && isExperimentalRecord(item) && !view.experimentalUsable(item, options.now)) continue;
           const score = scoreQuery(item, grams, query);
           if (score <= 0) continue;
           if (keywordMode && !matchesRun(item, runs)) continue;
@@ -1893,6 +1974,10 @@ function bindSameTopic(projectScope, ref) {
  */
 export function saveEntry(projectScope, source) {
   return withLocks([projectScope, globalScope()], () => {
+    const control = loadIndex(projectScope).__control || state.controlOf(null);
+    if (!control.enabled) {
+      return { needsScope: true, chosenScope: '', reasonCode: 'memory_disabled', requiredConditions: [], needsResolution: false, similarList: [], draft: null };
+    }
     const routed = routeScope(source, { project: projectScope });
     const draft = (() => {
       try { return normalizeDraft({ ...source, title: source && source.title }); } catch { return null; }
@@ -2166,6 +2251,9 @@ function driveMove(projectScope, intent, options = {}) {
  * 协调文件里带项目身份与两侧 epoch：换项目续跑会被拒绝，续跑也不再靠猜。
  */
 export function move(projectScope, id, options = {}) {
+  if (!(loadIndex(projectScope).__control || state.controlOf(null)).enabled) {
+    throw new state.StateError('conflict', '本项目记忆已关闭，先开启再整理');
+  }
   return state.withRootLock(() => {
     const existing = state.readMoveIntent();
     if (existing) {
@@ -2183,6 +2271,10 @@ export function move(projectScope, id, options = {}) {
     const sourceScope = projectRecord ? projectScope : globalScope();
     const sourceIndex = projectRecord ? projectIndex : globalIndex;
     const record = projectRecord || globalRecord;
+    /** 实验记录只能在原项目内用：普通移动不能把它带进全局层。 */
+    if (record.origin === EXPERIMENTAL_ORIGIN && options.target === 'global') {
+      throw new state.StateError('conflict', '实验规则不能直接搬到全局，先采纳为普通项目规范');
+    }
     const targetScope = options.target === 'global' ? globalScope() : projectScope;
     if (targetScope.dir === sourceScope.dir) throw new state.StateError('conflict', '源和目标在同一层');
     const targetIndex = loadIndex(targetScope);
@@ -2403,6 +2495,7 @@ export function commitLearning(scope, batch = {}) {
   if (!operationId) return { ok: false, reason: '缺少提交标识' };
   if (changes.length > learning.LIMITS.maxChanges) return { ok: false, reason: '一次改动太多' };
   return withLock(scope, () => {
+    if (!(loadIndex(scope).__control || state.controlOf(null)).enabled) return { ok: false, reason: '本项目记忆已关闭' };
     let receipt = null;
     try {
       const result = state.transact(scope, {
@@ -2467,6 +2560,7 @@ export function commitLearning(scope, batch = {}) {
                 existing: flat,
                 change,
                 evidence: { ...evidence, explicitLongTerm: Boolean(batch.explicitLongTerm) },
+                specChanged: merged.specChanged === true,
                 now,
               }),
               specDigest: merged.digest,
@@ -2486,10 +2580,6 @@ export function commitLearning(scope, batch = {}) {
             entry.updatedAt = at;
             entry.maintenance = { ...(entry.maintenance || {}), learning: merged.learning };
           } else {
-            if (currentRules.length + (touched + 1) > learning.LIMITS.rules) throw new Error('项目实验规则已经到上限');
-            const pending = currentRules.filter((entry) => toFlat(entry).learning?.state === 'pending').length;
-            if (pending >= learning.LIMITS.pending) throw new Error('待确认候选已经到上限');
-            const merged = learning.mergeChange(null, change, { now });
             const evidence = {
               sourceType: 'human_feedback',
               feedbackType: change.feedbackType,
@@ -2498,11 +2588,57 @@ export function commitLearning(scope, batch = {}) {
               messageIds: (batch.messageIds || []).slice(-3),
               at,
             };
+            const merged = learning.mergeChange(null, change, { now });
+            /** 同主题、同条件的新规则并进已有条目：整理器换个措辞不该长出第二条。 */
+            const signature = (list) => (Array.isArray(list) ? list : [])
+              .map((row) => `${row.key}=${row.value}`).sort().join('\u0000');
+            const duplicate = merged.current.topicKey
+              ? currentRules.find((row) => {
+                const flat = toFlat(row);
+                return flat.topicKey === merged.current.topicKey
+                  && signature(flat.conditions) === signature(merged.current.conditions)
+                  && flat.applicability === merged.current.applicability;
+              })
+              : null;
+            if (duplicate) {
+              const flat = toFlat(duplicate);
+              const rem = learning.mergeChange(flat, change, { now });
+              rem.learning = {
+                ...learning.nextLearningState({
+                  existing: flat,
+                  change,
+                  evidence: { ...evidence, explicitLongTerm: Boolean(batch.explicitLongTerm) },
+                  specChanged: rem.specChanged === true,
+                  now,
+                }),
+                specDigest: rem.digest,
+                versions: rem.learning.versions,
+              };
+              duplicate.current = {
+                ...duplicate.current,
+                title: rem.current.title,
+                summary: rem.current.summary,
+                body: rem.current.body,
+                when: rem.current.when,
+                applicability: rem.current.applicability,
+                conditions: rem.current.conditions,
+                topicKey: rem.current.topicKey,
+              };
+              duplicate.revision = Number(duplicate.revision) + 1;
+              duplicate.updatedAt = at;
+              duplicate.maintenance = { ...(duplicate.maintenance || {}), learning: rem.learning };
+              touched += 1;
+              continue;
+            }
+            if (currentRules.length + (touched + 1) > learning.LIMITS.rules) throw new Error('项目实验规则已经到上限');
+            const pending = currentRules.filter((entry) => toFlat(entry).learning?.state === 'pending').length;
+            if (pending >= learning.LIMITS.pending) throw new Error('待确认候选已经到上限');
             merged.learning = {
               ...learning.nextLearningState({
                 existing: { learning: merged.learning },
                 change,
                 evidence: { ...evidence, explicitLongTerm: Boolean(batch.explicitLongTerm) },
+                specChanged: merged.specChanged === true,
                 now,
               }),
               specDigest: merged.digest,
@@ -2523,6 +2659,7 @@ export function commitLearning(scope, batch = {}) {
               selection: null,
               links: [],
               origin: EXPERIMENTAL_ORIGIN,
+              ownerProjectId: scope.key,
               reviewState: 'active',
               created: at,
               updated: at,
@@ -2536,8 +2673,9 @@ export function commitLearning(scope, batch = {}) {
               checks: [],
               learning: merged.learning,
             };
-            draft.entries.push(fromFlat(flat));
-            currentRules.push(flat);
+            const created = fromFlat(flat);
+            draft.entries.push(created);
+            currentRules.push(created);
             touched += 1;
             continue;
           }
@@ -2621,18 +2759,19 @@ export function removeLearningRule(scope, id, options = {}) {
         entry.status = 'archived';
         entry.updatedAt = at;
         entry.current = { ...entry.current, body: '', summary: '' };
-        entry.maintenance = {
-          ...(entry.maintenance || {}),
-          learning: {
-            ...(flat.learning || {}),
-            state: 'paused',
-            blockedReason: 'deleted',
-            pausedBy: 'management',
-            pausedAt: at,
-            versions: [],
-            specDigest: '',
-          },
+        const deletedLearning = {
+          ...(flat.learning || {}),
+          state: 'paused',
+          blockedReason: 'deleted',
+          pausedBy: 'management',
+          pausedAt: at,
+          versions: [],
+          specDigest: '',
         };
+        /** 删掉的规范正文不能再从 lastText 里漏出来。 */
+        delete deletedLearning.lastText;
+        delete deletedLearning.trialUntil;
+        entry.maintenance = { ...(entry.maintenance || {}), learning: deletedLearning };
         addLearningReceipt(evolution, learning.receiptOf({ operationId, episodeId: flat.learning?.evidence?.[0]?.episodeId || '', status: 'deleted', changes: 1, at }));
         return { changed: true, kind: 'learning_delete' };
       });

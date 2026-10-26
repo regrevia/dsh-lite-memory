@@ -222,6 +222,21 @@ export function canAutoRecall(record, context) {
   return statusOf(record, context) === 'ok';
 }
 
+/**
+ * 学习规则是否还在有效期内：paused/pending 和被时间淘汰的 trial 都不能当依据。
+ * 只对实验来源生效；普通记忆不看这一层。
+ */
+export function experimentalUsable(record, now = Date.now()) {
+  if (!record) return false;
+  const learning = record.learning && typeof record.learning === 'object' ? record.learning : null;
+  if (!learning && record.origin !== 'project_evolution') return true;
+  if (!learning) return false;
+  if (learning.state === 'active') return true;
+  if (learning.state !== 'trial') return false;
+  const until = Date.parse(String(learning.trialUntil || ''));
+  return !Number.isFinite(until) || until > Number(now);
+}
+
 function gramsOf(text) {
   const plainText = plain(text, 400).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
   const set = new Set();

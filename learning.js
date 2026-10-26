@@ -160,25 +160,13 @@ export function normalizeConditions(conditions) {
 /** 构造一次受限调用输入：无工具、无前台历史，只有身份、少量规则和反馈映射。 */
 export function buildCallInput({ projectId, episodeId, taskKind, seriesId, phase, feedback, rules, ranges, maxBytes = LIMITS.inputBytes } = {}) {
   const refs = { feedback: {}, rules: {} };
-  const inputRules = [];
-  let index = 0;
-  for (const record of Array.isArray(rules) ? rules : []) {
-    if (!record || !record.id) continue;
-    if (index >= 6) break;
-    const ref = `r${index}`;
-    refs.rules[ref] = record.id;
-    inputRules.push({
-      ref,
-      revision: record.revision || 1,
-      title: bounded(record.title, 60),
-      summary: bounded(record.summary, 120),
-      body: bounded(record.body, 360),
-      applicability: record.applicability || 'unresolved',
-      conditions: normalizeConditions(record.conditions),
-      state: record.learning?.state || record.state || 'trial',
-    });
-    index += 1;
-  }
+  const source = (Array.isArray(rules) ? rules : []).filter((record) => record && record.id);
+  /** 用户这次纠正涉及的规则先入输入：固定取前 6 条会把真正相关的旧经验挤掉。 */
+  const dimension = String(feedback?.cue?.dimension || '');
+  const prioritized = dimension
+    ? [...source.filter((record) => `${record.title || ''}${record.summary || ''}${record.body || ''}`.includes(dimension)),
+      ...source.filter((record) => !`${record.title || ''}${record.summary || ''}${record.body || ''}`.includes(dimension))]
+    : source;
   refs.feedback.u0 = feedback.messageIds[0] || '';
   const project = {
     projectId: bounded(projectId, 80),
@@ -193,10 +181,11 @@ export function buildCallInput({ projectId, episodeId, taskKind, seriesId, phase
     phase: PHASES.slice(),
   };
   const system = '你是项目记忆整理器，只输出 JSON。只能依据给定反馈修改已有规则或新建一条项目规则；不得调用工具，不得输出 JSON 之外的文字。没有可确定的长期变化时输出 {"changes":[]}。';
-  const payload = {
-    project,
-    feedback: { refs: [['u0', feedback.text.slice(0, 600)]], type: feedback.cue?.type || 'unclear', longTerm: Boolean(feedback.cue?.explicitLongTerm) },
-    rules: inputRules,
+  const feedbackHead = {
+    type: feedback.cue?.type || 'unclear',
+    longTerm: Boolean(feedback.cue?.explicitLongTerm),
+  };
+  const tail = {
     allowed: { conditions: view.CONDITION_KEYS, ranges: rangesInput, maxChanges: LIMITS.maxChanges, execution_miss: '仅已有规则，currentText 写检查点', artifact_accept: '仅已有规则，记验收样例' },
     output: {
       changes: [{
@@ -204,19 +193,49 @@ export function buildCallInput({ projectId, episodeId, taskKind, seriesId, phase
       }],
     },
   };
-  let prompt = JSON.stringify(payload);
-  while (Buffer.byteLength(system) + Buffer.byteLength(prompt) > maxBytes && prompt.length > 600) {
-    prompt = prompt.slice(0, Math.floor(prompt.length * 0.85));
+  const render = (selected, feedbackText) => JSON.stringify({
+    project,
+    feedback: { ...feedbackHead, refs: [['u0', feedbackText]] },
+    rules: selected,
+    ...tail,
+  });
+  /** 反馈正文按整段回退，不切开 JSON；仍放不下就是本次调用不可行。 */
+  let feedbackText = bounded(feedback.text, 600);
+  let prompt = render([], feedbackText);
+  while (Buffer.byteLength(system) + Buffer.byteLength(prompt) > maxBytes && feedbackText.length > 0) {
+    feedbackText = feedbackText.slice(0, Math.floor(feedbackText.length * 0.6));
+    prompt = render([], feedbackText);
+  }
+  if (Buffer.byteLength(system) + Buffer.byteLength(prompt) > maxBytes) {
+    return { system, prompt: '', messages: [], refs, rules: [], bytes: Buffer.byteLength(system), overLimit: true };
+  }
+  const inputRules = [];
+  for (const record of prioritized.slice(0, 6)) {
+    const ref = `r${inputRules.length}`;
+    refs.rules[ref] = record.id;
+    const row = {
+      ref,
+      revision: record.revision || 1,
+      title: bounded(record.title, 60),
+      summary: bounded(record.summary, 120),
+      body: bounded(record.body, 360),
+      applicability: record.applicability || 'unresolved',
+      conditions: normalizeConditions(record.conditions),
+      state: record.learning?.state || record.state || 'trial',
+    };
+    const next = render([...inputRules, row], feedbackText);
+    if (Buffer.byteLength(system) + Buffer.byteLength(next) > maxBytes) break;
+    inputRules.push(row);
+    prompt = next;
   }
   return { system, prompt, messages: [{ role: 'user', content: prompt }], refs, rules: inputRules, bytes: Buffer.byteLength(system) + Buffer.byteLength(prompt) };
 }
-
 /** 严格解析：截断、工具调用、额外字段、超限都整批拒绝，不做第二次修复调用。 */
 export function parseOutput(text, { finish, refs, rules, ranges } = {}) {
   if (finish && finish.kind !== 'stop' && finish.kind !== 'completed') return { ok: false, reason: '整理没有正常结束' };
   const raw = String(text || '').trim();
   if (!raw) return { ok: false, reason: '整理没有返回内容' };
-  if (raw.length > LIMITS.outputBytes) return { ok: false, reason: '整理输出太长' };
+  if (Buffer.byteLength(raw, 'utf8') > LIMITS.outputBytes) return { ok: false, reason: '整理输出太长' };
   if (/<[^>]+>/.test(raw) && !raw.startsWith('{')) return { ok: false, reason: '整理返回了工具调用' };
   let data;
   try {
@@ -388,22 +407,28 @@ export function addCheckpoint(learning, checkpoint = {}) {
 }
 
 /** 状态只看证据强度：明确长期要求或两个独立作品才 active；条件不确定就 pending。 */
-export function nextLearningState({ existing, change, evidence, now } = {}) {
+export function nextLearningState({ existing, change, evidence, now, specChanged = false } = {}) {
   const at = new Date(now || Date.now()).toISOString();
   const learning = existing?.learning ? JSON.parse(JSON.stringify(existing.learning)) : { state: 'pending', supportedEpisodeIds: [], evidence: [] };
   const priorState = LEARNING_STATES.includes(learning.state) ? learning.state : 'pending';
-  const episodes = Array.isArray(learning.supportedEpisodeIds) ? learning.supportedEpisodeIds.slice() : [];
+  /** 规范正文或适用条件变了：旧证据不再支持新规范，只保留本次这一条。 */
+  const episodes = specChanged ? [] : (Array.isArray(learning.supportedEpisodeIds) ? learning.supportedEpisodeIds.slice() : []);
   if (evidence?.episodeId && !episodes.includes(evidence.episodeId)) episodes.push(evidence.episodeId);
-  const anchors = Array.isArray(learning.evidence) ? learning.evidence.slice() : [];
+  const anchors = specChanged ? [] : (Array.isArray(learning.evidence) ? learning.evidence.slice() : []);
   if (evidence?.episodeId && !anchors.some((row) => row.episodeId === evidence.episodeId)) anchors.push(evidence);
   learning.supportedEpisodeIds = episodes.slice(-LIMITS.evidence);
   learning.evidence = anchors.slice(-LIMITS.evidence).map((row) => ({ ...row }));
   learning.updatedAt = at;
   learning.lastFeedbackType = change?.feedbackType || learning.lastFeedbackType || '';
   if (change?.currentText) learning.lastText = change.currentText;
-  if (priorState === 'paused') {
+  if (priorState === 'paused' && !specChanged && !Boolean(evidence?.explicitLongTerm)) {
     learning.state = 'paused';
     return learning;
+  }
+  if (priorState === 'paused') {
+    delete learning.blockedReason;
+    delete learning.pausedAt;
+    delete learning.pausedBy;
   }
   const conditions = normalizeConditions(change?.conditions !== undefined ? change.conditions : existing?.conditions);
   const determinate = (change?.applicability || existing?.applicability) === 'conditional' && conditions.length > 0;
@@ -425,6 +450,7 @@ export function nextLearningState({ existing, change, evidence, now } = {}) {
   })) learning.state = 'trial';
   else learning.state = 'pending';
   if (learning.state === 'trial') learning.trialUntil = new Date((now || Date.now()) + LIMITS.trialMs).toISOString();
+  else delete learning.trialUntil;
   if (learning.state === 'active') {
     learning.acceptedAt = learning.acceptedAt || at;
     delete learning.trialUntil;
