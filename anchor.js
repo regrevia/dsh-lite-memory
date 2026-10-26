@@ -27,13 +27,27 @@ const OLD_WORK_ACTION = /(继续|接着|再改|改成|改一下|调整|优化|�
 const CONTENT_INTENT = /(口播|拍摄|录制|剪辑|文案|封面|字幕|直播|视频|选题|脚本|一期|栏目)/;
 const ENGINEERING_INTENT = /(代码|排查|故障|部署|调试|重构|接口|数据库|查询|报错|日志|服务|环境|依赖|测试|配置|修复)/;
 /** 运行时任务判断只分工程/创作两类；两类词同时出现时工程证据优先。 */
-const CODE_TASK_WORDS = /(源码|代码|插件|仓库|数据库|报错|日志|重构|修复|排查|测试|编译|依赖)/;
+const CODE_TASK_WORDS = /(源码|代码|插件|仓库|数据库|报错|日志|重构|修复|排查|测试|编译|依赖|bug)/i;
 const CONTENT_TASK_WORDS = /(口播|选题|拍摄|剪辑|发布|封面|字幕)/;
-/** 栏目名后面直接跟这些词时，说的对象是代码/系统，不是这个内容栏目。 */
-const CODE_OBJECT_AFTER = /^\s*(插件|源码|代码|仓库|报错|日志|接口|函数|模块|依赖|测试|编译)/;
-/** 明确把栏目放下、停掉，才算撤销；「不要按口播的规矩来」只是否定规则。 */
-const REVOKE_SERIES_BEFORE = /(先不做|不做了|不再做|不做|不搞|不拍|不写|不剪|不发|先放着|先放|放一边|暂停|停掉|去掉)[^，。；！？\n]{0,8}$/;
-const REVOKE_SERIES_AFTER = /^(了|啦|吧|先不做|不做了|不搞了|不拍了|不写了|暂停|先放着|放一边)/;
+/** 「口播功能/模块/页面」是代码对象；只有整句确有工程语境时才否定栏目绑定。 */
+const CODE_OBJECT_AFTER = /^\s*(插件|源码|代码|仓库|报错|日志|接口|函数|依赖|测试|编译|功能|模块|组件|页面|流程|逻辑)/;
+const CODE_OBJECT_NOUN = /(功能|模块|组件|页面|接口|流程|逻辑)/;
+const CODE_CONTEXT_WORDS = /(bug|代码|修复|排查|故障|报错|调试|测试|编译|部署|仓库|函数|插件|源码|接口|实现|开发|重构|配置)/i;
+/** 讲解/介绍后面的对象是话题，不是当前交付栏目。 */
+const TOPIC_SERIES_BEFORE = /(讲解|介绍|聊聊|说说|分享|科普|解释|围绕|关于|主题是|主题为|话题是|话题为)[^，。；！？\n]{0,8}$/;
+const TOPIC_AFTER = /(?:讲解|介绍|聊聊|说说|分享|科普|解释|围绕|关于|主题是|主题为|话题是|话题为)\s*([^，。；！？,.;!?\n]{2,24})/;
+const TOPIC_OBJECT = /([^\s，。；！？,.;!?]{2,16}?(?:功能|模块|组件|页面|接口|流程|逻辑))/;
+const TOPIC_SUBJECT = /^([^，。；！？\n]{2,20}?)(?:最近|现在|老是|总是|已经|出现|报|有|坏|异常|不对)/;
+/** 明确把栏目放下、停掉，才算撤销；句末的「吧/啦/了」只是语气，不是撤销。 */
+const REVOKE_SERIES_BEFORE = /(先不做|不做了|不再做|不做|不搞|不拍|不写|不剪|不发|先放着|先放|放一边|暂停|停掉|去掉|别做|不要做)[^，。；！？\n]{0,8}$/;
+const REVOKE_SERIES_AFTER = /^(先不做|不做了|不搞了|不拍了|不写了|暂停|先放着|放一边|不要了|停掉)/;
+const ACTION_RULES = [
+  ['fix', /(修复|修好|排查|定位|解决|修正|调试|debug|bug|报错|故障)/i],
+  ['review', /(审阅|审查|检查|评估|看看|复盘|review)/i],
+  ['edit', /(改|调整|优化|润色|修改|重写|更新)/],
+  ['create', /(做|制作|写|拍摄|录制|剪辑|生成|出一期|再做一期)/],
+  ['explain', /(讲解|介绍|说明|分享|聊聊|说说|科普|解释)/],
+];
 /** 这些词描述的是旧稿的某个方面，不是新对象；不该因为它们出现就撤销旧范围。 */
 const ASPECT_NOISE = /(节奏|速度|风格|语气|口吻|结构|长度|时长|篇幅|配色|字号|字体|标题|文案|措辞|逻辑|细节|开头|结尾|过渡|画面|镜头|音乐|音效|字幕|参数|格式|排版)/g;
 /** 程度、指代和虚词组成的二字片段不是对象证据。 */
@@ -119,20 +133,71 @@ export function seriesChosenBy(query, series) {
     if (at < 0) return false;
     const before = value.slice(Math.max(0, at - 14), at);
     const after = value.slice(at + name.length);
+    const asCodeObject = CODE_OBJECT_AFTER.test(after) && CODE_CONTEXT_WORDS.test(value);
     if (!NEGATED_SERIES.test(before) && !MENTION_SERIES.test(before) && !PAUSED_BEFORE.test(before)
-      && !PAUSED_SERIES.test(after) && !CODE_OBJECT_AFTER.test(after)) return true;
+      && !PAUSED_SERIES.test(after) && !TOPIC_SERIES_BEFORE.test(before) && !asCodeObject) return true;
     from = at + name.length;
   }
   return false;
 }
 
-/** 任务类型只作上下文判断，不替代已有栏目：工程证据优先于创作词。 */
-export function taskKindOf(query) {
+/**
+ * 把一句话拆成动作、交付物和话题：只有交付物才参与任务类型与栏目绑定，
+ * 动作和话题都带来源，避免把「讲解数据库事务」当成交付栏目。
+ */
+export function taskFacetsOf(query) {
   const value = text(query, 400);
-  if (!value) return '';
-  if (CODE_TASK_WORDS.test(value)) return 'code';
-  if (CONTENT_TASK_WORDS.test(value)) return 'content';
-  return '';
+  if (!value) {
+    return {
+      action: { kind: 'unknown', evidence: 'none' },
+      deliverable: { kind: '', seriesId: '', evidence: 'none' },
+      topic: { text: '', evidence: 'none' },
+      conflict: false,
+    };
+  }
+  const found = ACTION_RULES.find(([, pattern]) => pattern.test(value));
+  const action = { kind: found ? found[0] : 'unknown', evidence: found ? 'query' : 'none' };
+  const codeIntent = CODE_TASK_WORDS.test(value);
+  const codeObject = CODE_OBJECT_NOUN.test(value);
+  const contentIntent = CONTENT_TASK_WORDS.test(value) || /(一期|栏目|视频|脚本)/.test(value);
+  const contentCreate = (action.kind === 'create' || action.kind === 'edit') && contentIntent;
+  const strongCodeAction = (action.kind === 'fix' || action.kind === 'review') && (codeIntent || codeObject);
+  let kind = '';
+  if (strongCodeAction || (codeObject && action.kind !== 'create')) kind = 'code';
+  else if (contentCreate) kind = 'content';
+  else if (codeIntent && !contentIntent) kind = 'code';
+  else if (contentIntent && !codeIntent) kind = 'content';
+  else if (codeIntent && contentIntent) kind = 'code';
+
+  const marker = TOPIC_AFTER.exec(value);
+  let topicText = marker ? marker[1].replace(/[，。；！？,.;!?\s]+$/g, '').replace(/(讲讲|聊聊|说说|展开|讲一下|说一下)$/g, '').trim() : '';
+  let topicEvidence = topicText ? 'query' : 'none';
+  if (!topicText) {
+    const object = TOPIC_OBJECT.exec(value);
+    if (object) {
+      topicText = object[1];
+      topicEvidence = 'inferred';
+    } else if (kind === 'code') {
+      const subject = TOPIC_SUBJECT.exec(value);
+      if (subject) {
+        topicText = subject[1];
+        topicEvidence = 'inferred';
+      }
+    }
+  }
+  const conflict = Boolean(codeIntent && contentIntent && !strongCodeAction
+    && !(kind === 'content' && contentCreate && topicText));
+  return {
+    action,
+    deliverable: { kind, seriesId: '', evidence: kind ? 'query' : 'none' },
+    topic: { text: topicText, evidence: topicEvidence },
+    conflict,
+  };
+}
+
+/** 任务类型只作上下文判断，不替代已有栏目：交付物目标决定类型。 */
+export function taskKindOf(query) {
+  return taskFacetsOf(query).deliverable.kind;
 }
 
 /** 从一句话里找出被明确撤销的栏目；只认「先不做 / 放一边」这类停做动作。 */
@@ -167,8 +232,16 @@ export function buildRuntimeContext(input = {}) {
   const episode = input.episode && typeof input.episode === 'object' ? input.episode : null;
   const anchorKind = text(anchor && anchor.taskKind, 40);
   const episodeKind = text(episode && episode.taskKind, 40);
-  const inferredKind = taskKindOf(input.query);
+  const facets = taskFacetsOf(input.query);
+  const inferredKind = facets.deliverable.kind;
   const kind = episodeKind || anchorKind || inferredKind;
+  /** 存储下来的 query 推断仍是 query，不能因为落过盘就自升为用户确认。 */
+  const storedKindEvidence = text(episode && episode.kindEvidence, 20) || text(anchor && anchor.kindEvidence, 20);
+  const evidence = storedKindEvidence
+    || (inferredKind ? 'query' : (episodeKind || anchorKind ? 'inferred' : 'none'));
+  const storedAction = text(episode && episode.actionKind, 20) || text(anchor && anchor.actionKind, 20);
+  const storedTopic = text(episode && episode.topicText, 120) || text(anchor && anchor.topicText, 120);
+  const topicEvidence = text(episode && episode.topicEvidence, 20) || text(anchor && anchor.topicEvidence, 20);
   return {
     projectId,
     sessionId,
@@ -179,7 +252,14 @@ export function buildRuntimeContext(input = {}) {
       seriesId: text(episode && episode.seriesId, 80) || text(anchor && anchor.seriesId, 80),
       artifactKey: text(episode && episode.artifactKey, 120) || text(anchor && anchor.artifactKey, 120),
       phase: text(episode && episode.phase, 40) || text(anchor && anchor.phase, 40),
-      evidence: episodeKind || anchorKind ? 'explicit' : (inferredKind ? 'query' : 'none'),
+      evidence,
+      seriesEvidence: text(episode && episode.seriesEvidence, 20) || text(anchor && anchor.seriesEvidence, 20)
+        || (text(episode && episode.seriesId, 80) || text(anchor && anchor.seriesId, 80) ? 'inferred' : 'none'),
+      action: storedAction || facets.action.kind,
+      actionEvidence: storedAction ? 'query' : facets.action.evidence,
+      topic: storedTopic || facets.topic.text,
+      topicEvidence: storedTopic ? (topicEvidence || 'inferred') : facets.topic.evidence,
+      conflict: Boolean((episode && episode.conflict === true) || (anchor && anchor.conflict === true) || facets.conflict),
     },
   };
 }
@@ -245,6 +325,12 @@ export function normalizeTasks(raw) {
       ...(text(anchor.taskKind, 40) ? { taskKind: text(anchor.taskKind, 40) } : {}),
       ...(text(anchor.seriesId, 40) ? { seriesId: text(anchor.seriesId, 40) } : {}),
       ...(text(anchor.phase, 40) ? { phase: text(anchor.phase, 40) } : {}),
+      ...(text(anchor.kindEvidence, 20) ? { kindEvidence: text(anchor.kindEvidence, 20) } : {}),
+      ...(text(anchor.seriesEvidence, 20) ? { seriesEvidence: text(anchor.seriesEvidence, 20) } : {}),
+      ...(text(anchor.actionKind, 20) ? { actionKind: text(anchor.actionKind, 20) } : {}),
+      ...(text(anchor.topicText, 120) ? { topicText: text(anchor.topicText, 120) } : {}),
+      ...(text(anchor.topicEvidence, 20) ? { topicEvidence: text(anchor.topicEvidence, 20) } : {}),
+      ...(anchor.conflict === true ? { conflict: true } : {}),
       status,
       bindingRevision: Number.isInteger(anchor.bindingRevision) && anchor.bindingRevision > 0 ? anchor.bindingRevision : 1,
       sourceMessageIds: (Array.isArray(anchor.sourceMessageIds) ? anchor.sourceMessageIds : []).map((id) => text(id, 120)).filter(Boolean).slice(0, TASK_LIMITS.sourceMessages),
@@ -259,6 +345,12 @@ export function normalizeTasks(raw) {
       ...(text(episode.taskKind, 40) ? { taskKind: text(episode.taskKind, 40) } : {}),
       ...(text(episode.seriesId, 40) ? { seriesId: text(episode.seriesId, 40) } : {}),
       ...(text(episode.phase, 40) ? { phase: text(episode.phase, 40) } : {}),
+      ...(text(episode.kindEvidence, 20) ? { kindEvidence: text(episode.kindEvidence, 20) } : {}),
+      ...(text(episode.seriesEvidence, 20) ? { seriesEvidence: text(episode.seriesEvidence, 20) } : {}),
+      ...(text(episode.actionKind, 20) ? { actionKind: text(episode.actionKind, 20) } : {}),
+      ...(text(episode.topicText, 120) ? { topicText: text(episode.topicText, 120) } : {}),
+      ...(text(episode.topicEvidence, 20) ? { topicEvidence: text(episode.topicEvidence, 20) } : {}),
+      ...(episode.conflict === true ? { conflict: true } : {}),
       status: ANCHOR_STATUSES.includes(episode.status) ? episode.status : 'unbound',
       transitionId: text(episode.transitionId, 80),
       previousEpisodeId: text(episode.previousEpisodeId, 80),
@@ -312,6 +404,12 @@ function anchorOf(episode, { sessionId, batchKey, messageIds, status, bindingRev
     ...(episode.taskKind ? { taskKind: episode.taskKind } : {}),
     ...(episode.seriesId ? { seriesId: episode.seriesId } : {}),
     ...(episode.phase ? { phase: episode.phase } : {}),
+    ...(episode.kindEvidence ? { kindEvidence: episode.kindEvidence } : {}),
+    ...(episode.seriesEvidence ? { seriesEvidence: episode.seriesEvidence } : {}),
+    ...(episode.actionKind ? { actionKind: episode.actionKind } : {}),
+    ...(episode.topicText ? { topicText: episode.topicText } : {}),
+    ...(episode.topicEvidence ? { topicEvidence: episode.topicEvidence } : {}),
+    ...(episode.conflict === true ? { conflict: true } : {}),
     status,
     bindingRevision,
     batchKey,
@@ -321,7 +419,7 @@ function anchorOf(episode, { sessionId, batchKey, messageIds, status, bindingRev
   };
 }
 
-function createEpisode(tasks, { taskKind, seriesId, phase, status, transitionId, previousEpisodeId, taskText, now }) {
+function createEpisode(tasks, { taskKind, seriesId, phase, status, transitionId, previousEpisodeId, taskText, kindEvidence, seriesEvidence, actionKind, topicText, topicEvidence, conflict, now }) {
   const episodeId = episodeIdFor(transitionId);
   const at = new Date(now).toISOString();
   const episode = {
@@ -329,6 +427,12 @@ function createEpisode(tasks, { taskKind, seriesId, phase, status, transitionId,
     ...(taskKind ? { taskKind } : {}),
     ...(seriesId ? { seriesId } : {}),
     ...(phase ? { phase } : {}),
+    ...(kindEvidence ? { kindEvidence } : {}),
+    ...(seriesEvidence ? { seriesEvidence } : {}),
+    ...(actionKind ? { actionKind } : {}),
+    ...(topicText ? { topicText } : {}),
+    ...(topicEvidence ? { topicEvidence } : {}),
+    ...(conflict === true ? { conflict: true } : {}),
     status,
     transitionId,
     ...(previousEpisodeId ? { previousEpisodeId } : {}),
@@ -382,12 +486,26 @@ export function routeTask(tasksInput, input = {}) {
   const namedSeries = registered.find((series) => seriesChosenBy(query, series)) || '';
   const changedSeries = current && namedSeries && namedSeries !== (current.seriesId || '') ? namedSeries : '';
   const projectDefaults = input.defaults || tasks.defaults;
-  const queryKind = taskKindOf(query);
-  /** 显式任务类型（调用方指定，或本句是很明确的工程任务）优先于继承和项目默认值。 */
-  const explicitKind = text(input.taskKind, 40) || (input.selection && text(input.selection.taskKind, 40))
-    || (queryKind === 'code' ? 'code' : '');
+  const facets = taskFacetsOf(query);
+  const queryKind = facets.deliverable.kind;
+  /** 调用方显式给的类型才是 explicit；从本句推断出的 code 只算 query 证据。 */
+  const inputKind = text(input.taskKind, 40) || (input.selection && text(input.selection.taskKind, 40)) || '';
+  const inferredKind = queryKind === 'code' ? 'code' : '';
+  /** content 是弱类型：只在没有旧栏目/项目默认值可继承时，才作为本句推断落盘。 */
+  const contentKind = queryKind === 'content' ? 'content' : '';
+  const explicitKind = inputKind || inferredKind;
+  const kindEvidence = inputKind ? 'explicit' : (inferredKind ? 'query' : '');
+  const inheritedKindEvidence = (currentEpisode && currentEpisode.kindEvidence) || (kindEvidence === 'query' ? 'query' : 'inferred');
+  const inheritedSeriesEvidence = (currentEpisode && currentEpisode.seriesEvidence) || 'inferred';
   const fallbackKind = explicitKind || (currentEpisode && currentEpisode.taskKind)
     || (projectDefaults && projectDefaults.taskKind) || '';
+  const fallbackKindEvidence = explicitKind ? kindEvidence
+    : ((currentEpisode && currentEpisode.taskKind) ? inheritedKindEvidence : (projectDefaults && projectDefaults.taskKind ? 'explicit' : ''));
+  const facetFields = {
+    ...(facets.action.kind !== 'unknown' ? { actionKind: facets.action.kind } : {}),
+    ...(facets.topic.text ? { topicText: facets.topic.text, topicEvidence: facets.topic.evidence } : {}),
+    ...(facets.conflict ? { conflict: true } : {}),
+  };
 
   if ((!current || current.status === 'unbound' || current.status === 'proposed') && input.selection && (input.selection.seriesId || input.selection.taskKind)) {
     const transitionId = transitionIdFor(batchKey, current ? current.bindingRevision || 0 : 0);
@@ -398,9 +516,10 @@ export function routeTask(tasksInput, input = {}) {
     if (shell) {
       episode = currentEpisode;
       Object.assign(episode, {
-        ...(input.selection.taskKind ? { taskKind: input.selection.taskKind } : {}),
-        ...(input.selection.seriesId ? { seriesId: input.selection.seriesId } : {}),
+        ...(input.selection.taskKind ? { taskKind: input.selection.taskKind, kindEvidence: 'explicit' } : {}),
+        ...(input.selection.seriesId ? { seriesId: input.selection.seriesId, seriesEvidence: 'explicit' } : {}),
         phase: input.selection.phase || 'brief',
+        ...facetFields,
       });
       touch(tasks, episode, { status: 'proposed' }, now);
     } else {
@@ -410,6 +529,9 @@ export function routeTask(tasksInput, input = {}) {
         phase: input.selection.phase || 'brief',
         status: 'proposed',
         transitionId,
+        kindEvidence: input.selection.taskKind ? 'explicit' : '',
+        seriesEvidence: input.selection.seriesId ? 'explicit' : '',
+        ...facetFields,
         taskText: query,
         now,
       });
@@ -435,11 +557,12 @@ export function routeTask(tasksInput, input = {}) {
     const nextKind = explicitKind;
     const status = nextSeries || nextKind ? 'active' : 'unbound';
     const episode = existing || createEpisode(tasks, {
-      ...(nextKind ? { taskKind: nextKind } : {}),
-      ...(nextSeries ? { seriesId: nextSeries } : {}),
+      ...(nextKind ? { taskKind: nextKind, kindEvidence } : {}),
+      ...(nextSeries ? { seriesId: nextSeries, seriesEvidence: 'query' } : {}),
       status,
       phase: 'brief',
       transitionId,
+      ...facetFields,
       ...(currentEpisode ? { previousEpisodeId: currentEpisode.episodeId } : {}),
       taskText: query,
       now,
@@ -457,10 +580,11 @@ export function routeTask(tasksInput, input = {}) {
     const transitionId = transitionIdFor(batchKey, tasks.revision);
     const existing = Object.values(tasks.episodes).find((episode) => episode.transitionId === transitionId);
     const episode = existing || createEpisode(tasks, {
-      ...(explicitKind ? { taskKind: explicitKind } : {}),
+      ...(explicitKind ? { taskKind: explicitKind, kindEvidence } : {}),
       status: 'unbound',
       phase: 'brief',
       transitionId,
+      ...facetFields,
       previousEpisodeId: currentEpisode.episodeId,
       taskText: query,
       now,
@@ -478,11 +602,12 @@ export function routeTask(tasksInput, input = {}) {
     const seriesId = changedSeries || currentEpisode.seriesId || '';
     const status = changedSeries ? 'active' : 'continuable';
     const episode = existing || createEpisode(tasks, {
-      ...(fallbackKind ? { taskKind: fallbackKind } : {}),
-      ...(seriesId ? { seriesId } : {}),
+      ...(fallbackKind ? { taskKind: fallbackKind, kindEvidence: fallbackKindEvidence } : {}),
+      ...(seriesId ? { seriesId, seriesEvidence: changedSeries ? 'query' : inheritedSeriesEvidence } : {}),
       phase: 'brief',
       status,
       transitionId,
+      ...facetFields,
       previousEpisodeId: currentEpisode.episodeId,
       taskText: query,
       now,
@@ -506,11 +631,12 @@ export function routeTask(tasksInput, input = {}) {
     const existing = Object.values(tasks.episodes).find((episode) => episode.transitionId === transitionId);
     const status = nextSeries ? 'active' : 'unbound';
     const episode = existing || createEpisode(tasks, {
-      ...(fallbackKind ? { taskKind: fallbackKind } : {}),
-      ...(nextSeries ? { seriesId: nextSeries } : {}),
+      ...(fallbackKind ? { taskKind: fallbackKind, kindEvidence: fallbackKindEvidence } : {}),
+      ...(nextSeries ? { seriesId: nextSeries, seriesEvidence: changedSeries ? 'query' : inheritedSeriesEvidence } : {}),
       status,
       phase: 'brief',
       transitionId,
+      ...facetFields,
       previousEpisodeId: currentEpisode ? currentEpisode.episodeId : '',
       taskText: query,
       now,
@@ -524,12 +650,16 @@ export function routeTask(tasksInput, input = {}) {
   if (namedSeries && !changedSeries && (!current || current.status === 'unbound' || current.status === 'proposed')) {
     const transitionId = transitionIdFor(batchKey, tasks.revision);
     const existing = Object.values(tasks.episodes).find((episode) => episode.transitionId === transitionId);
+    const namedKind = fallbackKind || contentKind;
+    const namedKindEvidence = fallbackKind ? fallbackKindEvidence : (contentKind ? 'query' : '');
     const episode = existing || createEpisode(tasks, {
-      ...(fallbackKind ? { taskKind: fallbackKind } : {}),
+      ...(namedKind ? { taskKind: namedKind, kindEvidence: namedKindEvidence } : {}),
       seriesId: namedSeries,
+      seriesEvidence: 'query',
       status: 'active',
       phase: 'brief',
       transitionId,
+      ...facetFields,
       taskText: query,
       now,
     });
@@ -565,6 +695,9 @@ export function routeTask(tasksInput, input = {}) {
       phase: 'brief',
       status: 'active',
       transitionId,
+      kindEvidence: defaults.taskKind ? 'explicit' : '',
+      seriesEvidence: defaults.seriesId ? 'explicit' : '',
+      ...facetFields,
       taskText: query,
       now,
     });
@@ -578,7 +711,8 @@ export function routeTask(tasksInput, input = {}) {
   const existing = Object.values(tasks.episodes).find((episode) => episode.transitionId === transitionId);
   const status = explicitKind ? 'active' : 'unbound';
   const episode = existing || createEpisode(tasks, {
-    ...(explicitKind ? { taskKind: explicitKind } : {}), status, phase: 'brief', transitionId, taskText: query, now,
+    ...(explicitKind ? { taskKind: explicitKind, kindEvidence } : {}), status, phase: 'brief', transitionId,
+    ...facetFields, taskText: query, now,
   });
   const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status, bindingRevision: tasks.revision, now });
   tasks.sessions[sessionId] = anchor;

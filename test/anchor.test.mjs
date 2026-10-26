@@ -615,7 +615,7 @@ test('R48 RuntimeContext 形状确定，任务字段来自锚点与本句判断'
     controlEpoch: 7, query: '继续看这段代码', anchor: routed.anchor, episode: routed.episode,
   });
   assert.deepEqual(Object.keys(ctx).sort(), ['controlEpoch', 'projectId', 'requestId', 'sessionId', 'task']);
-  assert.deepEqual(Object.keys(ctx.task).sort(), ['artifactKey', 'evidence', 'kind', 'phase', 'seriesId']);
+  assert.deepEqual(Object.keys(ctx.task).sort(), ['action', 'actionEvidence', 'artifactKey', 'conflict', 'evidence', 'kind', 'phase', 'seriesEvidence', 'seriesId', 'topic', 'topicEvidence']);
   assert.equal(ctx.projectId, '/work/demo');
   assert.equal(ctx.sessionId, 'sess-ctx');
   assert.equal(ctx.requestId, anchor.contextIdFor('/work/demo', 'rb_ctx', routed.episode.episodeId));
@@ -623,7 +623,7 @@ test('R48 RuntimeContext 形状确定，任务字段来自锚点与本句判断'
   assert.equal(ctx.task.kind, 'code');
   assert.equal(ctx.task.seriesId, '');
   assert.equal(ctx.task.phase, 'brief');
-  assert.equal(ctx.task.evidence, 'explicit');
+  assert.equal(ctx.task.evidence, 'query');
 
   const inferred = anchor.buildRuntimeContext({
     projectId: '/work/demo', sessionId: 'sess-ctx', batchKey: 'rb_ctx', messageIds: ['m1'],
@@ -631,4 +631,136 @@ test('R48 RuntimeContext 形状确定，任务字段来自锚点与本句判断'
   });
   assert.equal(inferred.task.kind, 'code');
   assert.equal(inferred.task.evidence, 'query');
+});
+
+test('R49 动作/交付物/话题分开：代码 bug 不把「口播」绑成栏目', () => {
+  const query = '口播功能最近有 bug，请修复代码';
+  const facets = anchor.taskFacetsOf(query);
+  assert.equal(facets.action.kind, 'fix');
+  assert.equal(facets.deliverable.kind, 'code');
+  assert.equal(facets.topic.text, '口播功能');
+  assert.equal(facets.topic.evidence, 'inferred');
+  assert.equal(anchor.seriesChosenBy(query, '口播'), false);
+  assert.deepEqual(anchor.revokeSeriesBy(query, ['口播']), []);
+
+  const routed = anchor.routeTask(anchor.emptyTasks(), {
+    sessionId: 'sess-boundary-fix', batchKey: 'rb_boundary_fix', messageIds: ['m1'],
+    query, registeredSeries: ['口播'], now: 1000,
+  });
+  assert.notEqual(routed.decision.kind, 'selected');
+  assert.equal(routed.episode.taskKind, 'code');
+  assert.equal(routed.episode.kindEvidence, 'query');
+  assert.equal(routed.anchor.seriesId, undefined);
+  assert.equal(routed.episode.actionKind, 'fix');
+
+  const ctx = anchor.buildRuntimeContext({
+    projectId: '/work/demo', sessionId: 'sess-boundary-fix', batchKey: 'rb_boundary_fix',
+    messageIds: ['m1'], query: '继续修', anchor: routed.anchor, episode: routed.episode,
+  });
+  assert.equal(ctx.task.kind, 'code');
+  assert.equal(ctx.task.evidence, 'query');
+  assert.equal(ctx.task.seriesId, '');
+  assert.equal(ctx.task.action, 'fix');
+});
+
+test('R50 内容任务：数据库事务只是话题，口播才是交付栏目', () => {
+  const query = '做一期口播，讲解数据库事务，给普通观众听';
+  const facets = anchor.taskFacetsOf(query);
+  assert.equal(facets.action.kind, 'create');
+  assert.equal(facets.deliverable.kind, 'content');
+  assert.equal(facets.topic.text, '数据库事务');
+  assert.equal(facets.topic.evidence, 'query');
+  assert.equal(facets.conflict, false);
+  assert.equal(anchor.taskKindOf(query), 'content');
+  assert.equal(anchor.seriesChosenBy(query, '口播'), true);
+  assert.equal(anchor.seriesChosenBy(query, '数据库'), false);
+  assert.equal(anchor.seriesChosenBy(query, '数据库事务'), false);
+
+  const routed = anchor.routeTask(anchor.emptyTasks(), {
+    sessionId: 'sess-boundary-content', batchKey: 'rb_boundary_content', messageIds: ['m1'],
+    query, registeredSeries: ['口播', '数据库', '数据库事务'], now: 1000,
+  });
+  assert.equal(routed.decision.kind, 'selected');
+  assert.equal(routed.anchor.seriesId, '口播');
+  assert.equal(routed.anchor.taskKind, 'content');
+  assert.equal(routed.episode.kindEvidence, 'query');
+  assert.equal(routed.episode.seriesEvidence, 'query');
+  assert.equal(routed.episode.topicText, '数据库事务');
+  assert.equal(routed.episode.topicEvidence, 'query');
+
+  /** 落过一次盘之后，query 推断仍不能自升成用户确认。 */
+  const ctx = anchor.buildRuntimeContext({
+    projectId: '/work/demo', sessionId: 'sess-boundary-content', batchKey: 'rb_boundary_content',
+    messageIds: ['m1'], query: '继续', anchor: routed.anchor, episode: routed.episode,
+  });
+  assert.equal(ctx.task.kind, 'content');
+  assert.equal(ctx.task.evidence, 'query');
+  assert.equal(ctx.task.seriesEvidence, 'query');
+  assert.equal(ctx.task.topic, '数据库事务');
+  assert.equal(ctx.task.topicEvidence, 'query');
+});
+
+test('R51 句末语气词不是撤销；只有明确的停止动作才撤销栏目', () => {
+  const query = '做一期口播吧';
+  assert.deepEqual(anchor.revokeSeriesBy(query, ['口播']), []);
+  assert.equal(anchor.seriesChosenBy(query, '口播'), true);
+  assert.equal(anchor.taskKindOf(query), 'content');
+
+  const routed = anchor.routeTask(anchor.emptyTasks(), {
+    sessionId: 'sess-boundary-particle', batchKey: 'rb_boundary_particle', messageIds: ['m1'],
+    query, registeredSeries: ['口播'], now: 1000,
+  });
+  assert.equal(routed.decision.kind, 'selected');
+  assert.equal(routed.anchor.seriesId, '口播');
+  assert.equal(routed.anchor.taskKind, 'content');
+  assert.equal(routed.episode.kindEvidence, 'query');
+
+  for (const soft of ['做一期口播吧', '做一期口播啦', '做一期口播了', '做一期口播吧！']) {
+    assert.deepEqual(anchor.revokeSeriesBy(soft, ['口播']), [], soft);
+  }
+  for (const hard of ['先不做口播了', '口播不做了', '暂停口播', '放一边口播', '口播先不做']) {
+    assert.deepEqual(anchor.revokeSeriesBy(hard, ['口播']), ['口播'], hard);
+  }
+});
+
+test('R52 中英文标点与同义词：代码对象、话题前缀、内容用法都按同一规则', () => {
+  for (const query of [
+    '口播功能最近有 bug, 请修复代码.',
+    '口播模块报错，帮我排查',
+    '口播页面有个故障！',
+    '口播组件接口流程逻辑都改一下',
+  ]) {
+    assert.equal(anchor.seriesChosenBy(query, '口播'), false, query);
+    assert.equal(anchor.taskKindOf(query), 'code', query);
+  }
+  for (const soft of ['做一期口播吧!', '做一期口播啦。', '做一期口播了？']) {
+    assert.equal(anchor.seriesChosenBy(soft, '口播'), true, soft);
+    assert.equal(anchor.taskKindOf(soft), 'content', soft);
+  }
+  /** 「做一期口播功能」是内容用法，不能因为「功能」就否掉栏目。 */
+  assert.equal(anchor.seriesChosenBy('做一期口播功能', '口播'), true);
+  assert.equal(anchor.taskKindOf('做一期口播功能'), 'content');
+
+  for (const query of ['做一期口播, 讲解数据库事务, 给普通观众听.', '做一期口播；介绍数据库事务；给普通观众听']) {
+    assert.equal(anchor.taskKindOf(query), 'content', query);
+    assert.equal(anchor.seriesChosenBy(query, '口播'), true, query);
+    assert.equal(anchor.seriesChosenBy(query, '数据库'), false, query);
+  }
+  for (const query of ['聊聊数据库事务', '主题是数据库事务', '围绕数据库事务讲讲']) {
+    assert.equal(anchor.seriesChosenBy(query, '数据库'), false, query);
+    assert.equal(anchor.seriesChosenBy(query, '数据库事务'), false, query);
+  }
+
+  const conflict = anchor.taskFacetsOf('日志里提到口播，顺便讲数据库事务');
+  assert.equal(conflict.conflict, true);
+  const routed = anchor.routeTask(anchor.emptyTasks(), {
+    sessionId: 'sess-boundary-conflict', batchKey: 'rb_boundary_conflict', messageIds: ['m1'],
+    query: '日志里提到口播，顺便讲数据库事务', registeredSeries: ['口播'], now: 1000,
+  });
+  assert.notEqual(routed.anchor.seriesId, '口播');
+  const ctx = anchor.buildRuntimeContext({
+    projectId: '/work/demo', sessionId: 'sess-boundary-conflict', batchKey: 'rb_boundary_conflict',
+    messageIds: ['m1'], query: '日志里提到口播，顺便讲数据库事务', anchor: routed.anchor, episode: routed.episode,
+  });
+  assert.equal(ctx.task.conflict, true);
 });

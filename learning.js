@@ -29,7 +29,7 @@ export const LIMITS = {
 export const FEEDBACK_TYPES = ['spec_change', 'execution_miss', 'task_exception', 'aspect_accept', 'artifact_accept', 'unclear'];
 export const LEARNING_STATES = ['pending', 'trial', 'active', 'paused'];
 export const PHASES = ['brief', 'theme', 'outline', 'script', 'shoot', 'edit', 'publish'];
-const ALLOWED_KEYS = new Set(['target', 'feedbackType', 'topicKey', 'currentText', 'title', 'summary', 'applicability', 'conditions', 'evidence', 'persistence']);
+const ALLOWED_KEYS = new Set(['target', 'feedbackType', 'topicKey', 'currentText', 'title', 'summary', 'applicability', 'conditions', 'evidence', 'persistence', 'sourceExcerpt']);
 
 const LONG_TERM = /以后|今后|长期|默认|每次都|每次|一直|统一|永远|从现在起|记住/;
 const EXPLICIT_ACCEPT = /可以了|就这样|这版|就用这版|用这版|挺好|满意|保留|沿用|继续用|定稿|通过/;
@@ -90,6 +90,30 @@ export function isLongTerm(text) {
 
 const BOUND_STATUSES = ['active', 'continuable', 'proposed'];
 
+/**
+ * 一次整理运行能用到的身份只从调用方传入的上下文取：项目、会话、请求、作品、任务。
+ * 未绑定但带着 episodeId 的任务是「项目层候选」，不是「已绑定但作品失效」。
+ */
+export function runtimeContextOf(input = {}) {
+  const raw = input && typeof input === 'object' ? input : {};
+  const anchor = raw.anchor && typeof raw.anchor === 'object' ? raw.anchor : null;
+  const episodeId = String(anchor?.episodeId ?? raw.episodeId ?? '');
+  const status = String(anchor ? (anchor.status ?? '') : (raw.status ?? ''));
+  return {
+    projectId: String(raw.projectId ?? ''),
+    sessionId: String(raw.sessionId ?? ''),
+    requestId: String(raw.requestId ?? ''),
+    episodeId,
+    status,
+    bound: Boolean(episodeId) && BOUND_STATUSES.includes(status),
+    taskKind: String(anchor?.taskKind ?? raw.taskKind ?? ''),
+    seriesId: String(anchor?.seriesId ?? raw.seriesId ?? ''),
+    phase: String(anchor?.phase ?? raw.phase ?? ''),
+    anchorProjectId: String(anchor?.projectId ?? ''),
+    episodeUpdatedAt: String(anchor?.updatedAt ?? ''),
+  };
+}
+
 /** 人类反馈原文的短摘录；来源是历史消息，不重写。 */
 export function sourceExcerptOf(input, { max = 160 } = {}) {
   const clean = String(input || '').replace(/\s+/g, ' ').trim();
@@ -119,8 +143,9 @@ export function candidateFrom({ messages, anchor, sessionId, projectId, now } = 
    * 只有仍可用的作品绑定才算作品候选。任务状态里常常保留一个 unbound 的 episodeId，
    * 旧逻辑见到 episodeId 就直接拒绝，导致这类项目永远走不到项目层候选。
    */
-  const bound = Boolean(anchor && anchor.episodeId) && BOUND_STATUSES.includes(anchor.status);
-  if (anchor?.projectId && projectId && String(anchor.projectId) !== String(projectId)) return null;
+  const context = runtimeContextOf({ projectId, sessionId, anchor });
+  const bound = context.bound;
+  if (context.anchorProjectId && context.projectId && context.anchorProjectId !== context.projectId) return null;
   const { ids, text } = humanFeedback(messages);
   if (!text) return null;
   const cue = classifyFeedback(text);
@@ -130,36 +155,36 @@ export function candidateFrom({ messages, anchor, sessionId, projectId, now } = 
   const sourceExcerpt = sourceExcerptOf(text);
   if (bound) {
     return {
-      projectId,
-      sessionId: String(sessionId || ''),
+      projectId: context.projectId,
+      sessionId: context.sessionId,
       scope: 'episode',
       state: 'pending',
-      episodeId: anchor.episodeId,
-      taskKind: anchor.taskKind || '',
-      seriesId: anchor.seriesId || '',
-      phase: anchor.phase || '',
+      episodeId: context.episodeId,
+      taskKind: context.taskKind,
+      seriesId: context.seriesId,
+      phase: context.phase,
       messageIds,
       text,
       sourceExcerpt,
       cue,
       expectedTarget: {
         scope: 'episode',
-        projectId,
-        episodeId: anchor.episodeId,
-        ...(anchor.taskKind ? { taskKind: anchor.taskKind } : {}),
-        ...(anchor.seriesId ? { seriesId: anchor.seriesId } : {}),
-        ...(anchor.phase ? { phase: anchor.phase } : {}),
+        projectId: context.projectId,
+        episodeId: context.episodeId,
+        ...(context.taskKind ? { taskKind: context.taskKind } : {}),
+        ...(context.seriesId ? { seriesId: context.seriesId } : {}),
+        ...(context.phase ? { phase: context.phase } : {}),
       },
-      episodeUpdatedAt: anchor.updatedAt || '',
+      episodeUpdatedAt: context.episodeUpdatedAt,
       at,
     };
   }
-  if (!projectId) return null;
+  if (!context.projectId) return null;
   /** 没有作品绑定时，规范纠正同样按项目候选收集；单次局部改动交给整理器判空，不再用电平词一刀切。 */
   if (cue.type !== 'spec_change') return null;
   return {
-    projectId,
-    sessionId: String(sessionId || ''),
+    projectId: context.projectId,
+    sessionId: context.sessionId,
     scope: 'project',
     state: 'pending',
     episodeId: '',
@@ -293,6 +318,34 @@ export function selectRules(rules, context = {}) {
   return rankRules(rules, context).slice(0, Math.max(1, limit));
 }
 
+/**
+ * 整理器可见规则：先按状态、最近使用、更新时间稳定排序，再取上限；
+ * 不能先 slice 再排序，否则真正可用的旧经验会被输入顺序挤掉。
+ */
+export function orderOrganizerRules(rules, { limit = LIMITS.organizerRules } = {}) {
+  const cap = Math.max(1, Number(limit) || LIMITS.organizerRules);
+  const rows = (Array.isArray(rules) ? rules : [])
+    .filter((record) => record && record.id)
+    .map((record, index) => {
+      const lastUsed = Date.parse(record.lastUsedAt || record.learning?.lastUsedAt || record.learning?.usedAt || '');
+      const updated = Date.parse(record.learning?.updatedAt || record.updatedAt || record.updated || '');
+      return {
+        record,
+        index,
+        stateWeight: STATE_WEIGHT[record.learning?.state || record.state] ?? 1,
+        lastUsed: Number.isFinite(lastUsed) ? lastUsed : 0,
+        updated: Number.isFinite(updated) ? updated : 0,
+        id: String(record.id),
+      };
+    });
+  rows.sort((a, b) => b.stateWeight - a.stateWeight
+    || b.lastUsed - a.lastUsed
+    || b.updated - a.updated
+    || a.id.localeCompare(b.id)
+    || a.index - b.index);
+  return rows.slice(0, cap).map((row) => row.record);
+}
+
 /** 构造一次受限调用输入：无工具、无前台历史，只有身份、少量规则和反馈映射。 */
 /** 明确长期要求本身就是可信收集信号：整理器返回空时至少落一条规则，不让它无声消失。 */
 export function pendingChangeFrom(feedback = {}) {
@@ -312,10 +365,51 @@ export function pendingChangeFrom(feedback = {}) {
     conditions: [],
     evidence: ['u0'],
     persistence: 'project_candidate',
+    /** 摘录从候选一路带到提交路径，模型返回空时也不丢来源。 */
+    sourceExcerpt: String(feedback.sourceExcerpt || sourceExcerptOf(text)).slice(0, 160),
+  };
+}
+
+/**
+ * 收集与展示共用的准入判断；启发式推断只能得到「待确认候选」，
+ * 不会因为写进存储就变成用户确认，除非候选本身带着明确的确认标记。
+ */
+export function admissionOf(candidate, runtime = {}, purpose = 'collect') {
+  const mode = String(purpose || 'collect');
+  if (!['collect', 'display'].includes(mode)) return { ok: false, reason: '用途不认' };
+  if (!candidate || typeof candidate !== 'object') return { ok: false, reason: '没有候选' };
+  const context = runtimeContextOf({ ...(runtime || {}), projectId: runtime?.projectId ?? candidate.projectId, sessionId: runtime?.sessionId ?? candidate.sessionId });
+  if (!context.projectId) return { ok: false, reason: '缺少项目身份' };
+  if (candidate.projectId && String(candidate.projectId) !== context.projectId) return { ok: false, reason: '候选不属于这个项目' };
+  const cue = candidate.cue && typeof candidate.cue === 'object' ? candidate.cue : classifyFeedback(candidate.text);
+  if (!cue?.worth) return { ok: false, reason: '反馈不值得检查' };
+  const scope = candidate.scope === 'project' ? 'project' : 'episode';
+  if (scope === 'episode') {
+    if (!context.bound) return { ok: false, reason: '作品绑定已经失效', scope };
+    if (candidate.episodeId && String(candidate.episodeId) !== context.episodeId) return { ok: false, reason: '候选不属于这期作品', scope };
+  } else {
+    if (context.bound) return { ok: false, reason: '有作品绑定时不走项目候选', scope };
+    if (cue.type !== 'spec_change') return { ok: false, reason: '项目候选只收规范纠正', scope };
+  }
+  const confirmed = candidate.confirmed === true || runtime?.confirmed === true;
+  return {
+    ok: true,
+    purpose: mode,
+    scope,
+    projectId: context.projectId,
+    episodeId: scope === 'episode' ? context.episodeId : '',
+    cueType: cue.type,
+    longTerm: Boolean(cue.explicitLongTerm),
+    confirmed,
+    requiresUserConfirmation: !confirmed,
+    /** 写入后仍是待确认候选，不冒充已确认的长期规则。 */
+    persistence: 'project_candidate',
+    visibility: 'candidate',
   };
 }
 
 export function buildCallInput({ projectId, episodeId, taskKind, seriesId, phase, feedback, rules, ranges, maxBytes = LIMITS.inputBytes } = {}) {
+  const context = runtimeContextOf({ projectId, episodeId, taskKind, seriesId, phase });
   const refs = { feedback: {}, rules: {} };
   const source = (Array.isArray(rules) ? rules : []).filter((record) => record && record.id);
   /** 先按本次反馈的相关性排序，再取前几条：固定取前 6 条会把真正相关的旧经验挤掉。 */
@@ -323,18 +417,21 @@ export function buildCallInput({ projectId, episodeId, taskKind, seriesId, phase
   const prioritized = selectRules(source, {
     query: feedback?.text || '',
     dimensions: dimension ? [dimension] : [],
-    taskKind,
-    seriesId,
-    phase,
+    taskKind: context.taskKind,
+    seriesId: context.seriesId,
+    phase: context.phase,
     limit: LIMITS.callRules,
   });
-  refs.feedback.u0 = feedback.messageIds[0] || '';
+  const messageIds = (Array.isArray(feedback?.messageIds) ? feedback.messageIds : [])
+    .map((id) => String(id || '')).filter(Boolean).slice(-8);
+  const sourceExcerpt = String(feedback?.sourceExcerpt || sourceExcerptOf(feedback?.text || '')).slice(0, 160);
+  refs.feedback.u0 = messageIds[0] || '';
   const project = {
-    projectId: bounded(projectId, 80),
-    ...(episodeId ? { episodeId: bounded(episodeId, 80) } : { scope: 'project' }),
-    ...(taskKind ? { taskKind } : {}),
-    ...(seriesId ? { seriesId } : {}),
-    ...(phase ? { phase } : {}),
+    projectId: bounded(context.projectId, 80),
+    ...(context.episodeId ? { episodeId: bounded(context.episodeId, 80) } : { scope: 'project' }),
+    ...(context.taskKind ? { taskKind: context.taskKind } : {}),
+    ...(context.seriesId ? { seriesId: context.seriesId } : {}),
+    ...(context.phase ? { phase: context.phase } : {}),
   };
   const rangesInput = {
     taskKind: (ranges?.taskKinds || []).slice(0, 8),
@@ -347,10 +444,12 @@ export function buildCallInput({ projectId, episodeId, taskKind, seriesId, phase
     + '只改某一处文案、换一次值这类单次局部改动不建规则。'
     + '只有明确仅限这一次、没有可执行内容、或无法判断时才输出 {"changes":[]}。';
   const feedbackHead = {
-    type: feedback.cue?.type || 'unclear',
-    longTerm: Boolean(feedback.cue?.explicitLongTerm),
-    scope: feedback.scope === 'project' ? 'project' : 'episode',
-    ...(feedback.cue?.dimension ? { dimension: feedback.cue.dimension } : {}),
+    type: feedback?.cue?.type || 'unclear',
+    longTerm: Boolean(feedback?.cue?.explicitLongTerm),
+    scope: feedback?.scope === 'project' ? 'project' : 'episode',
+    ...(feedback?.cue?.dimension ? { dimension: feedback.cue.dimension } : {}),
+    ...(sourceExcerpt ? { sourceExcerpt } : {}),
+    ...(messageIds.length ? { messageIds } : {}),
   };
   const tail = {
     allowed: {
@@ -402,7 +501,7 @@ export function buildCallInput({ projectId, episodeId, taskKind, seriesId, phase
     inputRules.push(row);
     prompt = next;
   }
-  return { system, prompt, messages: [{ role: 'user', content: prompt }], refs, rules: inputRules, bytes: Buffer.byteLength(system) + Buffer.byteLength(prompt) };
+  return { system, prompt, messages: [{ role: 'user', content: prompt }], refs, rules: inputRules, bytes: Buffer.byteLength(system) + Buffer.byteLength(prompt), sourceExcerpt, messageIds };
 }
 /** 严格解析：截断、工具调用、额外字段、超限都整批拒绝，不做第二次修复调用。 */
 export function parseOutput(text, { finish, refs, rules, ranges } = {}) {
@@ -509,6 +608,7 @@ export function validateChange(change, { refs, rules, ranges } = {}) {
       ...(applicability !== undefined ? { applicability } : {}),
       ...(conditions !== undefined ? { conditions } : {}),
       evidence,
+      ...(change.sourceExcerpt !== undefined ? { sourceExcerpt: bounded(change.sourceExcerpt, 160) } : {}),
     },
   };
 }
@@ -759,15 +859,43 @@ export function resumeLearning(learning, { by = 'management', now } = {}) {
 }
 
 /** 频次先在项目锁内扣，失败也计数；超限返回延后原因。 */
-export function quota(learning, { episodeId, now } = {}) {
+/**
+ * 滚动窗口内的调用次数：以最近一次调用时间判断，不依赖 recent 数组；
+ * 关开实验只清在途观察（recent），attempts 里的已用额度不会被开关重置。
+ */
+export function attemptWindowOf(learning, { now } = {}) {
   const at = now || Date.now();
   const ledger = learning && typeof learning === 'object' ? learning : {};
   const attempts = ledger.attempts && typeof ledger.attempts === 'object' ? ledger.attempts : {};
-  const recent = (Array.isArray(ledger.recent) ? ledger.recent : []).filter((value) => at - Date.parse(value) < LIMITS.windowMs);
-  const episodeCount = Number(attempts[episodeId]?.count || 0);
-  if (episodeCount >= LIMITS.attemptsPerEpisode) return { ok: false, reason: 'episode_limit', episodeCount, projectCount: recent.length };
-  if (recent.length >= LIMITS.attemptsPerProject) return { ok: false, reason: 'project_limit', episodeCount, projectCount: recent.length };
-  return { ok: true, episodeCount, projectCount: recent.length };
+  const recent = (Array.isArray(ledger.recent) ? ledger.recent : [])
+    .filter((value) => Number.isFinite(Date.parse(value)) && at - Date.parse(value) < LIMITS.windowMs);
+  let calls = 0;
+  let rows = 0;
+  for (const row of Object.values(attempts)) {
+    if (!row || typeof row !== 'object') continue;
+    const lastAt = Date.parse(row.lastAt || '');
+    /** 老数据没有时间戳时按仍在窗口内算，宁可少放一次也不放宽额度。 */
+    if (Number.isFinite(lastAt) && at - lastAt >= LIMITS.windowMs) continue;
+    calls += Number(row.count || 0);
+    rows += 1;
+  }
+  return { at, recent: recent.length, rows, calls, projectCount: Math.max(recent.length, calls) };
+}
+
+export function quota(learning, { episodeId, now } = {}) {
+  const window = attemptWindowOf(learning, { now });
+  const attempts = learning && learning.attempts && typeof learning.attempts === 'object' ? learning.attempts : {};
+  /** 项目层候选没有作品身份，store 用 project:<key> 记账：只受项目滚动额度约束。
+   *  同一批反馈只算一次的职责在调用方（operationId 重放），不能拿“每期两次”把整个项目卡死。 */
+  const projectScoped = !episodeId || String(episodeId).startsWith('project:');
+  const episodeCount = projectScoped ? 0 : Number(attempts[episodeId]?.count || 0);
+  if (!projectScoped && episodeCount >= LIMITS.attemptsPerEpisode) {
+    return { ok: false, reason: 'episode_limit', episodeCount, projectCount: window.projectCount };
+  }
+  if (window.projectCount >= LIMITS.attemptsPerProject) {
+    return { ok: false, reason: 'project_limit', episodeCount, projectCount: window.projectCount };
+  }
+  return { ok: true, episodeCount, projectCount: window.projectCount };
 }
 
 export function recordAttempt(learning, { episodeId, now } = {}) {

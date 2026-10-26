@@ -1059,4 +1059,196 @@ test('L05 规范或目标变了旧证据清零，来源与版本绑定留在规�
   assert.equal(retargeted.evidenceResetReason, 'target_changed');
 });
 
+test('L06 运行上下文只认传入身份，未绑定的 episodeId 不挡项目候选', () => {
+  const message = (id, text) => ({ id, source: { kind: 'user' }, content: [{ type: 'text', text }] });
+  const messages = [message('m1', '以后数据库查询都改成参数化查询')];
+  const runtime = learning.runtimeContextOf({
+    projectId: 'proj_a',
+    sessionId: 's1',
+    requestId: 'req_1',
+    anchor: { episodeId: 'e1', status: 'active', projectId: 'proj_a', taskKind: 'video', seriesId: '口播', phase: 'script' },
+  });
+  assert.deepEqual(
+    [runtime.projectId, runtime.sessionId, runtime.requestId, runtime.episodeId, runtime.bound],
+    ['proj_a', 's1', 'req_1', 'e1', true],
+  );
+  const unbound = learning.runtimeContextOf({ projectId: 'proj_a', anchor: { episodeId: 'e9', status: 'unbound', projectId: 'proj_a' } });
+  assert.equal(unbound.bound, false);
+  assert.equal(unbound.episodeId, 'e9');
+  /** 未绑定但任务里留着 episodeId：仍按项目候选收集，而不是「绑定失效」整条丢掉。 */
+  for (const anchorRow of [
+    { episodeId: 'e9', status: 'unbound', projectId: 'proj_a' },
+    { episodeId: 'e9', projectId: 'proj_a' },
+    { episodeId: 'e9', status: 'paused', projectId: 'proj_a' },
+  ]) {
+    const candidate = learning.candidateFrom({ messages, anchor: anchorRow, projectId: 'proj_a', sessionId: 's1', now: 1000 });
+    assert.ok(candidate, JSON.stringify(anchorRow));
+    assert.equal(candidate.scope, 'project', JSON.stringify(anchorRow));
+    assert.equal(candidate.episodeId, '');
+    assert.equal(candidate.projectId, 'proj_a');
+  }
+  /** 上下文之外的任何身份都不补：没传项目就是没有。 */
+  assert.equal(learning.runtimeContextOf({ anchor: { episodeId: 'e1', status: 'active' } }).projectId, '');
+  assert.equal(learning.candidateFrom({ messages }), null);
+});
+
+test('L07 sourceExcerpt 从候选到调用输入到兜底变化全程不丢', () => {
+  const message = (id, text) => ({ id, source: { kind: 'user' }, content: [{ type: 'text', text }] });
+  const text = '以后字幕都改成底部安全区，别再顶到画面中间';
+  const candidate = learning.candidateFrom({
+    messages: [message('m1', text), message('m2', '这期先这样')],
+    anchor: { episodeId: 'e1', status: 'active', projectId: 'proj_a' },
+    projectId: 'proj_a',
+    sessionId: 's1',
+    now: 1000,
+  });
+  assert.ok(candidate);
+  assert.match(candidate.sourceExcerpt, /底部安全区/);
+  const input = learning.buildCallInput({
+    projectId: 'proj_a',
+    episodeId: 'e1',
+    feedback: candidate,
+    rules: [],
+    ranges: RANGES,
+  });
+  assert.equal(input.overLimit, undefined);
+  assert.equal(input.sourceExcerpt, candidate.sourceExcerpt);
+  assert.deepEqual(input.messageIds, ['m1', 'm2']);
+  const rendered = JSON.parse(input.prompt);
+  assert.equal(rendered.feedback.sourceExcerpt, candidate.sourceExcerpt);
+  assert.deepEqual(rendered.feedback.messageIds, ['m1', 'm2']);
+  assert.deepEqual(input.refs.feedback, { u0: 'm1' });
+  /** 整理器返回空时的兜底变化也带着同一段来源。 */
+  const change = learning.pendingChangeFrom(candidate);
+  assert.equal(change.sourceExcerpt, candidate.sourceExcerpt);
+  const checked = learning.validateChange(change, { refs: input.refs, rules: [], ranges: RANGES });
+  assert.equal(checked.ok, true, checked.reason);
+  assert.equal(checked.change.sourceExcerpt, candidate.sourceExcerpt);
+  assert.equal(learning.pendingChangeFrom({ text: '   ' }), null);
+});
+
+test('L08 admissionOf 统一收集与展示，启发式推断不等于用户确认', () => {
+  const message = (id, text) => ({ id, source: { kind: 'user' }, content: [{ type: 'text', text }] });
+  const bound = learning.candidateFrom({
+    messages: [message('m1', '以后字幕都改成底部安全区')],
+    anchor: { episodeId: 'e1', status: 'active', projectId: 'proj_a', taskKind: 'video' },
+    projectId: 'proj_a',
+    sessionId: 's1',
+    now: 1000,
+  });
+  for (const purpose of ['collect', 'display']) {
+    const admission = learning.admissionOf(bound, {
+      projectId: 'proj_a',
+      sessionId: 's1',
+      anchor: { episodeId: 'e1', status: 'active', projectId: 'proj_a' },
+    }, purpose);
+    assert.equal(admission.ok, true, admission.reason);
+    assert.equal(admission.scope, 'episode');
+    assert.equal(admission.episodeId, 'e1');
+    assert.equal(admission.confirmed, false);
+    assert.equal(admission.requiresUserConfirmation, true);
+    assert.equal(admission.persistence, 'project_candidate');
+    assert.equal(admission.visibility, 'candidate');
+  }
+  /** 明确长期要求也只是候选：用户说过“以后”，不等于点过“记住”。 */
+  const longTerm = learning.candidateFrom({
+    messages: [message('m1', '以后数据库查询都改成参数化查询')],
+    anchor: null,
+    projectId: 'proj_a',
+    now: 1000,
+  });
+  assert.equal(learning.admissionOf(longTerm, { projectId: 'proj_a' }).confirmed, false);
+  /** 未绑定但带着 episodeId 的任务：作品候选失效，项目候选照常准入。 */
+  const unbound = learning.admissionOf(bound, {
+    projectId: 'proj_a',
+    anchor: { episodeId: 'e1', status: 'unbound', projectId: 'proj_a' },
+  });
+  assert.equal(unbound.ok, false);
+  assert.equal(unbound.reason, '作品绑定已经失效');
+  assert.equal(learning.admissionOf({ ...longTerm }, {
+    projectId: 'proj_a',
+    anchor: { episodeId: 'e9', status: 'unbound', projectId: 'proj_a' },
+  }).ok, true);
+  assert.equal(learning.admissionOf({ ...bound, confirmed: true }, {
+    projectId: 'proj_a',
+    anchor: { episodeId: 'e1', status: 'active', projectId: 'proj_a' },
+  }).requiresUserConfirmation, false);
+  assert.equal(learning.admissionOf(bound, { projectId: 'proj_a', anchor: { episodeId: 'e1', status: 'active' } }, 'commit').ok, false);
+  assert.equal(learning.admissionOf(null).ok, false);
+  assert.equal(learning.admissionOf(bound, { projectId: 'proj_b', anchor: { episodeId: 'e1', status: 'active' } }).ok, false);
+});
+
+test('L09 项目滚动额度与单次去重分离，开关不重置已用额度', () => {
+  let ledger = {};
+  const base = Date.parse('2026-01-01T00:00:00.000Z');
+  /** 同一期最多两次：去重按 episode 行记，滚动 recent 清空也不放宽。 */
+  ledger = learning.recordAttempt(ledger, { episodeId: 'e1', now: base });
+  assert.equal(learning.quota(ledger, { episodeId: 'e1', now: base }).ok, true);
+  ledger = learning.recordAttempt(ledger, { episodeId: 'e1', now: base + 1000 });
+  const episodeLimit = learning.quota(ledger, { episodeId: 'e1', now: base + 2000 });
+  assert.equal(episodeLimit.reason, 'episode_limit');
+  assert.equal(episodeLimit.episodeCount, learning.LIMITS.attemptsPerEpisode);
+  /** 模拟实验关开：state.applyEvolution 会清空 recent，attempts 保留。 */
+  const toggled = { ...learning.recordAttempt(ledger, { episodeId: 'e2', now: base + 3000 }), recent: [] };
+  assert.equal(learning.quota(toggled, { episodeId: 'e1', now: base + 4000 }).reason, 'episode_limit');
+  assert.equal(learning.quota(toggled, { episodeId: 'e2', now: base + 4000 }).episodeCount, 1);
+  /** 跨作品项目上限按窗口内总次数算，不依赖 recent。 */
+  let project = {};
+  for (const episodeId of ['p1', 'p1', 'p2', 'p2', 'p3', 'p3']) {
+    project = learning.recordAttempt(project, { episodeId, now: base });
+  }
+  project = { ...project, recent: [] };
+  const window = learning.attemptWindowOf(project, { now: base + 1000 });
+  assert.equal(window.projectCount, learning.LIMITS.attemptsPerProject);
+  assert.equal(learning.quota(project, { episodeId: 'p4', now: base + 1000 }).reason, 'project_limit');
+  /** 只按窗口自然衰减，不因开关或去重重置。 */
+  const later = base + learning.LIMITS.windowMs + 1;
+  assert.equal(learning.quota(project, { episodeId: 'p4', now: later }).ok, true);
+  assert.equal(learning.attemptWindowOf(project, { now: later }).projectCount, 0);
+  /** 项目层候选按 project:<key> 记账：不能被“每期两次”终身卡死，只受滚动项目额度约束。 */
+  let pseudo = {};
+  for (let index = 0; index < 3; index += 1) pseudo = learning.recordAttempt(pseudo, { episodeId: 'project:proj_a', now: base + index });
+  const pseudoQuota = learning.quota(pseudo, { episodeId: 'project:proj_a', now: base + 10 });
+  assert.equal(pseudoQuota.ok, true, JSON.stringify(pseudoQuota));
+  assert.equal(pseudoQuota.episodeCount, 0);
+  assert.equal(learning.quota(pseudo, { episodeId: '', now: base + 10 }).ok, true);
+  /** 两条不同作品各自占一次额度，单条去重不合并跨期调用。 */
+  const distinct = learning.recordAttempt(learning.recordAttempt({}, { episodeId: 'q1', now: base }), { episodeId: 'q2', now: base });
+  assert.equal(learning.quota(distinct, { episodeId: 'q3', now: base }).projectCount, 2);
+});
+
+test('L10 整理器规则先稳定排序再取 8', () => {
+  const rules = [];
+  for (let index = 0; index < 9; index += 1) {
+    rules.push({
+      id: `mem_${index}`,
+      status: 'active',
+      learning: { state: 'pending', updatedAt: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString() },
+      updated: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
+    });
+  }
+  /** 真正可用的旧经验排在输入最后：先截断就会丢掉它。 */
+  rules.push({
+    id: 'mem_star',
+    status: 'active',
+    learning: { state: 'active', lastUsedAt: '2025-12-31T00:00:00.000Z', updatedAt: '2025-01-01T00:00:00.000Z' },
+    updated: '2025-01-01T00:00:00.000Z',
+  });
+  assert.equal(rules.slice(0, 8).some((row) => row.id === 'mem_star'), false);
+  const ordered = learning.orderOrganizerRules(rules);
+  assert.equal(ordered.length, learning.LIMITS.organizerRules);
+  assert.equal(ordered[0].id, 'mem_star');
+  assert.equal(ordered.some((row) => row.id === 'mem_star'), true);
+  /** 同样输入换个顺序结果一样；同状态按最近使用、再按时间、最后按 id。 */
+  const shuffled = [...rules].reverse();
+  assert.deepEqual(learning.orderOrganizerRules(shuffled).map((row) => row.id), ordered.map((row) => row.id));
+  const sameState = [
+    { id: 'b', learning: { state: 'active', updatedAt: '2025-01-01T00:00:00.000Z' } },
+    { id: 'a', learning: { state: 'active', lastUsedAt: '2026-01-01T00:00:00.000Z', updatedAt: '2025-01-01T00:00:00.000Z' } },
+    { id: 'c', learning: { state: 'active', updatedAt: '2025-01-01T00:00:00.000Z' } },
+  ];
+  assert.deepEqual(learning.orderOrganizerRules(sameState, { limit: 2 }).map((row) => row.id), ['a', 'b']);
+  assert.equal(learning.orderOrganizerRules([], { limit: 3 }).length, 0);
+});
+
 console.log(`learning.test.mjs: ${passed} passed`);

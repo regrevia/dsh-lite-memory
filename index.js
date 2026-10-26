@@ -886,6 +886,14 @@ export function apply(ctx, config) {
 
   const windowOf = (agent) => windows.get(agentKey(agent)) || null;
 
+  /** 自动注入账本：普通段与实验段共用 3 条 / 1200 字节，量的是拼接后的完整文本。 */
+  const emptyAutoBudget = () => ({
+    normalText: '', experimentText: '',
+    normalCards: 0, experimentCards: 0,
+    cards: 0, cardBytes: 0, experimentBytes: 0, totalBytes: 0,
+  });
+
+
   /** 预算按规范化 JSON 字节算：转义、中文、换行都算进模型真正收到的内容。 */
   const jsonBytes = (value) => Buffer.byteLength(JSON.stringify(value));
 
@@ -931,6 +939,11 @@ export function apply(ctx, config) {
   }
 
   /** 两层都算：任何一层换库、换代或清空，之前准备的卡片都要失效。 */
+  /**
+   * 同一请求的召回快照只要内容没变就保持原样：命中次数、使用时间这类使用记录
+   * 不参与指纹，否则模型多读一次就会触发重投影。真正改变应看条目内容版本、
+   * 启停/控制代号与自进化代号。
+   */
   function fingerprintOf(scope) {
     try {
       return [scope, globalScopeView()].map((source) => {
@@ -938,7 +951,11 @@ export function apply(ctx, config) {
         const meta = index.__meta || {};
         const evolutionEpoch = index.__evolution && index.__evolution.epoch ? index.__evolution.epoch : '';
         const controlEpoch = index.__control && index.__control.epoch ? index.__control.epoch : '';
-        return `${index.scope}:${meta.storeId || ''}:${index.generation}:${index.epoch}:${evolutionEpoch}:${controlEpoch}`;
+        const content = (index.entries || [])
+          .map((entry) => `${entry.id}:${entry.revision || 1}:${entry.status || 'active'}:${entry.updated || ''}:${entry.topicKey || ''}`)
+          .sort()
+          .join(',');
+        return `${index.scope}:${meta.storeId || ''}:${evolutionEpoch}:${controlEpoch}:${content}`;
       }).join('|');
     } catch {
       return '';
@@ -978,45 +995,56 @@ export function apply(ctx, config) {
       runtime: runtime || (win && win.runtime) || null,
       task: runtime && runtime.task ? runtime.task : null,
     });
-    const headerBytes = Buffer.byteLength(RECALL_HEADER);
-    /** 普通记忆与实验规则共用一份自动注入预算：张数和字节一起算。 */
+    /** 普通记忆与实验规则共用一份自动注入预算：总条数和最终完整文本字节一起算。 */
     const auto = win && win.autoBudget ? win.autoBudget : null;
-    const baseCards = auto ? (auto.cards || 0) : 0;
-    let used = headerBytes + (auto ? (auto.cardBytes || 0) : 0);
     /** 卡片上限含包装；共享请求账本也要把标题行算进去，不能只算卡片行。 */
     let headerCharged = win ? win.recallHeader === true : false;
     const lines = [];
     const cards = [];
     for (const row of ranked) {
-      const usedCards = baseCards + cards.length;
+      const usedCards = cards.length + (auto ? (auto.experimentCards || 0) : 0);
       if (usedCards >= view.CARD.max) break;
       const card = view.cardOf(row.record, layerOf.get(row.record.id));
       if (card.scope === 'project') card.scopeName = projectNameOf(scope);
       const line = renderRecallCard(card);
-      const size = Buffer.byteLength(`\n${line}`);
-      if (used + size > view.CARD.bytes) continue;
-      const revision = card.revision || 1;
-      const already = win ? win.provided.get(card.id) === revision : false;
-      if (win && !already) {
-        const cost = size + (headerCharged ? 0 : headerBytes);
-        if (!affordable(win, cost)) continue;
-        win.bytes += cost;
-        win.provided.set(card.id, revision);
-        if (!headerCharged) {
-          headerCharged = true;
-          win.recallHeader = true;
-        }
+      const nextText = `${RECALL_HEADER}\n${[...lines, line].join('\n')}`;
+      if (auto) {
+        /** 实验段可能先渲染：组装成最终两段再量，超了就跳过这张，不把标题留在模型侧。 */
+        const admitted = admitAuto(win, {
+          normal: nextText,
+          experiment: auto.experimentText || '',
+          normalCards: cards.length + 1,
+          experimentCards: auto.experimentCards || 0,
+        });
+        if (!admitted.ok) continue;
+      } else {
+        const size = Buffer.byteLength(nextText);
+        if (size > view.CARD.bytes) continue;
+        const cost = Buffer.byteLength(`\n${line}`) + (headerCharged ? 0 : Buffer.byteLength(RECALL_HEADER));
+        if (win && !affordable(win, cost)) continue;
+        if (win) win.bytes += cost;
       }
-      used += size;
+      const revision = card.revision || 1;
+      if (win) win.provided.set(card.id, revision);
+      if (win && !headerCharged) {
+        headerCharged = true;
+        win.recallHeader = true;
+      }
       lines.push(line);
       cards.push({ id: card.id, revision, scope: card.scope, title: card.title });
     }
+    const finalText = `${RECALL_HEADER}\n${lines.join('\n')}`;
     if (auto) {
-      auto.cards = baseCards + cards.length;
-      auto.cardBytes = used;
+      /** 没有任何普通卡片时也要把已有实验段记账成当前状态。 */
+      admitAuto(win, {
+        normal: lines.length ? finalText : (auto.normalText || ''),
+        experiment: auto.experimentText || '',
+        normalCards: cards.length,
+        experimentCards: auto.experimentCards || 0,
+      });
     }
     if (!cards.length) return null;
-    return { text: `${RECALL_HEADER}\n${lines.join('\n')}`, cards, bytes: used, query };
+    return { text: finalText, cards, bytes: Buffer.byteLength(finalText), query };
   }
 
   /* ---------------- 项目自进化：任务锚点、读取决策、上下文解析 ---------------- */
@@ -1064,20 +1092,69 @@ export function apply(ctx, config) {
       .join('、');
   }
 
-  /** 实验内容单独记账：同一请求里再次渲染只补差额，不重复占满预算。 */
-  function chargeExperiment(win, text) {
+  /**
+   * 自动注入只有一份预算：普通卡片与实验规则合计最多 3 条 / 1200 字节。
+   * 这里按 provider 最终会看到的完整文本量字节（含标题行、ID、换行和两段之间的空行），
+   * 先组装再测量，不能只量卡片正文再拼。
+   */
+  function autoTextOf(win, normal, experiment) {
+    const auto = win && win.autoBudget ? win.autoBudget : null;
+    const n = normal === undefined ? String(auto?.normalText || '') : String(normal || '');
+    const e = experiment === undefined ? String(auto?.experimentText || '') : String(experiment || '');
+    return { normal: n, experiment: e, text: [e, n].filter(Boolean).join('\n\n') };
+  }
+
+  function autoBytesOf(win, normal, experiment) {
+    return Buffer.byteLength(autoTextOf(win, normal, experiment).text);
+  }
+
+  /**
+   * 原子准入：量的是最终完整文本和总条数；通过才写入预算账本。
+   * 任何一段超限都整段回退，不截半句前提、不把标题留在模型侧。
+   */
+  function admitAuto(win, { normal, experiment, normalCards, experimentCards } = {}) {
+    if (!win || !win.autoBudget) return { ok: false, bytes: 0 };
+    const auto = win.autoBudget;
+    const parts = autoTextOf(win, normal, experiment);
+    const cards = (normalCards === undefined ? (auto.normalCards || 0) : normalCards)
+      + (experimentCards === undefined ? (auto.experimentCards || 0) : experimentCards);
+    const bytes = Buffer.byteLength(parts.text);
+    if (cards > view.CARD.max || bytes > view.CARD.bytes) return { ok: false, bytes, cards };
+    const previousTotal = Number(auto.totalBytes || 0);
+    if (!affordable(win, bytes - previousTotal)) return { ok: false, bytes, cards };
+    auto.normalText = parts.normal;
+    auto.experimentText = parts.experiment;
+    auto.normalCards = normalCards === undefined ? (auto.normalCards || 0) : normalCards;
+    auto.experimentCards = experimentCards === undefined ? (auto.experimentCards || 0) : experimentCards;
+    auto.cards = cards;
+    auto.cardBytes = Buffer.byteLength(parts.normal);
+    auto.experimentBytes = Buffer.byteLength(parts.experiment);
+    auto.totalBytes = bytes;
+    win.bytes += bytes - previousTotal;
+    return { ok: true, bytes, cards };
+  }
+
+  /** 实验内容单独记账：同一请求里再次渲染替换旧段，只补差额。 */
+  function chargeExperiment(win, text, cards = 1) {
     if (!text) return '';
+    const auto = win && win.autoBudget ? win.autoBudget : null;
+    if (auto) {
+      const admitted = admitAuto(win, {
+        normal: auto.normalText || '',
+        experiment: text,
+        normalCards: auto.normalCards || 0,
+        experimentCards: cards,
+      });
+      if (!admitted.ok) return '';
+      return text;
+    }
     const bytes = Buffer.byteLength(`\n\n${text}`);
     const previous = win ? (win.experimentBytes || 0) : 0;
-    const auto = win && win.autoBudget ? win.autoBudget : null;
-    /** 自动注入总预算：卡片已经占掉的部分要先扣，实验规则只拿剩下的。 */
-    const cap = auto ? Math.max(0, view.CARD.bytes - (auto.cardBytes || 0)) : EXPERIMENT_BYTES;
-    if (bytes > cap) return '';
+    if (bytes > EXPERIMENT_BYTES) return '';
     if (win) {
       if (!affordable(win, bytes - previous)) return '';
       win.bytes += bytes - previous;
       win.experimentBytes = bytes;
-      if (auto) auto.experimentBytes = bytes;
     }
     return text;
   }
@@ -1159,9 +1236,14 @@ export function apply(ctx, config) {
       return chargeExperiment(win, '这些实验规则互相冲突，先按用户这次说的做，别叠加对立的规则。');
     }
     const parts = { header: EXPERIMENT_RULES_HEADER, items: [], tail: held && held.contextId ? `\ncontextId=${held.contextId}` : '' };
-    /** 与普通记忆共用 3 张卡片：普通卡片先占掉的位子，实验规则不能再拿。 */
+    /** 与普通记忆共用 3 张卡片 / 1200 字节：普通卡片先占掉的位子和字节，实验规则不能再拿。 */
     const auto = win && win.autoBudget ? win.autoBudget : null;
-    const cardCap = auto ? Math.max(0, view.CARD.max - (auto.cards || 0)) : view.CARD.max;
+    const cardCap = auto
+      ? Math.max(0, view.CARD.max - (auto.normalCards || 0) - (auto.experimentCards || 0))
+      : view.CARD.max;
+    const autoCap = auto
+      ? Math.max(0, view.CARD.bytes - Buffer.byteLength(auto.normalText || '') - 2)
+      : EXPERIMENT_BYTES;
     let used = Buffer.byteLength(EXPERIMENT_RULES_HEADER) + 1;
     for (const record of matched.slice(0, cardCap)) {
       const body = String(record.body || '');
@@ -1175,7 +1257,7 @@ export function apply(ctx, config) {
         ? `- 「${record.title}」${conditions ? `（${conditions}）` : ''} · ${record.id}：${body}${check}`
         : `- 「${record.title}」 · ${record.id}（用途：${record.summary || record.title}；要用时 memory_read 取正文）`;
       const size = Buffer.byteLength(`\n${line}`);
-      if (used + size > EXPERIMENT_BYTES) break;
+      if (used + size > autoCap) break;
       used += size;
       const trialLearning = record.learning && typeof record.learning === 'object' ? record.learning : {};
       const trialUntil = trialLearning.state === 'trial' && Number.isFinite(Date.parse(String(trialLearning.trialUntil || '')))
@@ -1189,14 +1271,10 @@ export function apply(ctx, config) {
     }
     if (!parts.items.length) return '';
     /** 先按最终整段文本过预算，再登记可发布内容；没通过就一条都不留。 */
-    const admitted = chargeExperiment(win, experimentTextFrom(parts));
+    const admitted = chargeExperiment(win, experimentTextFrom(parts), parts.items.length);
     if (!admitted) {
       if (held) { held.experimentParts = null; held.injectedIds = []; held.validUntil = ''; }
       return '';
-    }
-    if (auto) {
-      auto.cards = (auto.cards || 0) + parts.items.length;
-      auto.cardBytes = (auto.cardBytes || 0) + Buffer.byteLength(`\n\n${admitted}`);
     }
     if (held) held.experimentParts = parts;
     /** 兼容旧读取点：整体最早到期只取本轮真正注入的条目，不再被无关试验拖下水。 */
@@ -1211,7 +1289,7 @@ export function apply(ctx, config) {
    * 一次真人请求只路由一次：不管自进化开没开，都先建独立的任务上下文。
    * 普通记忆按这个上下文判适用；实验规则只是在这个上下文上再加一层可用性。
    */
-  function runtimeFor(scope, { sessionId, query, batchKey, messageIds }) {
+  function runtimeFor(scope, { sessionId, query, batchKey, messageIds, autoRoute = true }) {
     if (!batchKey) return null;
     let status = null;
     try { status = evolutionStatus(scope); } catch { status = null; }
@@ -1221,16 +1299,28 @@ export function apply(ctx, config) {
     try { tasks = taskState(scope); } catch { tasks = null; }
     tasks = tasks && typeof tasks === 'object' ? tasks : {};
     const ranges = rangesOf(scope);
-    const routed = anchor.routeTask(tasks, {
-      projectId: scope.key,
-      sessionId,
-      batchKey,
-      messageIds,
-      query,
-      registeredSeries: ranges.series,
-      defaults: tasks.defaults,
-      now: Date.now(),
-    });
+    /**
+     * 工具模式不自动路由：上下文照样要有，但不能因为一句点名就改任务状态；
+     * 真正的绑定留给 memory_search bindForRequest，绑定后状态是 proposed。
+     */
+    const routed = autoRoute
+      ? anchor.routeTask(tasks, {
+        projectId: scope.key,
+        sessionId,
+        batchKey,
+        messageIds,
+        query,
+        registeredSeries: ranges.series,
+        defaults: tasks.defaults,
+        now: Date.now(),
+      })
+      : (() => {
+        const sessionAnchor = tasks.sessions && tasks.sessions[sessionId] ? tasks.sessions[sessionId] : null;
+        const episode = sessionAnchor && sessionAnchor.episodeId && tasks.episodes
+          ? tasks.episodes[sessionAnchor.episodeId] || null
+          : null;
+        return { tasks, anchor: sessionAnchor, episode, changed: false, decision: { kind: 'none', reason: 'tool_only' } };
+      })();
     if (routed.changed) {
       /** 落盘失败也不能取消本轮任务判断：进程内上下文仍然有效，只是不留任务历史。 */
       saveTaskState(scope, routed.tasks, { operationId: `task_${batchKey}` });
@@ -1247,7 +1337,8 @@ export function apply(ctx, config) {
       boundForRequest: false,
     });
     const contextId = anchor.contextIdFor(scope.key, batchKey, crypto.randomUUID().slice(0, 8));
-    const episode = routed.tasks && routed.tasks.episodes ? routed.tasks.episodes[routed.anchor.episodeId] : null;
+    const episode = routed.episode
+      || (routed.anchor && routed.tasks && routed.tasks.episodes ? routed.tasks.episodes[routed.anchor.episodeId] : null);
     let epoch = '';
     try { epoch = String(status && status.epoch ? status.epoch : ''); } catch { epoch = ''; }
     const anchorTask = routed.anchor || {};
@@ -1474,7 +1565,7 @@ export function apply(ctx, config) {
           summary: { type: 'string' },
           when: { type: 'string' },
           summaryShortened: { type: 'boolean' },
-          fullTextInBody: { type: 'boolean' },
+          fullTextSaved: { type: 'boolean' },
           revision: { type: 'integer' },
           merged: { type: 'boolean' },
           changed: { type: 'boolean' },
@@ -1508,7 +1599,7 @@ export function apply(ctx, config) {
           ? `memory · 需要确认：「${value.title}」与已有条目相近${value.crossLayer ? '（在另一层）' : ''}${value.sameTopic ? '（同一主题槽位）' : ''}\n${value.similar}\n要更新它，用 id 重存；确实是另一条，加 resolution="distinct"`
           : value.changed === false
             ? `memory · unchanged ${withTag(value, `"${value.title}"`)} · ${value.id}`
-            : `memory · ${value.merged ? 'merged' : 'saved'} ${withTag(value, `"${value.title}"`)}${value.when ? `（${value.when}）` : ''} · ${value.id}${value.similar ? ` · 相近：${value.similar}` : ''}${value.archived ? ` · 已归档「${value.archived}」腾位` : ''}${value.fullTextInBody ? ' · 摘要超过 60 字，完整原句已存进正文' : ''}`,
+            : `memory · ${value.merged ? 'merged' : 'saved'} ${withTag(value, `"${value.title}"`)}${value.when ? `（${value.when}）` : ''} · ${value.id}${value.similar ? ` · 相近：${value.similar}` : ''}${value.archived ? ` · 已归档「${value.archived}」腾位` : ''}${value.fullTextSaved ? ' · 完整原句已另存' : ''}`,
       }],
     },
     execute: async (args, execution) => {
@@ -1587,7 +1678,8 @@ export function apply(ctx, config) {
         summary: saved.record.summary,
         when: saved.record.when || '',
         summaryShortened: Boolean(saved.draft?.summaryShortened),
-        fullTextInBody: Boolean(saved.draft?.fullTextInBody),
+        fullTextSaved: Boolean(saved.draft?.fullTextSaved ?? saved.draft?.fullTextInBody),
+        summaryShortened: Boolean(saved.draft?.summaryShortened),
         revision: saved.record.revision || 1,
         merged: saved.merged,
         changed: !saved.noop,
@@ -2111,7 +2203,7 @@ export function apply(ctx, config) {
         }
         if (fingerprint !== previous.fingerprint) {
           const win = windowOf(agent);
-          if (win) win.autoBudget = { cards: 0, cardBytes: 0, experimentBytes: 0 };
+          if (win) win.autoBudget = emptyAutoBudget();
           const snapshot = projectRecall(scope, previous.query, win && win.runtime ? win.runtime.context : view.trustedContext(scope, {}), win, win && win.runtime ? win.runtime : null);
           let experimentText = '';
           if (win && win.experiment) {
@@ -2140,15 +2232,11 @@ export function apply(ctx, config) {
         bytes: win.bytes, bodies: win.bodies, reads: win.reads,
         provided: new Map(win.provided), readBodies: new Map(win.readBodies),
         recallHeader: win.recallHeader, experimentBytes: win.experimentBytes,
+        autoBudget: win.autoBudget ? JSON.parse(JSON.stringify(win.autoBudget)) : null,
       } : null;
       /** 工具模式也要记下本轮真人原话：只用于核对绑定，不自动注入。 */
       const query = view.newestUserQuery(fresh).slice(0, RECALL_QUERY_CHARS);
       if (win && query) win.query = query;
-
-      if (recallMode() !== 'adaptive') {
-        clearPrepared(agent);
-        return decision;
-      }
 
       if (!query) {
         clearPrepared(agent);
@@ -2164,14 +2252,23 @@ export function apply(ctx, config) {
         clearPrepared(agent);
         return decision;
       }
+      const batchKey = anchor.requestBatchKey(ids);
+      /**
+       * 工具模式也必须先有本请求上下文：memory_search/read/links 靠同一个 contextId 判项目和任务，
+       * 不能等到自动召回分支才建，否则工具模式永远拿不到可核对的任务。
+       */
+      const runtime = runtimeFor(scope, { sessionId, query, batchKey, messageIds: ids, autoRoute: recallMode() === 'adaptive' });
+      if (win && runtime) win.runtime = runtime.held;
+      if (recallMode() !== 'adaptive') {
+        clearPrepared(agent);
+        return decision;
+      }
       const context = view.trustedContext(scope, {});
       const fingerprint = fingerprintOf(scope);
       const controlEpoch = controlStatus(scope).epoch || '';
-      const batchKey = anchor.requestBatchKey(ids);
       dropStaleCandidate(sessionId, batchKey);
       /** 任务上下文独立于自进化开关：普通记忆按当前任务判适用，实验规则再叠一层可用性。 */
-      const runtime = runtimeFor(scope, { sessionId, query, batchKey, messageIds: ids });
-      const auto = { cards: 0, cardBytes: 0, experimentBytes: 0 };
+      const auto = emptyAutoBudget();
       if (win) win.autoBudget = auto;
       const experiment = runtime ? experimentFor(scope, runtime, win) : null;
       const recalledContext = runtime ? runtime.held.context : context;
@@ -2189,6 +2286,7 @@ export function apply(ctx, config) {
         win.readBodies = budgetBefore.readBodies;
         win.recallHeader = budgetBefore.recallHeader;
         win.experimentBytes = budgetBefore.experimentBytes;
+        win.autoBudget = budgetBefore.autoBudget || emptyAutoBudget();
         win.experiment = null;
         win.contexts.clear();
       };
@@ -2316,6 +2414,13 @@ export function apply(ctx, config) {
     const route = routeForSession(session);
     if (!route) return;
     const candidate = pending.candidate;
+    /** 候选进入整理前再走一次统一准入：项目/作品身份、作用域与反馈类型都对上才花配额。 */
+    const admission = learning.admissionOf(candidate, {
+      projectId: scope.key,
+      sessionId: candidate.sessionId,
+      anchor: pending.held?.anchor || null,
+    }, 'collect');
+    if (!admission || admission.ok !== true) return;
     const operationId = `learn_${crypto.createHash('sha256')
       .update(`${scope.key}|${candidate.episodeId}|${candidate.messageIds.join(',')}`)
       .digest('hex').slice(0, 16)}`;
@@ -2389,6 +2494,7 @@ export function apply(ctx, config) {
         sessionId: candidate.sessionId,
         messageIds: candidate.messageIds,
         feedbackText: candidate.text,
+        sourceExcerpt: candidate.sourceExcerpt || learning.sourceExcerptOf(candidate.text),
         dimension: candidate.cue?.dimension || '',
         changes,
         preparedTargets,
