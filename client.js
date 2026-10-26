@@ -315,6 +315,7 @@ window.__ModuleLoader__.load({
       return h('div', { 'data-tool': props.toolName, style: ROW }, h('span', { style: DOT }, '·'), h('span', { style: LABEL }, label), button);
     };
 
+    const scopeTag = (scope) => (scope === 'global' ? '[全局]' : '[项目]');
     const versionLine = (shown) => {
       const scope = shown.scopeLabel || (shown.scope === 'global' ? '全局' : '项目');
       const archived = shown.status === 'archived' ? ' · 已归档' : '';
@@ -389,7 +390,7 @@ window.__ModuleLoader__.load({
         'aria-label': `查看记忆 ${item.title || item.id}`,
         title: item.title || item.id,
         style: ITEM, // ui-copy-ignore
-      }, `${item.title || item.id}${item.origin === 'project_evolution' ? ' · 实验' : ''}`)) : [];
+      }, `${scopeTag(item.scope)} ${item.title || item.id}${item.origin === 'project_evolution' ? ' · 实验' : ''}`)) : [];
       const detail = shown && shown.ref && items.some((item) => item.id === shown.id && item.revision === shown.ref.revision)
         ? h('div', { style: BODY },
           shown.loading ? '读取中' : null,
@@ -1570,8 +1571,8 @@ window.__ModuleLoader__.load({
       if (!sessionId && refs.length === 0) return null;
       if (groups.found.length === 0 && groups.provided.length === 0 && groups.update.length === 0) return null;
       return h('div', { style: TAIL },
-        h(RefSection, { label: '检索发现', items: groups.found, sessionId, turnKey: turn }),
-        h(RefSection, { label: '已提供正文', items: groups.provided, sessionId, turnKey: turn }),
+        h(RefSection, { label: '搜索命中', items: groups.found, sessionId, turnKey: turn }),
+        h(RefSection, { label: '读过正文', items: groups.provided, sessionId, turnKey: turn }),
         h(RefSection, { label: '本轮更新', items: groups.update, sessionId, turnKey: turn }),
       );
     };
