@@ -148,10 +148,31 @@ test('P00 作品验收不直接形成长期规则', () => {
   assert.equal(parsed({ ...NEW_CHANGE, feedbackType: 'artifact_accept' }).ok, false);
 });
 
-test('P00 只有已绑定作品的人类消息进入候选', () => {
+test('P00 长期声明本身就算规范变化', () => {
+  const cue = learning.classifyFeedback('这个项目默认用 pnpm');
+  assert.equal(cue.worth, true);
+  assert.equal(cue.type, 'spec_change');
+  assert.equal(cue.explicitLongTerm, true);
+});
+
+test('P00 未绑定的作品可以回落到项目候选', () => {
   const human = (id, text) => ({ id, source: { kind: 'user' }, content: [{ type: 'text', text }] });
   const base = { episodeId: 'ep_x', status: 'active', updatedAt: '2026-01-01T00:00:00.000Z' };
   assert.equal(learning.candidateFrom({ messages: [human('m1', '以后开头先给结论')], anchor: { ...base, status: 'unbound' } }), null);
+  const projectCandidate = learning.candidateFrom({
+    messages: [human('m2', '以后这个项目默认用 pnpm')],
+    anchor: { ...base, status: 'unbound' }, sessionId: 's', projectId: 'p',
+  });
+  assert.equal(projectCandidate.scope, 'project');
+  assert.equal(projectCandidate.episodeId, '');
+  assert.equal(projectCandidate.expectedTarget.scope, 'project');
+  const correction = learning.candidateFrom({
+    messages: [human('m3', '这里改成蓝色')], anchor: { ...base, status: 'unbound' }, projectId: 'p',
+  });
+  assert.equal(correction.scope, 'project');
+  assert.equal(learning.candidateFrom({
+    messages: [human('m4', '这次这里改成蓝色')], anchor: { ...base, status: 'unbound' }, projectId: 'p',
+  }), null);
   assert.equal(learning.candidateFrom({ messages: [{ id: 'a1', source: { kind: 'assistant' }, content: '收到' }], anchor: base }), null);
   const candidate = learning.candidateFrom({ messages: [human('m1', '以后开头都先给结论，别再铺垫')], anchor: base, sessionId: 's', projectId: 'p' });
   assert.equal(candidate.episodeId, 'ep_x');
@@ -187,6 +208,18 @@ test('B01 调用输入不超过 8 KiB 且只有本地引用', () => {
   assert.equal(input.refs.rules.r0, 'mem_0');
   assert.equal(input.messages.length, 1);
   assert.doesNotMatch(input.system, /工具调用/);
+});
+
+test('B01 项目层整理输入不带作品身份', () => {
+  const input = learning.buildCallInput({
+    projectId: 'p',
+    episodeId: '',
+    feedback: { text: '以后这个项目默认用 pnpm', messageIds: ['m1'], cue: { type: 'spec_change', explicitLongTerm: true }, scope: 'project' },
+    rules: [],
+  });
+  assert.match(input.prompt, /"scope":"project"/);
+  assert.doesNotMatch(input.prompt, /"episodeId"/);
+  assert.match(input.system, /待确认候选/);
 });
 
 test('B01 截断、工具调用、额外字段整批拒绝', () => {
@@ -615,6 +648,29 @@ test('B06 失败调用只留回执不写正文', () => {
   assert.equal(receipt.status, 'failed');
   assert.equal(receipt.usage.known, false);
   assert.equal(receipt.reason, '整理没有返回内容');
+});
+
+test('P07 项目层候选无需作品也能落规则', () => {
+  const scope = fresh('project-rule');
+  enable(scope);
+  const started = store.beginLearningAttempt(scope, { episodeId: '', operationId: 'start_project' });
+  assert.equal(started.ok, true, started.reason);
+  const check = parsed(NEW_CHANGE);
+  assert.equal(check.ok, true, check.reason);
+  const result = store.commitLearning(scope, {
+    operationId: 'learn_project',
+    epoch: started.epoch,
+    episodeId: '',
+    projectId: scope.key,
+    sessionId: 's1',
+    messageIds: ['m1'],
+    changes: check.changes,
+    preparedTargets: [],
+  });
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(ruleRows(scope).length, 1);
+  assert.equal(ruleRows(scope)[0].ownerProjectId, scope.key);
+  assert.equal(ruleRows(scope)[0].learning.state, 'trial');
 });
 
 test('P07 两条同批变化一次写入', () => {

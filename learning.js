@@ -71,6 +71,10 @@ export function classifyFeedback(input) {
   if (has(EXPLICIT_ACCEPT, text) && !has(CORRECTION, text)) {
     return { worth: true, type: dimension ? 'aspect_accept' : 'artifact_accept', longTerm, explicitLongTerm: longTerm, exception, negative: false, dimension };
   }
+  /** 不是纠正句也可以立规范：“这个项目默认用 pnpm”这类声明本身就是长期要求。 */
+  if (longTerm && !exception) {
+    return { worth: true, type: 'spec_change', longTerm: true, explicitLongTerm: true, exception: false, negative, dimension };
+  }
   if (exception && has(CORRECTION, text)) {
     return { worth: true, type: 'task_exception', longTerm: false, explicitLongTerm: false, exception: true, negative, dimension };
   }
@@ -107,12 +111,15 @@ function humanFeedback(messages) {
 }
 
 /**
- * 有作品绑定就走作品候选；没有绑定、但有明确长期要求的项目反馈，
+ * 有作品绑定就走作品候选；没有绑定、但属于同一项目的规范纠正或长期要求，
  * 仍可形成 project 作用域的 pending 候选。跨项目一律不接收，也不把整个项目绑到单条栏目。
  */
 export function candidateFrom({ messages, anchor, sessionId, projectId, now } = {}) {
-  const bound = Boolean(anchor && anchor.episodeId);
-  if (bound && !BOUND_STATUSES.includes(anchor.status)) return null;
+  /**
+   * 只有仍可用的作品绑定才算作品候选。任务状态里常常保留一个 unbound 的 episodeId，
+   * 旧逻辑见到 episodeId 就直接拒绝，导致这类项目永远走不到项目层候选。
+   */
+  const bound = Boolean(anchor && anchor.episodeId) && BOUND_STATUSES.includes(anchor.status);
   if (anchor?.projectId && projectId && String(anchor.projectId) !== String(projectId)) return null;
   const { ids, text } = humanFeedback(messages);
   if (!text) return null;
@@ -148,7 +155,8 @@ export function candidateFrom({ messages, anchor, sessionId, projectId, now } = 
     };
   }
   if (!projectId) return null;
-  if (cue.type !== 'spec_change' || !cue.explicitLongTerm) return null;
+  /** 没有作品绑定时，规范纠正同样按项目候选收集；单次局部改动交给整理器判空，不再用电平词一刀切。 */
+  if (cue.type !== 'spec_change') return null;
   return {
     projectId,
     sessionId: String(sessionId || ''),
@@ -302,7 +310,7 @@ export function buildCallInput({ projectId, episodeId, taskKind, seriesId, phase
   refs.feedback.u0 = feedback.messageIds[0] || '';
   const project = {
     projectId: bounded(projectId, 80),
-    episodeId: bounded(episodeId, 80),
+    ...(episodeId ? { episodeId: bounded(episodeId, 80) } : { scope: 'project' }),
     ...(taskKind ? { taskKind } : {}),
     ...(seriesId ? { seriesId } : {}),
     ...(phase ? { phase } : {}),
@@ -312,13 +320,26 @@ export function buildCallInput({ projectId, episodeId, taskKind, seriesId, phase
     seriesId: (ranges?.series || []).slice(0, 8),
     phase: PHASES.slice(),
   };
-  const system = '你是项目记忆整理器，只输出 JSON。只能依据给定反馈修改已有规则或新建一条项目规则；不得调用工具，不得输出 JSON 之外的文字。没有可确定的长期变化时输出 {"changes":[]}。';
+  const system = '你是项目记忆整理器，只输出 JSON。只能依据给定反馈修改已有规则或新建一条项目规则；不得调用工具，不得输出 JSON 之外的文字。'
+    + '可复用的做法、偏好、禁止项，或对作品的可迁移纠正，都应落成规则；反馈没有说“以后”也可以新建，保存为待确认候选，由用户决定。'
+    + '同一主题已有规则时更新那条，不要新建重复规则；验收和执行检查点只能挂到已有规则。'
+    + '只改某一处文案、换一次值这类单次局部改动不建规则。'
+    + '只有明确仅限这一次、没有可执行内容、或无法判断时才输出 {"changes":[]}。';
   const feedbackHead = {
     type: feedback.cue?.type || 'unclear',
     longTerm: Boolean(feedback.cue?.explicitLongTerm),
+    scope: feedback.scope === 'project' ? 'project' : 'episode',
+    ...(feedback.cue?.dimension ? { dimension: feedback.cue.dimension } : {}),
   };
   const tail = {
-    allowed: { conditions: view.CONDITION_KEYS, ranges: rangesInput, maxChanges: LIMITS.maxChanges, execution_miss: '仅已有规则，currentText 写检查点', artifact_accept: '仅已有规则，记验收样例' },
+    allowed: {
+      conditions: view.CONDITION_KEYS,
+      ranges: rangesInput,
+      maxChanges: LIMITS.maxChanges,
+      execution_miss: '仅已有规则，currentText 写检查点',
+      artifact_accept: '仅已有规则，记验收样例',
+      existing: '同主题改 r0，不新建重复规则',
+    },
     output: {
       changes: [{
         target: 'r0 或 new', feedbackType: FEEDBACK_TYPES, topicKey: '短主题键', currentText: '当前可执行规范', applicability: 'all_in_scope|conditional|unresolved', conditions: [{ key: 'taskKind', value: 'video' }], evidence: ['u0'], persistence: 'project_candidate',
