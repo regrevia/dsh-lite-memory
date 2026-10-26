@@ -26,7 +26,7 @@ assert.ok(panel, '记忆面板没有注册');
 assert.equal(panel.name, 'shell.overlay');
 assert.equal(panel.order, 30);
 
-const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf } = seen;
+const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf } = seen;
 
 // 图谱只按真实数据画：共享标签成枢纽，显式关联成边，位置由 id 决定。
 const graph = graphOf([
@@ -44,6 +44,22 @@ assert.deepEqual(graphOf([{ id: 'mem_aaaaaaaa', title: 'A' }]).nodes[0].x, graph
 const pair = graphOf([{ id: 'mem_aaaaaaaa', title: 'A' }, { id: 'mem_bbbbbbbb', title: 'B' }]);
 assert.notEqual(pair.nodes[0].x, pair.nodes[1].x);
 assert.notEqual(pair.nodes[0].y, pair.nodes[1].y);
+
+// 经验图谱只按共享的适用条件相连，不画没有依据的关系。
+const rules = [
+  { id: 'ev_aaaaaaaa', title: 'A', state: 'active', conditions: [{ key: 'seriesId', value: '口播' }] },
+  { id: 'ev_bbbbbbbb', title: 'B', state: 'trial', conditions: [{ key: 'seriesId', value: '口播' }, { key: 'phase', value: '初稿' }] },
+  { id: 'ev_cccccccc', title: 'C', state: 'pending', conditions: [{ key: 'phase', value: '初稿' }] },
+];
+const ruleGraph = ruleGraphOf(rules);
+assert.equal(ruleGraph.nodes.filter((node) => node.kind === 'rule').length, 3);
+assert.equal(ruleGraph.nodes.some((node) => node.id === 'condition:seriesId:口播'), true);
+assert.equal(ruleGraph.nodes.some((node) => node.id === 'condition:phase:初稿'), true);
+assert.equal(ruleGraph.edges.length, 4);
+assert.equal(ruleGraph.edges.every((edge) => edge.type === 'condition'), true);
+assert.equal(ruleGraph.nodes.some((node) => node.kind === 'tag' || node.kind === 'topic'), false);
+assert.deepEqual(ruleGraphOf(rules).nodes.map((node) => [node.id, node.x, node.y]), ruleGraph.nodes.map((node) => [node.id, node.x, node.y]));
+assert.equal(ruleGraphOf([{ id: 'ev_aaaaaaaa', title: 'A', state: 'active', conditions: [] }]).edges.length, 0);
 
 const settled = (meta, extra = {}) => ({ kind: 'tool-result', meta, isError: false, content: [], ...extra });
 

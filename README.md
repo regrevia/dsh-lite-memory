@@ -57,17 +57,17 @@ Each completed turn keeps a few lines under 「已编辑 N 个文件」, built f
 
 会话头的大脑图标打开居中的记忆面板。只有两个开关：「启用记忆」「自进化」；内容分「记忆」「自进化」两个页签。默认看当前项目，也可以切到其他项目或全局层；切过去只读，不回写、不迁移旧格式。
 
-「记忆」页签里，搜索框右侧可以在「列表」「图谱」之间切换：列表或图谱只占左栏，右侧始终是选中记忆的正文与归属。图谱按真实数据画，点记忆节点读正文，点标签或主题节点转成搜索。「自进化」页签只作用于当前项目，按「全部 / 候选 / 试用 / 生效 / 暂停」筛选，详情给出当前经验、适用范围、当前状态、学习依据和变化记录；候选可采纳、修改、放弃，试用可采纳、修改、暂停，生效可修改、暂停，暂停可恢复或查看记录。
+「记忆」页签里，搜索框右侧可以在「列表」「图谱」之间切换；列表或图谱占满内容宽度，选中记忆后右侧才出现正文与归属。图谱按真实数据画，点记忆节点读正文，点标签或主题节点转成搜索，右上角可缩放。「自进化」页签只作用于当前项目，按「全部 / 候选 / 试用 / 生效 / 暂停」筛选，也能切列表与图谱；详情给出当前经验、适用范围、当前状态、学习依据和变化记录。候选可采纳、修改、放弃，试用可采纳、修改、暂停，生效可修改、暂停，暂停可恢复或查看记录。
 
 The brain icon in the session header opens a centered memory panel. It has exactly two switches, Memory and Self-evolution, and two tabs, Memories and Self-evolution. It starts on the current project and can switch to another project or the global layer; switched scopes are read-only and never migrate or create state.
 
-On the Memories tab, the search row also switches the left column between list and graph. The graph is drawn from real data: a memory node opens its body, a tag or topic hub becomes a search. The Self-evolution tab acts on the current project only, filters by All / Candidate / Trial / Active / Paused, and shows the current rule, scope, state, evidence and change history. Candidates can be adopted, edited or discarded; trials can be adopted, edited or paused; active rules can be edited or paused; paused rules can be resumed or inspected.
+On the Memories tab, the search row also switches between list and graph; either one fills the content width, and the body pane only appears after a memory is selected. The graph is drawn from real data: a memory node opens its body, a tag or topic hub becomes a search, and the top-right controls zoom it. The Self-evolution tab acts on the current project only, filters by All / Candidate / Trial / Active / Paused, and also offers list and graph views. It shows the current rule, scope, state, evidence and change history. Candidates can be adopted, edited or discarded; trials can be adopted, edited or paused; active rules can be edited or paused; paused rules can be resumed or inspected.
 
 - 关闭项目记忆后，这个项目不再使用任何记忆（包括全局层）：自动注入、检索、读取、引用、保存全部停，服务端也拒绝记忆工具和面板修改动作。自进化同时关闭并禁用；重新打开记忆后自进化仍为关闭，要单独开启。
 - 关闭只改权限，不删数据：候选、试用、生效、证据、整理额度和默认绑定都保留，计数照常显示。
 - 记忆工具与面板管理动作都在服务端拒绝，不能靠改前端绕过；其他项目不受影响。
 - 范围只来自服务端枚举的层；不接受客户端拼路径，也不能写别的项目。
-- 图谱只按数据画：每条有效记忆一个节点，共享标签和主题做枢纽，显式关联画实线；位置由 id 决定，同一批数据每次一样。
+- 图谱只按数据画：每条有效记忆一个节点，共享标签和主题做枢纽，显式关联画实线；自进化图谱只连共用条件。位置由 id 决定，同一批数据每次一样。
 
 - Turning project memory off stops all memory use in that project, including the global layer: no injection, search, read, citation or save, and the server rejects both memory tools and panel mutations. Self-evolution turns off with it; after memory is reopened, self-evolution stays off until switched on.
 - Closing is a permission change, not deletion: candidates, trials, active rules, evidence, organize quota and default bindings are kept, and counts stay visible.

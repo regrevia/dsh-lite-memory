@@ -535,6 +535,70 @@ window.__ModuleLoader__.load({
      * 图谱只画真实关系：显式关联，以及记录自己的标签 / 主题。
      * 位置由 id 决定，同一份记忆每次打开都在同一处。
      */
+    /** 位置由 id 决定；同一份数据每次打开都在同一处。 */
+    const layoutGraph = (nodes, edges, primaryKind) => {
+      const degree = new Map();
+      for (const edge of edges) {
+        degree.set(edge.from, (degree.get(edge.from) || 0) + 1);
+        degree.set(edge.to, (degree.get(edge.to) || 0) + 1);
+      }
+      const placed = new Map();
+      const primaries = nodes.filter((node) => node.kind === primaryKind);
+      const count = primaries.length;
+      const spread = 0.55 + Math.min(0.45, count * 0.06);
+      primaries.forEach((node, index) => {
+        const seed = hashOf(node.id);
+        const ring = count <= 1 ? 0 : count <= 8 ? 128 : count <= 18 ? 168 : 206;
+        const wobble = count <= 8 ? 1 : 0.64 + ((seed % 100) / 100) * 0.36;
+        const angle = count <= 1 ? 0 : (index / count) * Math.PI * 2 - Math.PI / 2 + ((seed % 17) / 17) * 0.16;
+        placed.set(node.id, {
+          ...node,
+          x: 320 + Math.cos(angle) * ring * 1.22 * wobble * spread,
+          y: 236 + Math.sin(angle) * ring * 0.8 * wobble * spread,
+          radius: 5.5 + Math.min(4, (degree.get(node.id) || 0) * 0.7),
+        });
+      });
+      const hubs = nodes.filter((node) => node.kind !== primaryKind);
+      const kindOf = new Map(nodes.map((node) => [node.id, node.kind]));
+      const linkedOf = new Map(hubs.map((node) => [node.id, new Set()]));
+      for (const edge of edges) {
+        if (linkedOf.has(edge.from) && kindOf.get(edge.to) === primaryKind) linkedOf.get(edge.from).add(edge.to);
+        if (linkedOf.has(edge.to) && kindOf.get(edge.from) === primaryKind) linkedOf.get(edge.to).add(edge.from);
+      }
+      const groups = new Map();
+      for (const node of hubs) {
+        const linked = [...linkedOf.get(node.id)].sort();
+        const key = linked.length > 0 ? linked.join('|') : `solo:${node.id}`;
+        if (!groups.has(key)) groups.set(key, { linked, hubs: [] });
+        groups.get(key).hubs.push(node);
+      }
+      for (const group of groups.values()) {
+        const points = group.linked.map((id) => placed.get(id)).filter(Boolean);
+        const cx = points.length > 0 ? points.reduce((sum, point) => sum + point.x, 0) / points.length : 320;
+        const cy = points.length > 0 ? points.reduce((sum, point) => sum + point.y, 0) / points.length : 236;
+        const outward = Math.hypot(cx - 320, cy - 236);
+        group.hubs.forEach((node, index) => {
+          const seed = hashOf(node.id);
+          const base = outward > 12
+            ? Math.atan2(cy - 236, cx - 320)
+            : ((seed % 360) / 180) * Math.PI;
+          const angle = base + (index - (group.hubs.length - 1) / 2) * 0.6;
+          const distance = group.linked.length >= 3 && group.hubs.length === 1 ? 0 : 48 + group.hubs.length * 4;
+          placed.set(node.id, {
+            ...node,
+            x: cx + Math.cos(angle) * distance,
+            y: cy + Math.sin(angle) * distance * 0.82,
+            radius: node.kind === 'topic' ? 5 : 4,
+          });
+        });
+      }
+      return {
+        nodes: [...placed.values()],
+        edges: edges.filter((edge) => placed.has(edge.from) && placed.has(edge.to)),
+        people: count,
+      };
+    };
+
     const graphOf = (records) => {
       const rows = (Array.isArray(records) ? records : EMPTY).slice(0, 60);
       const byId = new Map(rows.map((record) => [record.id, record]));
@@ -548,12 +612,9 @@ window.__ModuleLoader__.load({
       const topics = [...topicCount.entries()].filter(([, count]) => count > 1).sort((a, b) => b[1] - a[1]).slice(0, 4);
       const nodes = [];
       const edges = [];
-      const degree = new Map();
       const addEdge = (from, to, type) => {
         if (!from || !to || from === to) return;
         edges.push({ from, to, type });
-        degree.set(from, (degree.get(from) || 0) + 1);
-        degree.set(to, (degree.get(to) || 0) + 1);
       };
       for (const record of rows) {
         nodes.push({ id: record.id, kind: 'memory', label: record.title || record.id, experimental: record.experimental === true });
@@ -575,86 +636,155 @@ window.__ModuleLoader__.load({
           if (byId.has(link.id)) addEdge(record.id, link.id, 'link');
         }
       }
-      const memoryNodes = nodes.filter((node) => node.kind === 'memory');
-      const memoryById = new Map(memoryNodes.map((node) => [node.id, node]));
-      const count = memoryNodes.length;
-      const spread = 0.55 + Math.min(0.45, count * 0.06);
-      memoryNodes.forEach((node, index) => {
-        const seed = hashOf(node.id);
-        const ring = count <= 1 ? 0 : count <= 8 ? 128 : count <= 18 ? 168 : 206;
-        const wobble = count <= 8 ? 1 : 0.64 + ((seed % 100) / 100) * 0.36;
-        const angle = count <= 1 ? 0 : (index / count) * Math.PI * 2 - Math.PI / 2 + ((seed % 17) / 17) * 0.16;
-        memoryById.set(node.id, {
-          ...node,
-          x: 320 + Math.cos(angle) * ring * 1.22 * wobble * spread,
-          y: 236 + Math.sin(angle) * ring * 0.8 * wobble * spread,
-          radius: 5.5 + Math.min(4, (degree.get(node.id) || 0) * 0.7),
-        });
-      });
-      const hubs = nodes.filter((node) => node.kind !== 'memory');
-      hubs.forEach((node, index) => {
-        const angle = (index / Math.max(1, hubs.length)) * Math.PI * 2 + Math.PI / 7;
-        memoryById.set(node.id, {
-          ...node,
-          x: 320 + Math.cos(angle) * 284 * spread,
-          y: 236 + Math.sin(angle) * 198 * spread,
-          radius: node.kind === 'tag' ? 4 : 5,
-        });
-      });
-      const placed = [...memoryById.values()];
-      return { nodes: placed, edges: edges.filter((edge) => memoryById.has(edge.from) && memoryById.has(edge.to)), people: count };
+      return layoutGraph(nodes, edges, 'memory');
     };
 
-    /** 关系图只画真实关系；节点沿用记忆 id，位置由 id 决定。 */
+    /** 经验图谱只连共享条件。 */
+    const ruleGraphOf = (rules) => {
+      const rows = (Array.isArray(rules) ? rules : EMPTY).slice(0, 60);
+      const conditionCount = new Map();
+      for (const rule of rows) {
+        const seen = new Set();
+        for (const condition of Array.isArray(rule.conditions) ? rule.conditions : EMPTY) {
+          if (!condition || !condition.key || !condition.value) continue;
+          const id = `condition:${condition.key}:${condition.value}`;
+          if (seen.has(id)) continue;
+          seen.add(id);
+          conditionCount.set(id, (conditionCount.get(id) || 0) + 1);
+        }
+      }
+      const shared = [...conditionCount.entries()]
+        .filter(([, count]) => count > 1)
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .slice(0, 10);
+      const nodes = [];
+      const edges = [];
+      for (const rule of rows) {
+        nodes.push({
+          id: rule.id, kind: 'rule', label: rule.title || rule.id,
+          state: rule.state, experimental: rule.state === 'pending' || rule.state === 'trial',
+        });
+      }
+      for (const [id, count] of shared) {
+        const [, key, ...rest] = id.split(':');
+        const value = rest.join(':');
+        nodes.push({
+          id, kind: 'condition', label: `#${value}`, count,
+          title: `${CONDITION_LABEL[key] || key} ${value}`,
+        });
+        for (const rule of rows) {
+          if ((Array.isArray(rule.conditions) ? rule.conditions : EMPTY).some((item) => item && item.key === key && item.value === value)) {
+            edges.push({ from: rule.id, to: id, type: 'condition' });
+          }
+        }
+      }
+      return layoutGraph(nodes, edges, 'rule');
+    };
+
+    /** 关系图只画真实关系；节点沿用原始 id，位置由 id 决定。 */
     const MemoryGraph = (props) => {
-      const graph = React.useMemo(() => graphOf(props.records), [props.records]);
+      const primaryKind = props.primaryKind || 'memory';
+      const graph = React.useMemo(() => (props.graphOf || graphOf)(props.records), [props.records, props.graphOf]);
+      const [zoom, setZoom] = React.useState(1);
       const selectedId = props.selectedId;
+      const labelSet = graph.people <= 10;
+      const stepZoom = (delta) => setZoom((value) => Math.min(2.5, Math.max(0.75, Math.round((value + delta) * 100) / 100)));
+      const frame = React.useMemo(() => {
+        const list = graph.nodes;
+        if (list.length === 0) return { x: 0, y: 0, width: 640, height: 472 };
+        let minX = Infinity; let maxX = -Infinity; let minY = Infinity; let maxY = -Infinity;
+        for (const node of list) {
+          const half = node.kind === primaryKind ? 62 : 38;
+          minX = Math.min(minX, node.x - half);
+          maxX = Math.max(maxX, node.x + half);
+          minY = Math.min(minY, node.y - 16);
+          maxY = Math.max(maxY, node.y + (node.kind === primaryKind ? 28 : 24));
+        }
+        const width = Math.max(380, maxX - minX + 36);
+        const height = Math.max(250, maxY - minY + 36);
+        return { x: (minX + maxX) / 2 - width / 2, y: (minY + maxY) / 2 - height / 2, width, height };
+      }, [graph, primaryKind]);
       if (!props.records || props.records.length === 0) {
         return h('div', {
           style: { flex: 1, minHeight: '220px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' },
         }, props.emptyText || '还没有记忆');
       }
-      const labelSet = graph.people <= 10;
-      return h('svg', {
-        viewBox: '0 0 640 472', preserveAspectRatio: 'xMidYMid meet',
-        style: { width: '100%', height: '100%', flex: 1, minHeight: 0, display: 'block' },
-        role: 'img', 'aria-label': '记忆关系图',
-      },
-      h('g', null, graph.edges.map((edge, index) => {
-        const from = graph.nodes.find((node) => node.id === edge.from);
-        const to = graph.nodes.find((node) => node.id === edge.to);
-        if (!from || !to) return null;
-        const linked = selectedId && (edge.from === selectedId || edge.to === selectedId);
-        return h('line', {
-          key: `e${index}`, x1: from.x, y1: from.y, x2: to.x, y2: to.y,
-          stroke: linked ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-label-secondary)',
-          strokeWidth: linked ? 1.4 : 1,
-          opacity: linked ? 0.65 : edge.type === 'link' ? 0.38 : 0.16,
-          strokeDasharray: edge.type === 'link' ? undefined : '2 4',
-        });
-      })),
-      h('g', null, graph.nodes.map((node) => {
-        const isMemory = node.kind === 'memory';
-        const active = node.id === selectedId;
-        const fill = !isMemory ? 'var(--dsw-alias-label-secondary)'
-          : node.experimental ? 'var(--dsw-alias-state-warn-primary)' : 'var(--dsw-alias-brand-primary)';
-        const showLabel = active || (isMemory && labelSet) || !isMemory;
-        return h('g', {
-          key: node.id,
-          transform: `translate(${node.x} ${node.y})`,
-          onClick: () => props.onPick(node),
-          style: { cursor: 'pointer' },
+      const viewWidth = frame.width / zoom;
+      const viewHeight = frame.height / zoom;
+      const zoomButton = (label, delta, icon) => h('button', {
+        type: 'button', onClick: () => stepZoom(delta),
+        disabled: delta > 0 ? zoom >= 2.5 : zoom <= 0.75,
+        'aria-label': label, title: label,
+        style: {
+          width: '26px', height: '26px', padding: 0, display: 'inline-flex',
+          alignItems: 'center', justifyContent: 'center', border: 'none',
+          borderRadius: '6px', background: 'transparent', color: 'inherit',
+          opacity: delta > 0 ? (zoom >= 2.5 ? 0.28 : 0.68) : (zoom <= 0.75 ? 0.28 : 0.68),
+          cursor: 'pointer',
         },
-        active ? h('circle', { r: node.radius + 5, fill: 'none', stroke: 'var(--dsw-alias-brand-primary)', strokeWidth: 1.4, opacity: 0.5 }) : null,
-        h('circle', { r: node.radius, fill, opacity: isMemory ? 0.9 : 0.5 }),
-        showLabel ? h('text', {
-          y: node.radius + 12, textAnchor: 'middle',
-          fill: active ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-secondary)',
-          fontSize: isMemory ? 10 : 8.5, opacity: active ? 0.95 : 0.68,
-        }, SHORT(node.label, isMemory ? 9 : 10)) : null,
-        h('title', null, node.label),
-        );
-      })),
+      }, icon);
+      const magnifier = (sign) => h('svg', {
+        width: '15', height: '15', viewBox: '0 0 16 16', fill: 'none',
+        stroke: 'currentColor', strokeWidth: '1.4', strokeLinecap: 'round',
+        'aria-hidden': 'true',
+      },
+      h('circle', { cx: '6.8', cy: '6.8', r: '4.5' }),
+      h('line', { x1: '10.1', y1: '10.1', x2: '14', y2: '14' }),
+      h('line', { x1: '4.8', y1: '6.8', x2: '8.8', y2: '6.8' }),
+      sign > 0 ? h('line', { x1: '6.8', y1: '4.8', x2: '6.8', y2: '8.8' }) : null);
+      return h('div', { style: { position: 'relative', flex: 1, minHeight: 0, display: 'flex' } },
+        h('div', {
+          style: {
+            position: 'absolute', top: '6px', right: '6px', zIndex: 2,
+            display: 'flex', alignItems: 'center', gap: '1px', padding: '2px',
+            border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '8px',
+            background: 'var(--dsw-alias-bg-layer-1)',
+          },
+        },
+        zoomButton('缩小图谱', -0.25, magnifier(-1)),
+        zoomButton('放大图谱', 0.25, magnifier(1))),
+        h('svg', {
+          viewBox: `${frame.x + frame.width / 2 - viewWidth / 2} ${frame.y + frame.height / 2 - viewHeight / 2} ${viewWidth} ${viewHeight}`,
+          preserveAspectRatio: 'xMidYMid meet',
+          style: { width: '100%', height: '100%', flex: 1, minHeight: 0, display: 'block' },
+          role: 'img', 'aria-label': props.ariaLabel || '关系图',
+        },
+        h('g', null, graph.edges.map((edge, index) => {
+          const from = graph.nodes.find((node) => node.id === edge.from);
+          const to = graph.nodes.find((node) => node.id === edge.to);
+          if (!from || !to) return null;
+          const linked = selectedId && (edge.from === selectedId || edge.to === selectedId);
+          return h('line', {
+            key: `e${index}`, x1: from.x, y1: from.y, x2: to.x, y2: to.y,
+            stroke: linked ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-label-secondary)',
+            strokeWidth: linked ? 1.4 : 1,
+            opacity: linked ? 0.65 : edge.type === 'link' ? 0.38 : 0.16,
+            strokeDasharray: edge.type === 'link' ? undefined : '2 4',
+          });
+        })),
+        h('g', null, graph.nodes.map((node) => {
+          const isPrimary = node.kind === primaryKind;
+          const active = node.id === selectedId;
+          const fill = !isPrimary ? 'var(--dsw-alias-label-secondary)'
+            : node.state ? (STAGE_TONE[node.state] || 'var(--dsw-alias-brand-primary)')
+              : node.experimental ? 'var(--dsw-alias-state-warn-primary)' : 'var(--dsw-alias-brand-primary)';
+          const showLabel = active || (isPrimary && labelSet) || !isPrimary;
+          return h('g', {
+            key: node.id,
+            transform: `translate(${node.x} ${node.y})`,
+            onClick: isPrimary ? () => props.onPick(node) : undefined,
+            style: { cursor: isPrimary ? 'pointer' : 'default' },
+          },
+          active ? h('circle', { r: node.radius + 5, fill: 'none', stroke: 'var(--dsw-alias-brand-primary)', strokeWidth: 1.4, opacity: 0.5 }) : null,
+          h('circle', { r: node.radius, fill, opacity: isPrimary ? 0.9 : 0.5 }),
+          showLabel ? h('text', {
+            y: node.radius + 12, textAnchor: 'middle',
+            fill: active ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-secondary)',
+            fontSize: isPrimary ? 10 : 8.5, opacity: active ? 0.95 : 0.68,
+          }, SHORT(node.label, isPrimary ? 9 : 10)) : null,
+          h('title', null, node.title || node.label),
+          );
+        }))),
       );
     };
 
@@ -889,6 +1019,7 @@ window.__ModuleLoader__.load({
       const [query, setQuery] = React.useState('');
       const [tab, setTab] = React.useState('memory');
       const [memoryView, setMemoryView] = React.useState('list');
+      const [evolutionView, setEvolutionView] = React.useState('list');
       const [stage, setStage] = React.useState('all');
       const [selectedMemory, setSelectedMemory] = React.useState('');
       const [selectedRule, setSelectedRule] = React.useState('');
@@ -1044,12 +1175,15 @@ window.__ModuleLoader__.load({
       const detailRecord = selectedMemory ? records.find((record) => record.id === selectedMemory) : null;
 
       const onPickNode = (node) => {
-        if (node.kind === 'memory') {
-          setSelectedMemory(node.id);
-          setSelectedRule('');
-          return;
-        }
-        setQuery(node.label.replace(/^#/, ''));
+        if (node.kind !== 'memory') return;
+        setSelectedMemory(node.id);
+        setSelectedRule('');
+      };
+      const onPickRuleNode = (node) => {
+        if (node.kind !== 'rule') return;
+        setSelectedRule(node.id);
+        setSelectedMemory('');
+        setShowReason(false);
       };
 
       const manage = (learningAction, extra) => {
@@ -1151,14 +1285,15 @@ window.__ModuleLoader__.load({
         type: 'button', role: 'tab', 'aria-selected': activeTab === key,
         onClick: () => switchTab(key),
         style: {
-          ...PANEL_LINK, flex: 1, height: '30px', borderRadius: '7px',
-          background: activeTab === key ? 'var(--dsw-alias-bg-layer-2)' : 'transparent',
+          ...PANEL_LINK, flex: '0 0 auto', height: '34px', padding: '0 18px', borderRadius: 0,
+          background: 'transparent',
           opacity: activeTab === key ? 0.95 : 0.55,
-          border: activeTab === key ? '1px solid var(--dsw-alias-border-l1)' : '1px solid transparent',
+          border: 'none',
+          borderBottom: activeTab === key ? '2px solid var(--dsw-alias-brand-primary)' : '2px solid transparent',
         },
       }, text);
 
-      const tabBar = h('div', { role: 'tablist', 'aria-label': '记忆内容', style: { display: 'flex', alignItems: 'center', gap: '6px', flex: '0 0 auto' } },
+      const tabBar = h('div', { role: 'tablist', 'aria-label': '记忆内容', style: { display: 'flex', alignItems: 'center', gap: '2px', flex: '0 0 auto', borderBottom: '1px solid var(--dsw-alias-border-l1)' } },
         tabButton('memory', '记忆'),
         globalView ? null : tabButton('evolution', '自进化'),
       );
@@ -1173,10 +1308,13 @@ window.__ModuleLoader__.load({
           }));
 
       const memoryDetail = selectedMemory
-        ? h('div', { style: { ...PANEL_CARD, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px' } },
+        ? h('div', { style: { ...PANEL_CARD, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px' } },
           detail
             ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
-              h('div', { style: { fontSize: '13px', lineHeight: '1.45', fontWeight: 600, wordBreak: 'break-word' } }, detail.title),
+              h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: '8px' } },
+                h('div', { style: { flex: 1, minWidth: 0, fontSize: '13px', lineHeight: '1.45', fontWeight: 600, wordBreak: 'break-word' } }, detail.title),
+                h(Action, { onClick: () => setSelectedMemory('') }, '关闭'),
+              ),
               h('div', { style: PANEL_MUTED }, `${KIND_LABEL[detailRecord && detailRecord.kind] || '记忆'} · ${detail.scopeLabel || ''}`),
               Array.isArray(detailRecord && detailRecord.tags) && detailRecord.tags.length
                 ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '4px' } },
@@ -1187,25 +1325,37 @@ window.__ModuleLoader__.load({
         )
         : null;
 
-      const viewButton = (key, label) => h('button', {
-        key, type: 'button', onClick: () => setMemoryView(key),
-        'aria-pressed': memoryView === key,
-        style: {
-          ...PANEL_LINK, height: '24px', padding: '0 7px', borderRadius: '6px',
-          background: memoryView === key ? 'var(--dsw-alias-bg-layer-2)' : 'transparent',
-          opacity: memoryView === key ? 0.9 : 0.5,
-        },
-      }, label);
-      const viewToggle = h('div', {
-        role: 'group', 'aria-label': '记忆视图',
-        style: {
-          display: 'flex', alignItems: 'center', gap: '2px', flex: '0 0 auto',
-          height: '30px', padding: '2px', boxSizing: 'border-box',
-          border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '8px',
-          background: 'var(--dsw-alias-bg-base)',
-        },
-      }, viewButton('list', '列表'), viewButton('graph', '图谱'));
+      const viewToggleOf = (current, setValue, ariaLabel) => {
+        const button = (key, label) => h('button', {
+          key, type: 'button', onClick: () => setValue(key),
+          'aria-pressed': current === key,
+          style: {
+            ...PANEL_LINK, height: '24px', padding: '0 7px', borderRadius: '6px',
+            background: current === key ? 'var(--dsw-alias-bg-layer-2)' : 'transparent',
+            opacity: current === key ? 0.9 : 0.5,
+          },
+        }, label);
+        return h('div', {
+          role: 'group', 'aria-label': ariaLabel,
+          style: {
+            display: 'flex', alignItems: 'center', gap: '2px', flex: '0 0 auto',
+            height: '30px', padding: '2px', boxSizing: 'border-box',
+            border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '8px',
+            background: 'var(--dsw-alias-bg-base)',
+          },
+        }, button('list', '列表'), button('graph', '图谱'));
+      };
+      const memoryToggle = viewToggleOf(memoryView, setMemoryView, '记忆视图');
 
+      const memoryListPane = h('div', {
+        style: {
+          ...PANEL_CARD, padding: '2px 4px', minHeight: 0, overflowY: 'auto',
+        },
+      }, memoryList);
+      const memoryGraphPane = h('div', {
+        style: { ...PANEL_CARD, padding: 0, minHeight: 0, overflow: 'hidden', display: 'flex' },
+      },
+      h(MemoryGraph, { records: filtered, selectedId: selectedMemory, onPick: onPickNode, emptyText: query ? '没有匹配的记忆' : '还没有记忆', ariaLabel: '记忆关系图' }));
       const memoryTab = h('div', { role: 'tabpanel', 'aria-label': '记忆', style: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: '9px' } },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flex: '0 0 auto' } },
           h('input', {
@@ -1213,15 +1363,16 @@ window.__ModuleLoader__.load({
             placeholder: '搜索标题或标签', 'aria-label': '搜索记忆',
             style: { ...PANEL_INPUT, width: 'auto', flex: '1 1 0', minWidth: 0 },
           }),
-          viewToggle,
+          memoryToggle,
         ),
-        h('div', { style: { flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'minmax(220px, 320px) minmax(0, 1fr)', gap: '10px' } },
-          memoryView === 'graph'
-            ? h('div', { style: { minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden', borderTop: '1px solid var(--dsw-alias-border-l1)' } },
-              h(MemoryGraph, { records: filtered, selectedId: selectedMemory, onPick: onPickNode, emptyText: query ? '没有匹配的记忆' : '还没有记忆' }))
-            : h('div', { style: { minHeight: 0, overflowY: 'auto', borderTop: '1px solid var(--dsw-alias-border-l1)' } }, memoryList),
-          memoryDetail,
-        ),
+        h('div', {
+          style: {
+            flex: 1, minHeight: 0, display: 'grid', gap: '10px',
+            gridTemplateColumns: selectedMemory ? 'minmax(0, 1fr) minmax(280px, 340px)' : 'minmax(0, 1fr)',
+          },
+        },
+        memoryView === 'graph' ? memoryGraphPane : memoryListPane,
+        memoryDetail),
       );
 
       const stageFilters = [
@@ -1246,16 +1397,17 @@ window.__ModuleLoader__.load({
             fontVariantNumeric: 'tabular-nums',
           },
         }, `${label} ${countText(key)}`)),
+        h('span', { style: { marginLeft: 'auto' } }, viewToggleOf(evolutionView, setEvolutionView, '自进化视图')),
       );
 
       const stageLabel = (stageFilters.find(([key]) => key === stage) || ['all', '全部'])[1];
+      const evolutionEmptyText = !memoryOn ? '记忆已关闭'
+        : !evolution ? '读不到自进化状态'
+          : evolution.enabled !== true ? '自进化已关闭'
+            : rules.length === 0 ? (countsUnknown ? '数量未知' : '还没有整理出经验')
+              : `没有${stageLabel}的经验`;
       const evolutionList = filteredRules.length === 0
-        ? h('div', { style: { ...PANEL_MUTED, padding: '12px 4px' } },
-          !memoryOn ? '记忆已关闭'
-            : !evolution ? '读不到自进化状态'
-              : evolution.enabled !== true ? '自进化已关闭'
-                : rules.length === 0 ? (countsUnknown ? '数量未知' : '还没有整理出经验')
-                  : `没有${stageLabel}的经验`)
+        ? h('div', { style: { ...PANEL_MUTED, padding: '12px 4px' } }, evolutionEmptyText)
         : filteredRules.map((rule) => h('button', {
           key: rule.id, type: 'button', onClick: () => { setSelectedRule(rule.id); setSelectedMemory(''); setShowReason(false); },
           style: {
@@ -1278,6 +1430,29 @@ window.__ModuleLoader__.load({
           !evolutionReady && loading ? null : h(Action, { onClick: () => load(currentKey) }, '重试'),
         )
         : null;
+      const evolutionDetailPane = selectedRuleRow
+        ? h('div', { style: { ...PANEL_CARD, padding: 0, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' } },
+          h('div', { style: { display: 'flex', justifyContent: 'flex-end', padding: '8px 10px 0', flex: '0 0 auto' } },
+            h(Action, { onClick: () => setSelectedRule('') }, '关闭')),
+          h('div', { style: { minHeight: 0, overflowY: 'auto', padding: '0 10px 10px' } },
+            h(EvolutionDetail, {
+              key: selectedRuleRow.id, rule: selectedRuleRow, evolution, memoryOn,
+              canManage, busy, onManage: manage,
+            })))
+        : null;
+      const evolutionListPane = h('div', {
+        style: {
+          ...PANEL_CARD, padding: '2px 4px', minHeight: 0, overflowY: 'auto',
+        },
+      }, evolutionList);
+      const evolutionGraphPane = h('div', {
+        style: { ...PANEL_CARD, padding: 0, minHeight: 0, overflow: 'hidden', display: 'flex' },
+      },
+      h(MemoryGraph, {
+        records: filteredRules, graphOf: ruleGraphOf, primaryKind: 'rule',
+        selectedId: selectedRule, onPick: onPickRuleNode,
+        emptyText: evolutionEmptyText, ariaLabel: '经验关系图',
+      }));
       const evolutionTab = evolutionFailed ? evolutionFailed : h('div', { role: 'tabpanel', 'aria-label': '自进化', style: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: '9px' } },
         h('div', { style: { ...PANEL_CARD, padding: '9px 11px', display: 'flex', alignItems: 'flex-start', gap: '8px', flex: '0 0 auto' } },
           h('span', { style: { flex: '0 0 auto', width: '6px', height: '6px', marginTop: '5px', borderRadius: '999px', background: effectiveEnabled ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-label-secondary)', opacity: 0.8 } }),
@@ -1292,19 +1467,17 @@ window.__ModuleLoader__.load({
           ),
         ),
         filterBar,
-        h('div', { style: { flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'minmax(220px, 320px) minmax(0, 1fr)', gap: '10px' } },
-          h('div', { style: { minHeight: 0, overflowY: 'auto', borderTop: '1px solid var(--dsw-alias-border-l1)' } }, evolutionList),
-          selectedRuleRow
-            ? h('div', { style: { ...PANEL_CARD, overflowY: 'auto' } },
-              h(EvolutionDetail, {
-                key: selectedRuleRow.id, rule: selectedRuleRow, evolution, memoryOn,
-                canManage, busy, onManage: manage,
-              }))
-            : null,
-        ),
+        h('div', {
+          style: {
+            flex: 1, minHeight: 0, display: 'grid', gap: '10px',
+            gridTemplateColumns: selectedRuleRow ? 'minmax(0, 1fr) minmax(280px, 340px)' : 'minmax(0, 1fr)',
+          },
+        },
+        evolutionView === 'graph' ? evolutionGraphPane : evolutionListPane,
+        evolutionDetailPane),
       );
 
-      const content = h('section', { style: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, padding: '14px', gap: '10px' } },
+      const content = h('section', { style: { flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, padding: '14px', gap: '10px' } },
         tabBar,
         activeTab === 'memory' ? memoryTab : evolutionTab,
       );
@@ -1315,7 +1488,7 @@ window.__ModuleLoader__.load({
       },
       h('div', {
         role: 'dialog', 'aria-modal': 'true', 'aria-label': '记忆面板',
-        style: { ...PANEL_DIALOG, width: 'min(980px, 100%)', height: 'min(720px, 100%)', boxSizing: 'border-box' },
+        style: { ...PANEL_DIALOG, width: 'min(1120px, 100%)', height: 'min(760px, 100%)', boxSizing: 'border-box' },
       }, ...children));
 
       if (!sessionId) return null;
@@ -1371,7 +1544,7 @@ window.__ModuleLoader__.load({
 
     // 测试缝：Node 里验引用投影，浏览器里没有任何副作用。
     if (typeof globalThis.__LITE_MEMORY_TEST__ === 'function') {
-      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, MemoryPanel });
+      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, MemoryPanel });
     }
 
     return {
