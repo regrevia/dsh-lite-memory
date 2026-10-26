@@ -260,7 +260,7 @@ function gitRoot(cwd) {
     return { root: '', reason: 'failed' };
   } catch (error) {
     const text = `${error && error.stderr ? error.stderr : ''}${error && error.message ? error.message : ''}`;
-    if (/not a git repository|不是.*git/i.test(text)) return { root: '', reason: 'not_git' };
+    if (/not a git repository|不是[\s\S]*git/i.test(text)) return { root: '', reason: 'not_git' };
     return { root: '', reason: 'failed' };
   }
 }
