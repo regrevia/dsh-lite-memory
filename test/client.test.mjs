@@ -77,18 +77,20 @@ assert.equal(refs.length, 2);
 assert.equal(refs[1].status, 'archived');
 assert.equal(refs[0].exposure, 'reference');
 
-// 一轮里 PTC 子结果也算；同 id 同版同用途去重。
+// 一轮里 PTC 子结果也算；同 id 同用途只留一条，位置不变、内容取最新。
 const nodes = [
   { root: settled({ kind: 'memory-search', refs: [
     { id: 'mem_aaaaaaaa', title: 'A', scope: 'project', revision: 1, status: 'ok' },
   ] }) },
   { root: settled({ kind: 'memory-read', id: 'mem_aaaaaaaa', title: 'A2', scope: 'project', revision: 2, status: 'ok' }, { subCalls: [settled({ kind: 'memory-read', id: 'mem_aaaaaaaa', title: 'A3', scope: 'project', revision: 2, status: 'ok' })] }) },
+  { root: settled({ kind: 'memory-read', id: 'mem_bbbbbbbb', title: 'B', scope: 'global', revision: 1, status: 'ok' }) },
 ];
 const turn = dedupe(citationsOfTurn(nodes));
 assert.equal(turn.length, 2);
-assert.equal(turn[0].revision, 1);
-assert.equal(turn[1].revision, 2);
-assert.equal(turn[1].title, 'A2');
+assert.equal(turn[0].id, 'mem_aaaaaaaa');
+assert.equal(turn[0].revision, 2);
+assert.equal(turn[0].title, 'A3');
+assert.equal(turn[1].id, 'mem_bbbbbbbb');
 
 // 旧行没有元数据：什么也不产出，绝不从文案猜 id。
 assert.deepEqual(citationsOfTurn([{ root: null }, { root: { kind: 'tool-result', content: [{ type: 'text', text: 'memory · saved "A" mem_aaaaaaaa' }] } }]), []);

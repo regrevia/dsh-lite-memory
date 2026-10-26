@@ -131,15 +131,19 @@ window.__ModuleLoader__.load({
       return out;
     };
 
-    /** 同一轮里同层同 id 同版同用途只留一条。 */
+    /** 同一轮里同层同 id 同用途只留一条，位置取首次出现、内容取最后一次。 */
     const dedupe = (items) => {
-      const seen = new Set();
+      const seen = new Map();
       const out = [];
       for (const item of items) {
-        const key = `${item.scope}:${item.id}:${item.revision}:${item.exposure}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        out.push(item);
+        const key = `${item.scope}:${item.id}:${item.exposure}`;
+        const at = seen.get(key);
+        if (at === undefined) {
+          seen.set(key, out.length);
+          out.push(item);
+        } else {
+          out[at] = item;
+        }
       }
       return out;
     };
