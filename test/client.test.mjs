@@ -28,7 +28,7 @@ assert.equal(panel.name, 'shell.overlay');
 assert.equal(panel.order, 30);
 
 const EMPTY_CHILDREN = [];
-const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf } = seen;
+const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf } = seen;
 
 // 图谱只按真实数据画：共享标签成枢纽，显式关联成边，位置由 id 决定。
 const graph = graphOf([
@@ -225,5 +225,59 @@ const firstPaint = MemoryPanel({ sessionId: 'demo', onClose: () => {} });
 assert.ok(firstPaint, '面板首帧应渲染');
 assert.equal(nodeTypes(firstPaint).includes(MemoryGraph), false);
 assert.equal(JSON.stringify(nodeTypes(firstPaint)).includes('MemoryGraph'), false);
+assert.equal(nodeTypes(firstPaint).includes(MemoryPalace), false);
+assert.equal(JSON.stringify(nodeTypes(firstPaint)).includes('MemoryPalace'), false);
 
-console.log('client.test.mjs: 19 passed');
+
+// 记忆宫殿：固定四间，空房隐藏，未知类型有归处。
+const palaceRecord = (id, kind, title = id) => ({ id, kind, title });
+const palaceRooms = palaceRoomsOf([
+  palaceRecord('mem_1', 'note'), palaceRecord('mem_2', 'pointer'), palaceRecord('mem_3', 'procedure'),
+  palaceRecord('mem_4', 'preference'), palaceRecord('mem_5', 'convention'), palaceRecord('mem_6', 'pitfall'),
+  palaceRecord('mem_7', 'credential_hint'), palaceRecord('mem_8', 'unknown_kind'),
+]);
+assert.deepEqual(palaceRooms.map((room) => room.name), ['习惯与规范', '方法与经验', '资料与入口', '其他记录']);
+assert.deepEqual(palaceRooms.map((room) => room.total), [2, 2, 2, 2]);
+assert.equal(palaceRoomIdOf('unknown_kind'), 'notes');
+assert.equal(palaceRoomsOf([palaceRecord('mem_9', 'note')]).length, 1);
+// 每页 24 条；页码夹在有效范围内。
+const palaceMany = Array.from({ length: 25 }, (_, index) => palaceRecord(`mem_${index}`, 'preference', `P${index}`));
+assert.equal(palaceRoomsOf(palaceMany)[0].pages, 2);
+assert.equal(palaceRoomPageOf(palaceMany, 'habits', 1).items.length, 24);
+assert.equal(palaceRoomPageOf(palaceMany, 'habits', 2).items.length, 1);
+assert.equal(palaceRoomPageOf(palaceMany, 'habits', 99).page, 2);
+assert.equal(palaceRoomPageOf(palaceMany, 'habits', 0).page, 1);
+assert.deepEqual(palacePageWindow(1, 3), [1, 2, 3]);
+assert.deepEqual(palacePageWindow(5, 12), [2, 3, 4, 5, 6, 7, 8]);
+assert.equal(palacePageWindow(12, 12).includes(12), true);
+// 同一时刻只展开一间，再点收起。
+assert.equal(palaceToggleOf('', 'methods'), 'methods');
+assert.equal(palaceToggleOf('methods', 'methods'), '');
+assert.equal(palaceToggleOf('methods', 'habits'), 'habits');
+// 关闭时回列表；减少动态时 0ms，否则 180ms。
+assert.equal(viewModeOf({ graph: true, palace: false }, 'palace'), 'list');
+assert.equal(viewModeOf({ graph: false, palace: true }, 'palace'), 'palace');
+assert.equal(palaceMotionOf(true).duration, 0);
+assert.equal(palaceMotionOf(false).duration, 180);
+// 展品点开只把 id 交给现有详情入口，不另造详情。
+let palacePicked = '';
+const palaceTree = MemoryPalace({
+  records: [palaceRecord('mem_a', 'preference', 'A')],
+  selectedId: '', onPick: (id) => { palacePicked = id; }, emptyText: '这个项目还没有记忆',
+});
+const expandNodes = (node, out = []) => {
+  if (!node || typeof node !== 'object') return out;
+  if (typeof node.type === 'function') return expandNodes(node.type(node.props), out);
+  out.push(node);
+  for (const child of node.children || []) expandNodes(child, out);
+  return out;
+};
+const palaceExhibit = expandNodes(palaceTree).find((node) => node.type === 'button' && node.props.title === 'A');
+assert.ok(palaceExhibit, '展品应是原生按钮');
+palaceExhibit.props.onClick();
+assert.equal(palacePicked, 'mem_a');
+const palaceEmpty = MemoryPalace({ records: [], selectedId: '', onPick: () => {}, emptyText: '这个项目还没有记忆' });
+assert.equal(expandNodes(palaceEmpty).some((node) => node.children.includes('这个项目还没有记忆')), true);
+
+console.log('client.test.mjs: 19 passed + palace');
+
