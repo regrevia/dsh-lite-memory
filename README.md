@@ -49,6 +49,20 @@ Writes land in one of two layers: the current project by default, or the global 
 
 Each completed turn keeps a few lines under 「已编辑 N 个文件」, built from that turn's own tool results: `本轮参考 N 条` and `本轮更新 N 条`. A line expands to memory names, a name expands to the body as it is now — current title, current version, archived marked, deleted said outright. One row per version per turn; nothing read or written, nothing shown. Switching conversations keeps them, because each turn is rebuilt from its own tool results only.
 
+## 记忆面板 / Memory panel
+
+会话头的大脑图标打开居中的记忆面板。默认看当前项目，也可以切到其他项目或全局层；切过去只读，不回写、不迁移旧格式。面板里能看到真实记忆画成的图谱、类型分布和计数，右侧按「记忆 / 规则 / 归档」列出条目，点一条读当前正文。项目自进化的开关也在这里，只对当前项目可改。
+
+The brain icon in the session header opens a centered memory panel. It starts on the current project and can switch to another project or the global layer; switched scopes are read-only and never migrate or create state. The panel draws the graph from real entries, shows the kind breakdown and counts, and lists memories, rules and archived notes on the right; selecting one reads its current body. The project self-evolution switch lives here too and is editable only for the current project.
+
+- 图谱只按数据画：每条有效记忆一个节点，共享标签和主题做枢纽，显式关联画实线；位置由 id 决定，同一批数据每次一样。
+- 范围只来自服务端枚举的层；不接受客户端拼路径，也不能写别的项目。
+- 关闭后停止整理与晚到写入，已固定的项目规范继续生效，实验成果留在「规则」和「归档」里。
+
+- The graph is data only: one node per active memory, shared tags and topics as hubs, explicit links as solid edges; positions derive from ids, so the same data looks the same every time.
+- Scopes come only from the server-side list; the page cannot assemble a path or write another project's notes.
+- Turning evolution off stops organizing and late writes; pinned project rules keep working and experimental results stay under Rules and Archive.
+
 ## 为什么轻 / Why it stays light
 
 - **0 依赖**，存储层无定时器、无监听、无网络，只有同步单文件写；写入用一把有超时的锁，别的进程正在写就明确报「忙」，不抢别人的锁。
@@ -72,14 +86,14 @@ Off by default, per project only. When enabled it distills a few project rules f
 - 一次整理最多 2 处改动、768 输出 token、15 秒；输入不超过 8 KiB，同一作品最多 2 次，同一项目 24 小时内最多 6 次。
 - 成果停在 `pending` / `trial` / `active` / `paused`；明确说「以后都这样」或两个独立作品支持才 `active`，试用与暂停 30 天后清理。
 - 规则 32 条、待定 12 条、每规则样例 4 个/检查点 3 个/来源 3 条、旧版本 2 个，都有硬上限；到顶先暂停新学习，不静默丢已生效规则。
-- 面板把「整理调用用量」和「本请求记忆载荷」分开显示；usage 没返回就写未知，不补零。
+- 面板显示整理次数和已知用量；usage 没返回就写未知，不补零。
 - 关闭后停止学习、读取和晚到写入；已固定为普通项目规范的内容继续生效，实验成果保留可查看。
 - 同一项目换栏目、新一期、临时例外不会互相继承；仓库子目录、符号链接、worktree 视为同一项目，不同克隆分开。
 
 - At most 2 changes, 768 output tokens and 15 s per organize call; input ≤ 8 KiB, ≤ 2 calls per episode and ≤ 6 per project in 24 h.
 - Results stay `pending` / `trial` / `active` / `paused`; they become `active` only on an explicit long-term ask or two independent episodes; trial and paused entries expire after 30 days.
 - Hard caps: 32 rules, 12 pending, 4 samples / 3 checkpoints / 3 sources per rule, 2 old versions. At the ceiling new learning pauses; active explicit rules are never silently dropped.
-- The panel reports organize usage and per-request memory payload separately; missing usage is shown as unknown, never zero.
+- The panel reports organize calls and known usage; missing usage is shown as unknown, never zero.
 - Turning it off stops learning, reads and late writes; rules pinned as ordinary project norms keep working, experimental results stay viewable.
 - Switching columns, a new episode and one-off exceptions do not leak into each other; a repository subdirectory, symlink or worktree is the same project, separate clones are not.
 

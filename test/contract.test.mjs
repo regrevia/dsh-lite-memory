@@ -674,4 +674,107 @@ assert.equal(orgEconomy2.knownCalls, 3);
 assert.equal(orgEconomy2.inputTokens, 36);
 llmImpl = null;
 
+// ── 记忆面板总览：只读枚举各项目层，正文按 scopeKey 单读，不泄露内部路径 ──────
+const ovCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-overview-'));
+const ovOtherCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-overview-other-'));
+sessionCwds.set('session-overview', ovCwd);
+sessionCwds.set('session-overview-other', ovOtherCwd);
+const ovAgent = { id: 'session-overview', cwd: ovCwd, session: { id: 'session-overview', header: { cwd: ovCwd } } };
+const ovFirst = await defs.get('memory_save').execute(
+  { title: '开场先给结论', summary: '口播开头先给结论', body: '开场三句内给结论。', tags: ['口播', '开头'], links: [] },
+  { agent: ovAgent },
+);
+const ovSecond = await defs.get('memory_save').execute(
+  { title: '封面留白', summary: '封面别放满', body: '右侧留白。', tags: ['封面'] },
+  { agent: ovAgent },
+);
+await defs.get('memory_save').execute(
+  { title: '观察全局', summary: '跨项目通用说明', body: '全局正文。', scope: 'global' },
+  { agent: ovAgent },
+);
+const ovOther = await defs.get('memory_save').execute(
+  { title: '别的项目', summary: '只在别的项目里', body: '另一层的正文。', tags: ['别的'] },
+  { agent: { id: 'session-overview-other', cwd: ovOtherCwd, session: { id: 'session-overview-other', header: { cwd: ovOtherCwd } } } },
+);
+const ov = await call('/lite-memory/overview', { sessionId: 'session-overview' });
+assert.equal(ov.status, 200);
+assert.equal(ov.body.ok, true);
+assert.equal(ov.body.current.key, store.scopeOf(ovCwd).key);
+assert.equal(ov.body.current.label, path.basename(ovCwd));
+assert.equal(ov.body.current.evolution.enabled, false);
+assert.equal(ov.body.selected.key, ov.body.current.key);
+assert.equal(ov.body.selected.kind, 'project');
+assert.equal(ov.body.selected.evolution.enabled, false);
+assert.ok(Array.isArray(ov.body.selected.evolution.rules));
+assert.ok(ov.body.selected.records.some((row) => row.id === ovFirst.id && row.title === '开场先给结论'));
+assert.equal(ov.body.selected.records.some((row) => 'body' in row), false, '列表不带正文');
+assert.equal(ov.body.selected.stats.total, 2);
+assert.equal(ov.body.selected.stats.tags, 3);
+assert.equal(JSON.stringify(ov.body).includes('"dir"'), false, '不暴露内部目录');
+assert.equal(JSON.stringify(ov.body).includes(process.env.DSH_HOME), false);
+const ovKeys = ov.body.scopes.map((row) => row.key);
+assert.ok(ovKeys.includes(ov.body.current.key));
+assert.ok(ovKeys.includes(store.scopeOf(ovOtherCwd).key));
+assert.ok(ovKeys.includes('global'), '全局层总在列表里');
+
+// 切到别的项目只是换一面看，不写那个项目
+const ovOtherView = await call('/lite-memory/overview', { sessionId: 'session-overview', scopeKey: store.scopeOf(ovOtherCwd).key });
+assert.equal(ovOtherView.status, 200);
+assert.equal(ovOtherView.body.selected.key, store.scopeOf(ovOtherCwd).key);
+assert.deepEqual(ovOtherView.body.selected.records.map((row) => row.title), ['别的项目']);
+assert.equal(ovOtherView.body.selected.evolution.enabled, false, '别的项目也要给只读实验状态');
+assert.equal(ovOtherView.body.current.key, ov.body.current.key);
+const ovGlobal = await call('/lite-memory/overview', { sessionId: 'session-overview', scopeKey: 'global' });
+assert.equal(ovGlobal.status, 200);
+assert.equal(ovGlobal.body.selected.kind, 'global');
+assert.ok(ovGlobal.body.selected.records.some((row) => row.title === '观察全局'));
+
+// 详情按服务端枚举过的 scopeKey 取；内部路径、未知键一律不放行
+const ovBody = await call('/lite-memory/body', { sessionId: 'session-overview', id: ovFirst.id, scopeKey: ov.body.current.key });
+assert.equal(ovBody.status, 200);
+assert.equal(ovBody.body.body, '开场三句内给结论。');
+assert.equal(ovBody.body.scopeLabel, path.basename(ovCwd));
+const ovOtherBody = await call('/lite-memory/body', { sessionId: 'session-overview', id: ovOther.id, scopeKey: store.scopeOf(ovOtherCwd).key });
+assert.equal(ovOtherBody.status, 200);
+assert.equal(ovOtherBody.body.scopeLabel, path.basename(ovOtherCwd));
+assert.equal((await call('/lite-memory/body', { sessionId: 'session-overview', id: ovFirst.id, scopeKey: 'nope' })).status, 404);
+assert.equal((await call('/lite-memory/body', { sessionId: 'session-overview', id: ovFirst.id, scopeKey: '../x' })).status, 404);
+assert.equal((await call('/lite-memory/overview', {})).status, 400);
+assert.equal((await call('/lite-memory/overview', { sessionId: 'session-overview' }, { origin: 'http://evil.example' })).status, 403);
+const ovUnknownCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-overview-unknown-'));
+sessionCwds.set('session-overview-unknown', ovUnknownCwd);
+const ovUnconfirmedSaved = process.env.PATH;
+process.env.PATH = '';
+const ovUnconfirmed = await call('/lite-memory/overview', { sessionId: 'session-overview-unknown' });
+process.env.PATH = ovUnconfirmedSaved;
+assert.equal(ovUnconfirmed.status, 409);
+assert.equal(fs.existsSync(path.join(store.scopeOf(ovUnknownCwd).dir, 'state.json')), false);
+
+// 实验条目也画进图里，但只有面板能看见；普通读取面仍然拿不到
+state.transact(store.scopeOf(ovCwd), {}, (draft) => {
+  const row = draft.entries.find((entry) => entry.id === ovSecond.id);
+  row.origin = 'project_evolution';
+  row.maintenance = { ...(row.maintenance || {}), learning: { state: 'trial', source: 'evolution' } };
+  return { changed: true };
+});
+const ovExperimental = await call('/lite-memory/overview', { sessionId: 'session-overview' });
+assert.equal(ovExperimental.body.selected.stats.experimental, 1);
+assert.equal(ovExperimental.body.selected.records.find((row) => row.id === ovSecond.id).experimental, true);
+assert.equal(store.loadIndex(store.scopeOf(ovCwd), { allowExperimental: true }).entries.some((row) => row.id === ovSecond.id), true);
+
+// 归档不是死数字：总数诚实，列表单独取，正文还能按 id 打开
+state.transact(store.scopeOf(ovCwd), {}, (draft) => {
+  const row = draft.entries.find((entry) => entry.id === ovSecond.id);
+  row.status = 'archived';
+  return { changed: true };
+});
+const ovArchived = await call('/lite-memory/overview', { sessionId: 'session-overview' });
+assert.equal(ovArchived.body.selected.stats.archived, 1);
+assert.equal(ovArchived.body.selected.records.some((row) => row.id === ovSecond.id), false);
+assert.equal(ovArchived.body.selected.archived.some((row) => row.id === ovSecond.id), true);
+const ovArchivedBody = await call('/lite-memory/body', { sessionId: 'session-overview', id: ovSecond.id, scopeKey: ovArchived.body.selected.key });
+assert.equal(ovArchivedBody.status, 200);
+assert.equal(ovArchivedBody.body.status, 'archived');
+assert.equal(ovArchivedBody.body.body, '右侧留白。');
+
 console.log('contract.test.mjs: all passed');

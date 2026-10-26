@@ -272,6 +272,53 @@ export function globalScope() {
   return { key: 'global', dir: path.join(memoryRoot(), 'global'), cwd: '', rootSource: 'global', confirmed: true };
 }
 
+/**
+ * 管理面枚举：只读已有 state.json 的项目层，不迁移旧格式、不创建目录。
+ * 损坏或读不出的层跳过；列表按更新时间倒序，limit 防一次扫太多。
+ */
+export function knownProjectScopes(limit = 40) {
+  const root = memoryRoot();
+  let names;
+  try {
+    names = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const rows = [];
+  for (const item of names) {
+    if (!item.isDirectory() || item.name === 'global' || item.name === 'sessions' || item.name.startsWith('.')) continue;
+    const dir = path.join(root, item.name);
+    const file = path.join(dir, 'state.json');
+    try {
+      if (!fs.statSync(file).isFile()) continue;
+    } catch {
+      continue;
+    }
+    let state;
+    try {
+      state = readEnvelope(file);
+    } catch {
+      continue;
+    }
+    if (!state) continue;
+    const entries = Array.isArray(state.entries) ? state.entries : [];
+    const active = entries.filter((entry) => entry.status !== 'archived');
+    const evolution = state.experimental && state.experimental.projectEvolution ? state.experimental.projectEvolution : {};
+    rows.push({
+      key: item.name,
+      dir,
+      cwd: typeof state.cwd === 'string' ? state.cwd : '',
+      updatedAt: state.updatedAt || '',
+      entries: active.length,
+      archived: entries.length - active.length,
+      experimental: active.filter((entry) => entry.origin === 'project_evolution' || Boolean(entry.learning)).length,
+      enabled: evolution.enabled === true,
+    });
+  }
+  rows.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  return rows.slice(0, Math.max(1, limit));
+}
+
 const stateFile = (scope) => path.join(scope.dir, 'state.json');
 const prevFile = (scope) => path.join(scope.dir, 'state.prev.json');
 const lockFile = (scope) => path.join(scope.dir, '.lock');

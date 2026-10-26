@@ -154,7 +154,7 @@ function fromFlat(record, status) {
  * 由 state.js 拦成报告，这里不猜、不补空正文。
  */
 export function loadIndex(scope, options = {}) {
-  if (!fs.existsSync(path.join(scope.dir, 'state.json'))) {
+  if (!options.readOnly && !fs.existsSync(path.join(scope.dir, 'state.json'))) {
     const report = state.migrationReport(scope);
     if (report.required || report.adoptable.length) state.migrateLegacy(scope);
   }
@@ -1282,9 +1282,9 @@ export function findAnywhere(id) {
 }
 
 /** 按 id 在项目层与全局层里找位置，不靠文案猜作用域；管理动作也要看得见已归档的条目。 */
-export function locate(scope, id) {
+export function locate(scope, id, options = {}) {
   for (const source of [scope, globalScope()]) {
-    const index = loadIndex(source);
+    const index = loadIndex(source, options);
     const active = index.entries.find((item) => item.id === id);
     if (active) return { scope: source, record: active, archived: false };
     const archived = index.archived.find((item) => item.id === id);
@@ -2289,7 +2289,7 @@ function learningRuleView(record) {
  * 普通记忆读取面不会调用这个入口。
  */
 export function learningSnapshot(scope, options = {}) {
-  const index = loadIndex(scope);
+  const index = loadIndex(scope, options);
   const evolution = index.__evolution;
   const rules = learningRulesOf(index).map(learningRuleView);
   return {

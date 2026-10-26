@@ -20,7 +20,31 @@ assert.ok(evolution, '项目开关没有注册');
 assert.equal(evolution.name, 'conversation.session.header.utilities');
 assert.equal(evolution.order, 30);
 
-const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf } = seen;
+// 记忆面板占整框浮层，不挤在会话列里。
+const panel = registrations.find((item) => item.id === 'lite-memory:panel');
+assert.ok(panel, '记忆面板没有注册');
+assert.equal(panel.name, 'shell.overlay');
+assert.equal(panel.order, 30);
+
+const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf } = seen;
+
+// 图谱只按真实数据画：共享标签成枢纽，显式关联成边，位置由 id 决定。
+const graph = graphOf([
+  { id: 'mem_aaaaaaaa', title: 'A', tags: ['发布'], topicKey: '上线', experimental: false, links: [{ id: 'mem_bbbbbbbb' }] },
+  { id: 'mem_bbbbbbbb', title: 'B', tags: ['发布'], topicKey: '上线', experimental: true, links: [] },
+  { id: 'mem_cccccccc', title: 'C', tags: ['环境'], topicKey: '', experimental: false, links: [] },
+]);
+assert.equal(graph.nodes.filter((node) => node.kind === 'memory').length, 3);
+assert.equal(graph.nodes.some((node) => node.id === 'tag:发布'), true);
+assert.equal(graph.nodes.some((node) => node.id === 'tag:环境'), true);
+assert.equal(graph.nodes.some((node) => node.id === 'topic:上线'), true);
+assert.equal(graph.edges.filter((edge) => edge.type === 'tag').length, 3);
+assert.equal(graph.edges.filter((edge) => edge.type === 'link').length, 1);
+assert.deepEqual(graphOf([{ id: 'mem_aaaaaaaa', title: 'A' }]).nodes[0].x, graphOf([{ id: 'mem_aaaaaaaa', title: 'A' }]).nodes[0].x);
+const pair = graphOf([{ id: 'mem_aaaaaaaa', title: 'A' }, { id: 'mem_bbbbbbbb', title: 'B' }]);
+assert.notEqual(pair.nodes[0].x, pair.nodes[1].x);
+assert.notEqual(pair.nodes[0].y, pair.nodes[1].y);
+
 const settled = (meta, extra = {}) => ({ kind: 'tool-result', meta, isError: false, content: [], ...extra });
 
 // 元数据只从落定结果里取，错误块和旧块一律不认。
@@ -69,4 +93,4 @@ assert.equal(turn[1].title, 'A2');
 // 旧行没有元数据：什么也不产出，绝不从文案猜 id。
 assert.deepEqual(citationsOfTurn([{ root: null }, { root: { kind: 'tool-result', content: [{ type: 'text', text: 'memory · saved "A" mem_aaaaaaaa' }] } }]), []);
 
-console.log('client.test.mjs: 10 passed');
+console.log('client.test.mjs: 11 passed');

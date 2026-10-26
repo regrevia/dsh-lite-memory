@@ -23,6 +23,7 @@ import {
   listCitations,
   readCitationBody,
   evolutionStatus,
+  isExperimentalRecord,
   setEvolution,
   taskState,
   saveTaskState,
@@ -142,7 +143,8 @@ function keepHandler(webServer, cwdForSession) {
           : pathname === REMOTE_PATH + '/citations' ? 'citations'
             : pathname === REMOTE_PATH + '/body' ? 'body'
               : pathname === REMOTE_PATH + '/move' ? 'move'
-                : pathname === REMOTE_PATH + '/evolution' ? 'evolution'
+                : pathname === REMOTE_PATH + '/overview' ? 'overview'
+                  : pathname === REMOTE_PATH + '/evolution' ? 'evolution'
                   : pathname === REMOTE_PATH + '/resume-move' ? 'resume-move' : '';
     if (!action) return sendJson(res, 404, { ok: false, reason: '未知操作' });
     let body;
@@ -161,8 +163,28 @@ function keepHandler(webServer, cwdForSession) {
       if (!id) return sendJson(res, 400, { ok: false, reason: '缺少 id' });
       const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
       const cwd = typeof body.cwd === 'string' ? body.cwd : '';
+      const scopeKey = typeof body.scopeKey === 'string' ? body.scopeKey : '';
       let found;
-      if (sessionId) {
+      if (scopeKey) {
+        /**
+         * 面板可以读枚举出来的项目层，但键必须来自服务端列表；
+         * 不接受客户端拼路径，会话也只用来确认当前身份。
+         */
+        if (!cwdForSession(sessionId)) return sendJson(res, 409, { ok: false, reason: '这个会话还没有项目目录' });
+        const listed = state.knownProjectScopes().find((row) => row.key === scopeKey);
+        const target = scopeKey === 'global' ? globalScope()
+          : listed ? { key: listed.key, dir: listed.dir, cwd: listed.cwd || '', requestedCwd: listed.cwd || '', rootSource: 'configured', confirmed: true }
+            : null;
+        if (!target) return sendJson(res, 404, { ok: false, reason: '没有这个项目' });
+        const located = locate(target, id, { readOnly: true });
+        if (!located) return sendJson(res, 200, { ok: true, status: 'gone', id });
+        found = {
+          ...located.record,
+          scope: located.scope.key === 'global' ? 'global' : 'project',
+          scopeLabel: located.scope.key === 'global' ? '全局' : path.basename(located.scope.cwd || '') || located.scope.key,
+          body: located.record.body,
+        };
+      } else if (sessionId) {
         try {
           found = readCitationBody(sessionId, id);
         } catch {
@@ -171,7 +193,7 @@ function keepHandler(webServer, cwdForSession) {
         /** 不在本会话引用里就当已消失：不给跨会话探正文，界面也只显示「已删除」。 */
         if (!found) return sendJson(res, 200, { ok: true, status: 'gone', id });
       } else if (cwd) {
-        const located = locate(scopeOf(cwd), id);
+        const located = locate(scopeOf(cwd), id, { readOnly: true });
         if (!located) return sendJson(res, 200, { ok: true, status: 'gone', id });
         found = {
           ...located.record,
@@ -193,6 +215,166 @@ function keepHandler(webServer, cwdForSession) {
         scopeLabel: found.scopeLabel || '',
         revision: found.revision,
         body: found.body,
+      });
+    }
+
+    /**
+     * 面板总览：当前会话项目、可切换的项目层与全局层，都从服务端枚举。
+     * 只读；正文不进列表，点开单条再按 scopeKey 取。
+     */
+    if (action === 'overview') {
+      const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
+      if (!sessionId) return sendJson(res, 400, { ok: false, reason: '缺少 sessionId' });
+      const cwd = typeof cwdForSession === 'function' ? cwdForSession(sessionId) : '';
+      if (!cwd) return sendJson(res, 409, { ok: false, reason: '这个会话还没有项目目录' });
+      const scope = scopeOf(cwd);
+      if (!scope.confirmed) return sendJson(res, 409, { ok: false, reason: '项目根还没确认，先重新打开这个项目' });
+      let currentState;
+      try {
+        currentState = state.load(scope).state;
+      } catch (error) {
+        return sendJson(res, 409, { ok: false, reason: error instanceof Error ? error.message : '这个项目的记忆读不出来' });
+      }
+      const currentEvolution = (() => {
+        try {
+          return learningSnapshot(scope, { readOnly: true });
+        } catch {
+          return null;
+        }
+      })();
+      const labelOf = (target) => target.key === 'global' ? '全局' : (path.basename(target.cwd || '') || target.key);
+      const listed = state.knownProjectScopes();
+      const scopes = listed.map((row) => ({
+        key: row.key,
+        kind: 'project',
+        label: path.basename(row.cwd || '') || row.key,
+        entries: row.entries,
+        archived: row.archived,
+        experimental: row.experimental,
+        enabled: row.enabled,
+        updatedAt: row.updatedAt,
+      }));
+      if (!scopes.some((row) => row.key === scope.key)) {
+        const active = currentState.entries.filter((entry) => entry.status !== 'archived');
+        scopes.unshift({
+          key: scope.key,
+          kind: 'project',
+          label: labelOf(scope),
+          entries: active.length,
+          archived: currentState.entries.length - active.length,
+          experimental: active.filter((entry) => isExperimentalRecord(entry)).length,
+          enabled: currentState.experimental?.projectEvolution?.enabled === true,
+          updatedAt: currentState.updatedAt || '',
+        });
+      }
+      let globalState = null;
+      try {
+        globalState = state.load(globalScope()).state;
+      } catch {
+        globalState = null;
+      }
+      if (globalState) {
+        const active = globalState.entries.filter((entry) => entry.status !== 'archived');
+        scopes.push({
+          key: 'global',
+          kind: 'global',
+          label: '全局',
+          entries: active.length,
+          archived: globalState.entries.length - active.length,
+          experimental: 0,
+          enabled: false,
+          updatedAt: globalState.updatedAt || '',
+        });
+      } else {
+        scopes.push({ key: 'global', kind: 'global', label: '全局', entries: 0, archived: 0, experimental: 0, enabled: false, updatedAt: '' });
+      }
+      const requested = typeof body.scopeKey === 'string' ? body.scopeKey : '';
+      let selectedScope = scope;
+      if (requested === 'global') selectedScope = globalScope();
+      else if (requested) {
+        if (requested === scope.key) selectedScope = scope;
+        else {
+          const row = listed.find((item) => item.key === requested);
+          if (!row) return sendJson(res, 404, { ok: false, reason: '没有这个项目' });
+          selectedScope = { key: row.key, dir: row.dir, cwd: row.cwd || '', requestedCwd: row.cwd || '', rootSource: 'configured', confirmed: true };
+        }
+      }
+      let index;
+      try {
+        index = loadIndex(selectedScope, { readOnly: true });
+      } catch (error) {
+        return sendJson(res, 409, { ok: false, reason: error instanceof Error ? error.message : '这个项目的记忆读不出来' });
+      }
+      const records = index.entries.filter((entry) => entry.status !== 'archived').map((record) => ({
+        id: record.id,
+        title: record.title || '',
+        summary: record.summary || '',
+        kind: record.kind || 'note',
+        when: record.when || '',
+        tags: Array.isArray(record.tags) ? record.tags.slice(0, 12) : [],
+        topicKey: record.topicKey || '',
+        triggers: Array.isArray(record.triggers) ? record.triggers.slice(0, 8) : [],
+        applicability: record.applicability || 'all_in_scope',
+        conditions: Array.isArray(record.conditions) ? record.conditions.slice(0, 8) : [],
+        selection: record.selection || null,
+        links: Array.isArray(record.links) ? record.links.slice(0, 24).map((link) => ({ type: link.type || 'related', id: link.id })) : [],
+        revision: Number(record.revision) || 1,
+        origin: record.origin || 'user_explicit',
+        updated: record.updated || '',
+        lastUsed: record.lastUsed || '',
+        bytes: Number(record.bytes) || 0,
+        experimental: isExperimentalRecord(record),
+        learning: record.learning ? {
+          state: record.learning.state || '',
+          pinned: record.learning.pinned === true,
+          samples: Array.isArray(record.learning.samples) ? record.learning.samples.length : 0,
+          checkpoints: Array.isArray(record.learning.checkpoints) ? record.learning.checkpoints.length : 0,
+          evidence: Array.isArray(record.learning.evidence) ? record.learning.evidence.length : 0,
+          versions: Array.isArray(record.learning.versions) ? record.learning.versions.length : 0,
+        } : null,
+      }));
+      const archives = Array.isArray(index.archived) ? index.archived : [];
+      const archived = archives.slice(0, 80).map((record) => ({
+        id: record.id,
+        title: record.title || '',
+        revision: Number(record.revision) || 1,
+        updated: record.updated || '',
+      }));
+      const tags = new Set();
+      let links = 0;
+      for (const record of records) {
+        for (const tag of record.tags) tags.add(tag);
+        links += record.links.length;
+      }
+      const selectedEvolution = selectedScope.key === scope.key
+        ? currentEvolution
+        : (() => {
+          try {
+            return learningSnapshot(selectedScope, { readOnly: true });
+          } catch {
+            return null;
+          }
+        })();
+      return sendJson(res, 200, {
+        ok: true,
+        current: { key: scope.key, label: labelOf(scope), evolution: currentEvolution },
+        scopes,
+        selected: {
+          key: selectedScope.key,
+          kind: selectedScope.key === 'global' ? 'global' : 'project',
+          label: labelOf(selectedScope),
+          updatedAt: records.reduce((latest, record) => record.updated > latest ? record.updated : latest, ''),
+          evolution: selectedEvolution,
+          records,
+          archived,
+          stats: {
+            total: records.length,
+            experimental: records.filter((record) => record.experimental).length,
+            links,
+            tags: tags.size,
+            archived: archives.length,
+          },
+        },
       });
     }
 
