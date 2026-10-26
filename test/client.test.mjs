@@ -26,7 +26,7 @@ assert.ok(panel, '记忆面板没有注册');
 assert.equal(panel.name, 'shell.overlay');
 assert.equal(panel.order, 30);
 
-const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf } = seen;
+const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf } = seen;
 
 // 图谱只按真实数据画：共享标签成枢纽，显式关联成边，位置由 id 决定。
 const graph = graphOf([
@@ -111,4 +111,36 @@ assert.equal(turn[1].id, 'mem_bbbbbbbb');
 // 旧行没有元数据：什么也不产出，绝不从文案猜 id。
 assert.deepEqual(citationsOfTurn([{ root: null }, { root: { kind: 'tool-result', content: [{ type: 'text', text: 'memory · saved "A" mem_aaaaaaaa' }] } }]), []);
 
-console.log('client.test.mjs: 11 passed');
+// 处理状态只认服务端枚举；中文 reason 不参与猜测。
+assert.equal(processingStatusOf({ processingStatus: 'applied' }), 'applied');
+assert.equal(processingStatusOf({ outcome: { status: 'superseded' } }), 'superseded');
+assert.equal(processingStatusOf({ status: 'failed' }), 'failed');
+assert.equal(processingStatusOf({ status: 'ok', reason: '处理失败' }), '');
+assert.equal(processingStatusOf({ reason: '已应用' }), '');
+
+// 当前正文与历史版本分开：历史行只给 old → new，不拼进当前正文。
+const memoryPayload = {
+  currentBody: '新的正文',
+  versions: [
+    { revision: 1, body: '旧的正文', at: '2026-01-01' },
+    { revision: 2, body: '中间正文', at: '2026-02-01' },
+  ],
+};
+assert.equal(currentBodyOf(memoryPayload), '新的正文');
+const diffs = historyDiffsOf(memoryPayload);
+assert.equal(diffs.length, 2);
+assert.equal(diffs[0].old, '旧的正文');
+assert.equal(diffs[0].next, '中间正文');
+assert.equal(diffs[1].next, '新的正文');
+assert.equal(currentBodyOf({ record: { current: { body: '记录正文' }, body: '旧字段' } }), '记录正文');
+assert.deepEqual(historyDiffsOf({ body: '单版本' }), []);
+
+// 图谱截断时保留真实总数，60 是绘制上限而不是总数。
+const many = Array.from({ length: 65 }, (_, index) => ({ id: `mem_${String(index).padStart(8, '0')}`, title: `T${index}` }));
+const big = graphOf(many);
+assert.equal(big.shown, 60);
+assert.equal(big.total, 65);
+assert.equal(big.nodes.filter((node) => node.kind === 'memory').length, 60);
+assert.equal(ruleGraphOf(Array.from({ length: 65 }, (_, index) => ({ id: `ev_${String(index).padStart(8, '0')}`, title: `R${index}`, conditions: [] }))).total, 65);
+
+console.log('client.test.mjs: 14 passed');

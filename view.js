@@ -216,6 +216,48 @@ export function statusOf(record, context) {
   return 'not_applicable';
 }
 
+/**
+ * 所有读入口只走这一处：项目归属、实验开关、学习状态、试用到期、暂停/冲突、复核状态、适用性。
+ * auto 只放行完全匹配；search 允许条件未知（只给状态）；read 允许条件未知但要正文由调用方决定。
+ */
+/** 条件上下文与请求任务合并：普通记忆也按当前任务判适用，不要求实验先开。 */
+export function contextWithTask(context = {}, task = {}) {
+  const out = { ...(context || {}) };
+  if (!task || typeof task !== 'object') return out;
+  if (task.kind && !out.taskKind) out.taskKind = task.kind;
+  if (task.seriesId && !out.seriesId) out.seriesId = task.seriesId;
+  if (task.artifactKey && !out.artifactKey) out.artifactKey = task.artifactKey;
+  if (task.phase && !out.phase) out.phase = task.phase;
+  return out;
+}
+
+export function eligibility(record, runtime = {}, purpose = 'read', now = Date.now()) {
+  if (!record) return { ok: false, status: 'gone', reason: 'gone' };
+  if (record.status === 'archived') return { ok: false, status: 'gone', reason: 'archived' };
+  const pid = runtime && runtime.projectId;
+  if (pid && record.ownerProjectId && record.ownerProjectId !== pid) {
+    return { ok: false, status: 'not_applicable', reason: 'owner_mismatch' };
+  }
+  const experimental = record.origin === 'project_evolution';
+  if (experimental && runtime && runtime.experimental === false) {
+    return { ok: false, status: 'needs_context', reason: 'experimental_disabled' };
+  }
+  const learning = record.learning && typeof record.learning === 'object' ? record.learning : null;
+  if (experimental) {
+    if (!experimentalUsable(record, now)) return { ok: false, status: 'needs_context', reason: 'learning_inactive' };
+    if (learning && (learning.state === 'paused' || learning.blockedReason)) {
+      return { ok: false, status: 'needs_context', reason: 'learning_paused' };
+    }
+  }
+  if (purpose === 'auto' && record.reviewState === 'legacy_unreviewed') {
+    return { ok: false, status: 'needs_context', reason: 'legacy_unreviewed' };
+  }
+  const status = statusOf(record, contextWithTask((runtime && runtime.context) || {}, (runtime && runtime.task) || {}));
+  if (status === 'not_applicable') return { ok: false, status, reason: 'condition_mismatch' };
+  if (purpose === 'auto' && status !== 'ok') return { ok: false, status, reason: 'needs_context' };
+  return { ok: true, status, reason: '' };
+}
+
 /** 旧库迁过来的条目没复核过，先让人看见再决定，不自动注入。 */
 export function canAutoRecall(record, context) {
   if (!record || record.reviewState === 'legacy_unreviewed') return false;
@@ -344,11 +386,26 @@ export function rank(records, query, options = {}) {
   for (const record of records || []) {
     if (!record || record.status === 'archived') continue;
     if (options.requireApplicable && record.reviewState === 'legacy_unreviewed') continue;
-    const status = options.requireApplicable ? statusOf(record, context) : 'ok';
-    if (options.requireApplicable && status !== 'ok') continue;
+    let status;
+    if (options.runtime) {
+      const gate = eligibility(record, options.runtime, options.requireApplicable ? 'auto' : 'search', options.now || Date.now());
+      if (!gate.ok) continue;
+      status = gate.status;
+    } else {
+      status = options.requireApplicable ? statusOf(record, context) : 'ok';
+      if (options.requireApplicable && status !== 'ok') continue;
+    }
     const matched = matchScore(record, query);
     if (matched.score < MATCH_FLOOR) continue;
-    rows.push({ record, score: matched.score, hints: matched.hints, status });
+    /** 当前任务明确的话题/工作类型优先，但不覆盖查询本身的字面命中。 */
+    const task = options.task || {};
+    const sameTask = (record.conditions || []).some((condition) => {
+      if (condition.key === 'taskKind') return task.kind && sameText(condition.value, task.kind);
+      if (condition.key === 'seriesId') return task.seriesId && sameText(condition.value, task.seriesId);
+      if (condition.key === 'artifactKey') return task.artifactKey && sameText(condition.value, task.artifactKey);
+      return false;
+    });
+    rows.push({ record, score: matched.score + (sameTask ? 1.5 : 0), hints: matched.hints, status });
   }
   rows.sort((a, b) => b.score - a.score
     || String(b.record.lastUsed || '').localeCompare(String(a.record.lastUsed || ''))

@@ -769,4 +769,227 @@ test('D10 效果摘要只算最近 64 条，未知用量不补零', () => {
   assert.equal(after.outputTokens, null);
 });
 
+test('L01 没有作品绑定的长期项目要求仍是待确认候选', () => {
+  const message = (id, text) => ({ id, source: { kind: 'user' }, content: [{ type: 'text', text }] });
+  const candidate = learning.candidateFrom({
+    messages: [message('m1', '以后数据库查询都改成参数化查询')],
+    anchor: null,
+    sessionId: 's1',
+    projectId: 'proj_a',
+    now: 1000,
+  });
+  assert.ok(candidate);
+  assert.equal(candidate.scope, 'project');
+  assert.equal(candidate.state, 'pending');
+  assert.equal(candidate.episodeId, '');
+  assert.equal(candidate.seriesId, '');
+  assert.deepEqual(candidate.messageIds, ['m1']);
+  assert.equal(candidate.expectedTarget.scope, 'project');
+  assert.equal(candidate.expectedTarget.projectId, 'proj_a');
+  assert.equal(candidate.expectedTarget.applicability, 'unresolved');
+  assert.match(candidate.sourceExcerpt, /参数化查询/);
+  /** 跨项目一律不接收；没有项目身份的裸反馈也不进候选。 */
+  assert.equal(learning.candidateFrom({
+    messages: [message('m1', '以后数据库查询都改成参数化查询')],
+    anchor: { episodeId: 'e0', projectId: 'proj_b', status: 'active' },
+    projectId: 'proj_a',
+  }), null);
+  assert.equal(learning.candidateFrom({ messages: [message('m1', '以后都参数化查询')] }), null);
+  /** 短期例外即使没绑定作品也不当项目规范。 */
+  assert.equal(learning.candidateFrom({
+    messages: [message('m1', '这次开头先别放字幕')],
+    anchor: null,
+    projectId: 'proj_a',
+  }), null);
+  /** 有作品绑定仍走作品作用域，且不把项目当成单条栏目。 */
+  const bound = learning.candidateFrom({
+    messages: [message('m1', '以后字幕都改成底部安全区')],
+    anchor: { episodeId: 'e1', projectId: 'proj_a', status: 'active', taskKind: 'video', seriesId: 's1' },
+    sessionId: 's1',
+    projectId: 'proj_a',
+  });
+  assert.equal(bound.scope, 'episode');
+  assert.equal(bound.episodeId, 'e1');
+  assert.equal(bound.expectedTarget.episodeId, 'e1');
+  assert.equal(bound.seriesId, 's1');
+});
+
+test('L02 先按相关性选规则，再截断，字幕规则不会被挤掉', () => {
+  const rows = [];
+  for (let index = 0; index < 6; index += 1) {
+    rows.push({
+      id: `mem_a${index}`, topicKey: `配色${index}`, title: `配色${index}`,
+      body: `配色方案${index}`, summary: `配色经验${index}`,
+      conditions: [], applicability: 'all_in_scope',
+      learning: { state: 'active' }, updated: '2026-01-01T00:00:00.000Z',
+    });
+  }
+  rows.push({
+    id: 'mem_sub', topicKey: '字幕样式', title: '字幕样式', body: '字幕放底部安全区',
+    summary: '字幕经验', conditions: [{ key: 'seriesId', value: '字幕' }],
+    applicability: 'conditional', learning: { state: 'trial' }, updated: '2025-01-01T00:00:00.000Z',
+  });
+  rows.push({
+    id: 'mem_old', topicKey: '标题', title: '标题', body: '标题要短',
+    summary: '标题经验', conditions: [], applicability: 'all_in_scope',
+    learning: { state: 'pending' }, updated: '2025-01-01T00:00:00.000Z',
+  });
+  rows.push({
+    id: 'mem_bgm', topicKey: '配乐', title: '配乐', body: '配乐低一点',
+    summary: '配乐经验', conditions: [], applicability: 'all_in_scope',
+    learning: { state: 'active' }, updated: '2025-01-01T00:00:00.000Z',
+  });
+  rows.push({
+    id: 'mem_safe', topicKey: '字幕安全区', title: '字幕安全区', body: '字幕不要贴边',
+    summary: '字幕留安全区', conditions: [{ key: 'seriesId', value: '字幕' }],
+    applicability: 'conditional', learning: { state: 'active' }, updated: '2024-01-01T00:00:00.000Z',
+  });
+  const context = { query: '字幕位置太低，以后字幕都放底部安全区', dimensions: ['字幕'] };
+  const ranked = learning.rankRules(rows, context);
+  assert.equal(ranked[0].id, 'mem_safe');
+  assert.equal(ranked[1].id, 'mem_sub');
+  const selected = learning.selectRules(rows, { ...context, limit: 6 });
+  assert.equal(selected.length, 6);
+  assert.equal(selected[0].id, 'mem_safe');
+  assert.equal(selected[1].id, 'mem_sub');
+  assert.deepEqual(learning.rankRules(rows, context).map((row) => row.id), ranked.map((row) => row.id));
+  /** buildCallInput 的输入上限是 6，但字幕规则必须在里面。 */
+  const input = learning.buildCallInput({
+    projectId: 'proj', episodeId: 'e1', taskKind: 'video', seriesId: '字幕', phase: 'p1',
+    feedback: { text: '字幕位置太低，以后字幕都放底部安全区', cue: { dimension: '字幕' }, messageIds: ['m1'] },
+    rules: rows, ranges: RANGES,
+  });
+  assert.ok(input.rules.length <= 6);
+  const ids = new Set(Object.values(input.refs.rules));
+  assert.ok(ids.has('mem_safe'));
+  assert.ok(ids.has('mem_sub'));
+});
+
+test('L03 反馈类型限制动作：例外/检查点/认可不能写规范', () => {
+  const rules = [{ ref: 'r0', id: 'mem_1', revision: 2, conditions: [{ key: 'seriesId', value: '口播' }] }];
+  const refs = { feedback: { u0: 'm1' }, rules: { r0: 'mem_1' } };
+  const check = (change) => learning.validateChange(change, { refs, rules, ranges: RANGES });
+  assert.equal(check({ ...NEW_CHANGE, target: 'new', feedbackType: 'task_exception' }).ok, false);
+  assert.equal(check({ ...NEW_CHANGE, target: 'new', feedbackType: 'unclear' }).ok, false);
+  const checkpoint = check({ target: 'r0', feedbackType: 'execution_miss', currentText: '发布前核对字幕安全区', evidence: ['u0'] });
+  assert.equal(checkpoint.ok, true, checkpoint.reason);
+  const rewritten = check({ target: 'r0', feedbackType: 'execution_miss', currentText: '新正文', title: '新标题' });
+  assert.equal(rewritten.ok, false);
+  const newAccept = check({ target: 'new', feedbackType: 'aspect_accept', topicKey: '字幕', currentText: '字幕放底部' });
+  assert.equal(newAccept.ok, false);
+  const accept = check({ target: 'r0', feedbackType: 'aspect_accept', conditions: [{ key: 'seriesId', value: '口播' }], evidence: ['u0'] });
+  assert.equal(accept.ok, true, accept.reason);
+  const mismatched = check({ target: 'r0', feedbackType: 'aspect_accept', conditions: [{ key: 'seriesId', value: '字幕' }] });
+  assert.equal(mismatched.ok, false);
+  assert.equal(mismatched.reason, '认可条件与目标规则不一致');
+  const rewrite = check({ target: 'r0', feedbackType: 'aspect_accept', currentText: '顺手把正文改了' });
+  assert.equal(rewrite.ok, false);
+  /** 同类型走 nextLearningState 也不抬状态。 */
+  const active = { id: 'mem_1', revision: 2, topicKey: '字幕', body: '字幕放底部', applicability: 'conditional', conditions: [{ key: 'seriesId', value: '口播' }], learning: { state: 'active', supportedEpisodeIds: ['e1', 'e2'], evidence: [] } };
+  for (const feedbackType of ['execution_miss', 'aspect_accept', 'artifact_accept', 'task_exception', 'unclear']) {
+    const next = learning.nextLearningState({ existing: active, change: { id: 'mem_1', feedbackType }, evidence: { episodeId: 'e3' }, now: 1000 });
+    assert.equal(next.state, 'active', feedbackType);
+    assert.deepEqual(next.supportedEpisodeIds, ['e1', 'e2'], feedbackType);
+    const created = learning.nextLearningState({ existing: null, change: { feedbackType }, evidence: { episodeId: 'e1' }, now: 1000 });
+    assert.notEqual(created.state, 'active', feedbackType);
+  }
+});
+
+test('L04 先算目标状态再查配额，过期候选可恢复', () => {
+  const base = { existing: null, evidence: { episodeId: 'e1', messageIds: ['m1'], sourceExcerpt: '以后都用参数化查询' }, pending: 12, rules: 0, now: 1000 };
+  const active = learning.admitChange({ ...base, change: NEW_CHANGE, explicitLongTerm: true });
+  assert.equal(active.ok, true, active.reason);
+  assert.equal(active.learning.state, 'active');
+  assert.equal(active.merged.current.body, NEW_CHANGE.currentText);
+  const candidate = learning.admitChange({
+    ...base,
+    pending: 12,
+    change: { ...NEW_CHANGE, conditions: [], applicability: 'unresolved' },
+  });
+  assert.equal(candidate.ok, false);
+  assert.equal(candidate.reason, '待确认候选已经到上限');
+  const full = learning.admitChange({ ...base, rules: learning.LIMITS.rules, pending: 0, change: NEW_CHANGE });
+  assert.equal(full.ok, false);
+  assert.equal(full.reason, '项目实验规则已经到上限');
+  const existing = {
+    id: 'mem_1', revision: 3, topicKey: '口播开头', body: '开头三句内给结论。',
+    applicability: 'conditional', conditions: [{ key: 'seriesId', value: '口播' }],
+    learning: {
+      state: 'trial',
+      specDigest: learning.specDigestOf({ topicKey: '口播开头', body: '开头三句内给结论。', applicability: 'conditional', conditions: [{ key: 'seriesId', value: '口播' }] }),
+      supportedEpisodeIds: [],
+      evidence: [],
+    },
+  };
+  const update = learning.admitChange({
+    existing, change: { ...NEW_CHANGE, target: 'r0' }, evidence: { episodeId: 'e2' }, pending: 99, rules: 99, now: 1000,
+  });
+  assert.equal(update.ok, true, update.reason);
+  assert.equal(update.learning.state, 'trial');
+  /** 过期待确认既不是永久候选，也不该被删；能重新唤起，且不占有效名额。 */
+  const stale = { id: 'mem_stale', origin: 'project_evolution', learning: { state: 'pending', createdAt: new Date(1000).toISOString() } };
+  const now = 1000 + learning.LIMITS.trialMs + 1000;
+  assert.equal(learning.candidateExpired(stale.learning, now), true);
+  assert.equal(learning.pendingCount([stale], now), 0);
+  assert.equal(learning.pendingCount([stale], 1000), 1);
+  const plan = learning.lifecycle([stale], now);
+  assert.deepEqual(plan.purge, []);
+  assert.deepEqual(plan.recoverable, ['mem_stale']);
+  const revived = learning.reviveCandidate(stale.learning, { now });
+  assert.equal(revived.state, 'pending');
+  assert.equal(learning.candidateExpired(revived, now), false);
+});
+
+test('L05 规范或目标变了旧证据清零，来源与版本绑定留在规则上', () => {
+  const conditions = [{ key: 'seriesId', value: '口播' }];
+  const body = '开头三句内给结论。';
+  const existing = {
+    id: 'mem_1', revision: 4, topicKey: '口播开头', title: '口播开头', body,
+    applicability: 'conditional', conditions,
+    learning: {
+      state: 'active', specDigest: learning.specDigestOf({ topicKey: '口播开头', body, applicability: 'conditional', conditions }),
+      supportedEpisodeIds: ['e1', 'e2'],
+      evidence: [{ episodeId: 'e1' }, { episodeId: 'e2' }],
+      samples: [{ episodeId: 'e1', dimension: '字幕' }],
+    },
+  };
+  const evidence = { episodeId: 'e3', messageIds: ['m1', 'm2', 'm3', 'm4'], sourceExcerpt: '原始反馈：以后开头先给结论' };
+  const changed = learning.nextLearningState({
+    existing,
+    change: { id: 'mem_1', currentText: '开头五句内给结论。', feedbackType: 'spec_change' },
+    evidence: { ...evidence, explicitLongTerm: true },
+    specChanged: true,
+    now: 2000,
+  });
+  assert.deepEqual(changed.supportedEpisodeIds, ['e3']);
+  assert.equal(changed.evidence.length, 1);
+  assert.equal(changed.evidenceResetReason, 'spec_changed');
+  assert.equal(changed.samples, undefined);
+  assert.equal(changed.sourceExcerpt, evidence.sourceExcerpt);
+  assert.deepEqual(changed.binding.messageIds, ['m2', 'm3', 'm4']);
+  assert.equal(changed.binding.targetId, 'mem_1');
+  assert.equal(changed.binding.baseRevision, 4);
+  assert.equal(changed.state, 'active');
+  /** 没有规范变化时保留证据，只追加本次作品。 */
+  const kept = learning.nextLearningState({
+    existing,
+    change: { id: 'mem_1', currentText: body, feedbackType: 'spec_change' },
+    evidence: { episodeId: 'e9', sourceExcerpt: '补充' },
+    specChanged: false,
+    now: 2000,
+  });
+  assert.deepEqual(kept.supportedEpisodeIds, ['e1', 'e2', 'e9']);
+  assert.equal(kept.evidenceResetReason, undefined);
+  /** 目标对象换了也清零。 */
+  const retargeted = learning.nextLearningState({
+    existing,
+    change: { id: 'mem_2', feedbackType: 'spec_change' },
+    evidence: { episodeId: 'e3' },
+    specChanged: false,
+    now: 2000,
+  });
+  assert.deepEqual(retargeted.supportedEpisodeIds, ['e3']);
+  assert.equal(retargeted.evidenceResetReason, 'target_changed');
+});
+
 console.log(`learning.test.mjs: ${passed} passed`);

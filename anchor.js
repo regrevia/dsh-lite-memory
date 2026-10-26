@@ -26,6 +26,14 @@ const OLD_WORK_ACTION = /(继续|接着|再改|改成|改一下|调整|优化|�
 /** 创作类与工程类任务的默认判断不同；同一主题从写口播切到排查代码，不能沿用旧栏目。 */
 const CONTENT_INTENT = /(口播|拍摄|录制|剪辑|文案|封面|字幕|直播|视频|选题|脚本|一期|栏目)/;
 const ENGINEERING_INTENT = /(代码|排查|故障|部署|调试|重构|接口|数据库|查询|报错|日志|服务|环境|依赖|测试|配置|修复)/;
+/** 运行时任务判断只分工程/创作两类；两类词同时出现时工程证据优先。 */
+const CODE_TASK_WORDS = /(源码|代码|插件|仓库|数据库|报错|日志|重构|修复|排查|测试|编译|依赖)/;
+const CONTENT_TASK_WORDS = /(口播|选题|拍摄|剪辑|发布|封面|字幕)/;
+/** 栏目名后面直接跟这些词时，说的对象是代码/系统，不是这个内容栏目。 */
+const CODE_OBJECT_AFTER = /^\s*(插件|源码|代码|仓库|报错|日志|接口|函数|模块|依赖|测试|编译)/;
+/** 明确把栏目放下、停掉，才算撤销；「不要按口播的规矩来」只是否定规则。 */
+const REVOKE_SERIES_BEFORE = /(先不做|不做了|不再做|不做|不搞|不拍|不写|不剪|不发|先放着|先放|放一边|暂停|停掉|去掉)[^，。；！？\n]{0,8}$/;
+const REVOKE_SERIES_AFTER = /^(了|啦|吧|先不做|不做了|不搞了|不拍了|不写了|暂停|先放着|放一边)/;
 /** 这些词描述的是旧稿的某个方面，不是新对象；不该因为它们出现就撤销旧范围。 */
 const ASPECT_NOISE = /(节奏|速度|风格|语气|口吻|结构|长度|时长|篇幅|配色|字号|字体|标题|文案|措辞|逻辑|细节|开头|结尾|过渡|画面|镜头|音乐|音效|字幕|参数|格式|排版)/g;
 /** 程度、指代和虚词组成的二字片段不是对象证据。 */
@@ -111,10 +119,69 @@ export function seriesChosenBy(query, series) {
     if (at < 0) return false;
     const before = value.slice(Math.max(0, at - 14), at);
     const after = value.slice(at + name.length);
-    if (!NEGATED_SERIES.test(before) && !MENTION_SERIES.test(before) && !PAUSED_BEFORE.test(before) && !PAUSED_SERIES.test(after)) return true;
+    if (!NEGATED_SERIES.test(before) && !MENTION_SERIES.test(before) && !PAUSED_BEFORE.test(before)
+      && !PAUSED_SERIES.test(after) && !CODE_OBJECT_AFTER.test(after)) return true;
     from = at + name.length;
   }
   return false;
+}
+
+/** 任务类型只作上下文判断，不替代已有栏目：工程证据优先于创作词。 */
+export function taskKindOf(query) {
+  const value = text(query, 400);
+  if (!value) return '';
+  if (CODE_TASK_WORDS.test(value)) return 'code';
+  if (CONTENT_TASK_WORDS.test(value)) return 'content';
+  return '';
+}
+
+/** 从一句话里找出被明确撤销的栏目；只认「先不做 / 放一边」这类停做动作。 */
+export function revokeSeriesBy(query, registeredSeries) {
+  const value = text(query, 400);
+  if (!value) return [];
+  const series = [...new Set((Array.isArray(registeredSeries) ? registeredSeries : []).map((item) => text(item, 40)).filter(Boolean))];
+  return series.filter((name) => {
+    let from = 0;
+    while (from <= value.length) {
+      const at = value.indexOf(name, from);
+      if (at < 0) return false;
+      const before = value.slice(Math.max(0, at - 12), at);
+      const after = value.slice(at + name.length);
+      if (REVOKE_SERIES_BEFORE.test(before) || REVOKE_SERIES_AFTER.test(after)) return true;
+      from = at + name.length;
+    }
+    return false;
+  });
+}
+
+/**
+ * 生成本轮请求的运行时任务上下文：身份字段只来自可信批次，
+ * 任务字段优先用已绑定锚点，未绑定时才看本句的任务类型。
+ */
+export function buildRuntimeContext(input = {}) {
+  const projectId = text(input.projectId, 240);
+  const sessionId = text(input.sessionId, 120);
+  const messageIds = (Array.isArray(input.messageIds) ? input.messageIds : []).map((id) => text(id, 120)).filter(Boolean);
+  const batchKey = text(input.batchKey, 120) || requestBatchKey(messageIds);
+  const anchor = input.anchor && typeof input.anchor === 'object' ? input.anchor : null;
+  const episode = input.episode && typeof input.episode === 'object' ? input.episode : null;
+  const anchorKind = text(anchor && anchor.taskKind, 40);
+  const episodeKind = text(episode && episode.taskKind, 40);
+  const inferredKind = taskKindOf(input.query);
+  const kind = episodeKind || anchorKind || inferredKind;
+  return {
+    projectId,
+    sessionId,
+    requestId: contextIdFor(projectId, batchKey, text(episode && episode.episodeId, 120) || text(anchor && anchor.episodeId, 120)),
+    controlEpoch: input.controlEpoch === undefined || input.controlEpoch === null ? '' : String(input.controlEpoch),
+    task: {
+      kind,
+      seriesId: text(episode && episode.seriesId, 80) || text(anchor && anchor.seriesId, 80),
+      artifactKey: text(episode && episode.artifactKey, 120) || text(anchor && anchor.artifactKey, 120),
+      phase: text(episode && episode.phase, 40) || text(anchor && anchor.phase, 40),
+      evidence: episodeKind || anchorKind ? 'explicit' : (inferredKind ? 'query' : 'none'),
+    },
+  };
 }
 
 export function requestBatchKey(messageIds) {
@@ -314,8 +381,13 @@ export function routeTask(tasksInput, input = {}) {
   /** 用户在这句话里点名的栏目优先于旧栏目和项目默认值。 */
   const namedSeries = registered.find((series) => seriesChosenBy(query, series)) || '';
   const changedSeries = current && namedSeries && namedSeries !== (current.seriesId || '') ? namedSeries : '';
-  const fallbackKind = (currentEpisode && currentEpisode.taskKind)
-    || (input.defaults && input.defaults.taskKind) || '';
+  const projectDefaults = input.defaults || tasks.defaults;
+  const queryKind = taskKindOf(query);
+  /** 显式任务类型（调用方指定，或本句是很明确的工程任务）优先于继承和项目默认值。 */
+  const explicitKind = text(input.taskKind, 40) || (input.selection && text(input.selection.taskKind, 40))
+    || (queryKind === 'code' ? 'code' : '');
+  const fallbackKind = explicitKind || (currentEpisode && currentEpisode.taskKind)
+    || (projectDefaults && projectDefaults.taskKind) || '';
 
   if ((!current || current.status === 'unbound' || current.status === 'proposed') && input.selection && (input.selection.seriesId || input.selection.taskKind)) {
     const transitionId = transitionIdFor(batchKey, current ? current.bindingRevision || 0 : 0);
@@ -352,6 +424,31 @@ export function routeTask(tasksInput, input = {}) {
     return { tasks, anchor: current, episode: currentEpisode, decision: { kind: 'none', reason: 'thanks', pointer: true }, changed: false };
   }
 
+  /** 明确撤销旧栏目要先于续作和项目默认值：说了「先不做口播」就不能再继承口播正文。 */
+  const revocable = [...new Set([...registered, current && current.seriesId, currentEpisode && currentEpisode.seriesId,
+    projectDefaults && projectDefaults.seriesId].filter(Boolean))];
+  const revoked = revokeSeriesBy(query, revocable);
+  if (revoked.length) {
+    const transitionId = transitionIdFor(batchKey, tasks.revision);
+    const existing = Object.values(tasks.episodes).find((episode) => episode.transitionId === transitionId);
+    const nextSeries = namedSeries && !revoked.includes(namedSeries) ? namedSeries : '';
+    const nextKind = explicitKind;
+    const status = nextSeries || nextKind ? 'active' : 'unbound';
+    const episode = existing || createEpisode(tasks, {
+      ...(nextKind ? { taskKind: nextKind } : {}),
+      ...(nextSeries ? { seriesId: nextSeries } : {}),
+      status,
+      phase: 'brief',
+      transitionId,
+      ...(currentEpisode ? { previousEpisodeId: currentEpisode.episodeId } : {}),
+      taskText: query,
+      now,
+    });
+    const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status, bindingRevision: tasks.revision, now });
+    tasks.sessions[sessionId] = anchor;
+    return { tasks, anchor, episode, decision: { kind: 'revoked', anchor, revoked: [...revoked], ...(nextKind ? { taskKind: nextKind } : {}) }, changed: true };
+  }
+
   /** 先认新对象，再认续作：带「继续 / 这个」但换了对象，也必须撤销旧范围。
    *  本句点名了已登记栏目（「再做一期口播」）就是明确的对象证据，不算换任务。 */
   if (current && currentEpisode && currentEpisode.status !== 'unbound'
@@ -360,6 +457,7 @@ export function routeTask(tasksInput, input = {}) {
     const transitionId = transitionIdFor(batchKey, tasks.revision);
     const existing = Object.values(tasks.episodes).find((episode) => episode.transitionId === transitionId);
     const episode = existing || createEpisode(tasks, {
+      ...(explicitKind ? { taskKind: explicitKind } : {}),
       status: 'unbound',
       phase: 'brief',
       transitionId,
@@ -369,7 +467,7 @@ export function routeTask(tasksInput, input = {}) {
     });
     const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status: 'unbound', bindingRevision: tasks.revision, now });
     tasks.sessions[sessionId] = anchor;
-    return { tasks, anchor, episode, decision: { kind: 'unbound', anchor, reason: 'new_task' }, changed: true };
+    return { tasks, anchor, episode, decision: { kind: 'unbound', anchor, reason: 'new_task', ...(explicitKind ? { taskKind: explicitKind } : {}) }, changed: true };
   }
 
   if (isContinuation(query) && current && currentEpisode) {
@@ -391,14 +489,14 @@ export function routeTask(tasksInput, input = {}) {
     });
     const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status, bindingRevision: tasks.revision, now });
     tasks.sessions[sessionId] = anchor;
-    return { tasks, anchor, episode, decision: { kind: 'continuation', anchor, inherited: currentEpisode }, changed: true };
+    return { tasks, anchor, episode, decision: { kind: 'continuation', anchor, inherited: currentEpisode, ...(episode && episode.taskKind ? { taskKind: episode.taskKind } : {}) }, changed: true };
   }
 
   if (isRevision(query) && current && currentEpisode) {
     touch(tasks, currentEpisode, { status: currentEpisode.status === 'proposed' ? 'proposed' : 'continuable' }, now);
     const anchor = anchorOf(currentEpisode, { sessionId, batchKey, messageIds, status: currentEpisode.status === 'proposed' ? 'proposed' : 'continuable', bindingRevision: tasks.revision, now });
     tasks.sessions[sessionId] = anchor;
-    return { tasks, anchor, episode: currentEpisode, decision: { kind: 'revision', anchor }, changed: true };
+    return { tasks, anchor, episode: currentEpisode, decision: { kind: 'revision', anchor, ...(currentEpisode && currentEpisode.taskKind ? { taskKind: currentEpisode.taskKind } : {}) }, changed: true };
   }
 
   if (current && (SWITCH_WORDS.test(query) || changedSeries)) {
@@ -419,7 +517,7 @@ export function routeTask(tasksInput, input = {}) {
     });
     const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status, bindingRevision: tasks.revision, now });
     tasks.sessions[sessionId] = anchor;
-    return { tasks, anchor, episode, decision: { kind: nextSeries ? 'selected' : 'unbound', anchor, switched: true }, changed: true };
+    return { tasks, anchor, episode, decision: { kind: nextSeries ? 'selected' : 'unbound', anchor, switched: true, ...(episode && episode.taskKind ? { taskKind: episode.taskKind } : {}) }, changed: true };
   }
 
   /** 新会话或尚无有效栏目时，本句点名的已登记栏目直接生效，不被项目默认值覆盖。 */
@@ -437,7 +535,7 @@ export function routeTask(tasksInput, input = {}) {
     });
     const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status: 'active', bindingRevision: tasks.revision, now });
     tasks.sessions[sessionId] = anchor;
-    return { tasks, anchor, episode, decision: { kind: 'selected', anchor, explicit: true }, changed: true };
+    return { tasks, anchor, episode, decision: { kind: 'selected', anchor, explicit: true, ...(episode && episode.taskKind ? { taskKind: episode.taskKind } : {}) }, changed: true };
   }
 
   if (current && currentEpisode) {
@@ -454,11 +552,11 @@ export function routeTask(tasksInput, input = {}) {
       now,
     });
     tasks.sessions[sessionId] = anchor;
-    return { tasks, anchor, episode: currentEpisode, decision: { kind: 'focus', anchor }, changed: false };
+    return { tasks, anchor, episode: currentEpisode, decision: { kind: 'focus', anchor, ...(currentEpisode && currentEpisode.taskKind ? { taskKind: currentEpisode.taskKind } : {}) }, changed: false };
   }
 
-  const defaults = input.defaults || tasks.defaults;
-  if (defaults && (defaults.seriesId || defaults.taskKind)) {
+  const defaults = projectDefaults;
+  if (!explicitKind && defaults && (defaults.seriesId || defaults.taskKind)) {
     const transitionId = transitionIdFor(batchKey, tasks.revision);
     const existing = Object.values(tasks.episodes).find((episode) => episode.transitionId === transitionId);
     const episode = existing || createEpisode(tasks, {
@@ -472,16 +570,19 @@ export function routeTask(tasksInput, input = {}) {
     });
     const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status: 'active', bindingRevision: tasks.revision, now });
     tasks.sessions[sessionId] = anchor;
-    return { tasks, anchor, episode, decision: { kind: 'default', anchor }, changed: true };
+    return { tasks, anchor, episode, decision: { kind: 'default', anchor, ...(episode && episode.taskKind ? { taskKind: episode.taskKind } : {}) }, changed: true };
   }
 
-  /** 新会话/新任务、无法确定栏目：只建无正文作品壳，不猜 taskKind/seriesId。 */
+  /** 新会话/新任务、无法确定栏目：只建无正文作品壳，不猜 seriesId；显式任务类型要留下。 */
   const transitionId = transitionIdFor(batchKey, tasks.revision);
   const existing = Object.values(tasks.episodes).find((episode) => episode.transitionId === transitionId);
-  const episode = existing || createEpisode(tasks, { status: 'unbound', phase: 'brief', transitionId, taskText: query, now });
-  const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status: 'unbound', bindingRevision: tasks.revision, now });
+  const status = explicitKind ? 'active' : 'unbound';
+  const episode = existing || createEpisode(tasks, {
+    ...(explicitKind ? { taskKind: explicitKind } : {}), status, phase: 'brief', transitionId, taskText: query, now,
+  });
+  const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status, bindingRevision: tasks.revision, now });
   tasks.sessions[sessionId] = anchor;
-  return { tasks, anchor, episode, decision: { kind: 'unbound', anchor }, changed: true };
+  return { tasks, anchor, episode, decision: { kind: 'unbound', anchor, ...(explicitKind ? { taskKind: explicitKind } : {}) }, changed: true };
 }
 
 export function contextOfAnchor(anchor, base = {}) {

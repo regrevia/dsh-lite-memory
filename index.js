@@ -226,6 +226,13 @@ function keepHandler(webServer, cwdForSession) {
         return sendJson(res, 400, { ok: false, reason: '缺少来源' });
       }
       if (!found) return sendJson(res, 200, { ok: true, status: 'gone', id });
+      /** 面板要分开「当前规范」和旧版本；历史只作可折叠对照，不拼进正文。 */
+      const versions = Array.isArray(found.versions) ? found.versions
+        : Array.isArray(found.history) ? found.history : [];
+      const learning = found.learning && typeof found.learning === 'object' ? found.learning : {};
+      const enums = new Set(['applied', 'unchanged', 'superseded', 'failed']);
+      const processingStatus = enums.has(found.processingStatus) ? found.processingStatus
+        : enums.has(learning.lastStatus) ? learning.lastStatus : '';
       return sendJson(res, 200, {
         ok: true,
         id: found.id,
@@ -236,6 +243,13 @@ function keepHandler(webServer, cwdForSession) {
         scopeLabel: found.scopeLabel || '',
         revision: found.revision,
         body: found.body,
+        currentBody: typeof found.currentBody === 'string' ? found.currentBody : found.body,
+        versions,
+        sourceExcerpt: found.sourceExcerpt || learning.sourceExcerpt || '',
+        sourceRefs: Array.isArray(found.sourceRefs) ? found.sourceRefs : (Array.isArray(learning.sourceRefs) ? learning.sourceRefs : []),
+        evidence: found.evidence || (found.evidenceRef ? [found.evidenceRef] : []),
+        evidenceRef: found.evidenceRef || '',
+        processingStatus,
       });
     }
 
@@ -892,7 +906,7 @@ export function apply(ctx, config) {
       signature, sessionId, turn, messageIds,
       bytes: 0, bodies: 0, reads: 0,
       provided: new Map(), readBodies: new Map(), at: Date.now(),
-      experiment: null, contexts: new Map(),
+      experiment: null, contexts: new Map(), runtime: null, autoBudget: null,
     };
     windows.set(key, next);
     return next;
@@ -934,7 +948,8 @@ export function apply(ctx, config) {
   const globalScopeView = () => globalScope();
 
   /** 纯内存：读两层当前投影，先判适用再排序，整卡装预算。 */
-  function projectRecall(scope, query, context, win) {
+  function projectRecall(scope, query, context, win, runtime) {
+    context = view.contextWithTask(context, runtime && runtime.task);
     const layers = { project: [], global: [] };
     const seen = new Set();
     for (const source of [scope, globalScope()]) {
@@ -958,15 +973,23 @@ export function apply(ctx, config) {
       records.push(group.record);
       layerOf.set(group.record.id, group.scope === 'global' ? 'global' : 'project');
     }
-    const ranked = view.rank(records, query, { limit: 8, requireApplicable: true, context });
+    const ranked = view.rank(records, query, {
+      limit: 8, requireApplicable: true, context,
+      runtime: runtime || (win && win.runtime) || null,
+      task: runtime && runtime.task ? runtime.task : null,
+    });
     const headerBytes = Buffer.byteLength(RECALL_HEADER);
-    let used = headerBytes;
+    /** 普通记忆与实验规则共用一份自动注入预算：张数和字节一起算。 */
+    const auto = win && win.autoBudget ? win.autoBudget : null;
+    const baseCards = auto ? (auto.cards || 0) : 0;
+    let used = headerBytes + (auto ? (auto.cardBytes || 0) : 0);
     /** 卡片上限含包装；共享请求账本也要把标题行算进去，不能只算卡片行。 */
     let headerCharged = win ? win.recallHeader === true : false;
     const lines = [];
     const cards = [];
     for (const row of ranked) {
-      if (cards.length >= view.CARD.max) break;
+      const usedCards = baseCards + cards.length;
+      if (usedCards >= view.CARD.max) break;
       const card = view.cardOf(row.record, layerOf.get(row.record.id));
       if (card.scope === 'project') card.scopeName = projectNameOf(scope);
       const line = renderRecallCard(card);
@@ -987,6 +1010,10 @@ export function apply(ctx, config) {
       used += size;
       lines.push(line);
       cards.push({ id: card.id, revision, scope: card.scope, title: card.title });
+    }
+    if (auto) {
+      auto.cards = baseCards + cards.length;
+      auto.cardBytes = used;
     }
     if (!cards.length) return null;
     return { text: `${RECALL_HEADER}\n${lines.join('\n')}`, cards, bytes: used, query };
@@ -1042,11 +1069,15 @@ export function apply(ctx, config) {
     if (!text) return '';
     const bytes = Buffer.byteLength(`\n\n${text}`);
     const previous = win ? (win.experimentBytes || 0) : 0;
-    if (bytes > EXPERIMENT_BYTES) return '';
+    const auto = win && win.autoBudget ? win.autoBudget : null;
+    /** 自动注入总预算：卡片已经占掉的部分要先扣，实验规则只拿剩下的。 */
+    const cap = auto ? Math.max(0, view.CARD.bytes - (auto.cardBytes || 0)) : EXPERIMENT_BYTES;
+    if (bytes > cap) return '';
     if (win) {
       if (!affordable(win, bytes - previous)) return '';
       win.bytes += bytes - previous;
       win.experimentBytes = bytes;
+      if (auto) auto.experimentBytes = bytes;
     }
     return text;
   }
@@ -1128,8 +1159,11 @@ export function apply(ctx, config) {
       return chargeExperiment(win, '这些实验规则互相冲突，先按用户这次说的做，别叠加对立的规则。');
     }
     const parts = { header: EXPERIMENT_RULES_HEADER, items: [], tail: held && held.contextId ? `\ncontextId=${held.contextId}` : '' };
+    /** 与普通记忆共用 3 张卡片：普通卡片先占掉的位子，实验规则不能再拿。 */
+    const auto = win && win.autoBudget ? win.autoBudget : null;
+    const cardCap = auto ? Math.max(0, view.CARD.max - (auto.cards || 0)) : view.CARD.max;
     let used = Buffer.byteLength(EXPERIMENT_RULES_HEADER) + 1;
-    for (const record of matched.slice(0, 3)) {
+    for (const record of matched.slice(0, cardCap)) {
       const body = String(record.body || '');
       const short = body && body.length <= EXPERIMENT_SHORT_CHARS && body.split('\n').length <= 4;
       const conditions = conditionLabel(record.conditions);
@@ -1154,24 +1188,38 @@ export function apply(ctx, config) {
       return chargeExperiment(win, '有些实验规则的适用条件还没确认，先按用户这次说的做，别把它们当本轮依据。');
     }
     if (!parts.items.length) return '';
+    /** 先按最终整段文本过预算，再登记可发布内容；没通过就一条都不留。 */
+    const admitted = chargeExperiment(win, experimentTextFrom(parts));
+    if (!admitted) {
+      if (held) { held.experimentParts = null; held.injectedIds = []; held.validUntil = ''; }
+      return '';
+    }
+    if (auto) {
+      auto.cards = (auto.cards || 0) + parts.items.length;
+      auto.cardBytes = (auto.cardBytes || 0) + Buffer.byteLength(`\n\n${admitted}`);
+    }
     if (held) held.experimentParts = parts;
     /** 兼容旧读取点：整体最早到期只取本轮真正注入的条目，不再被无关试验拖下水。 */
     if (held) {
       const deadlines = parts.items.map((item) => Date.parse(String(item.validUntil))).filter(Number.isFinite);
       if (deadlines.length) held.validUntil = new Date(Math.min(...deadlines)).toISOString();
     }
-    return chargeExperiment(win, experimentTextFrom(parts));
+    return admitted;
   }
 
-  /** 一次真人请求只路由一次；同一批次重试复用同一 transitionId。 */
-  function experimentFor(scope, { sessionId, query, batchKey, messageIds, win }) {
-    if (!win || !batchKey) return null;
-    let status;
-    try { status = evolutionStatus(scope); } catch { return null; }
-    if (!status || status.enabled !== true || status.compatible === false) return null;
-    if (scope.confirmed !== true) return null;
-    let tasks;
-    try { tasks = taskState(scope); } catch { return null; }
+  /**
+   * 一次真人请求只路由一次：不管自进化开没开，都先建独立的任务上下文。
+   * 普通记忆按这个上下文判适用；实验规则只是在这个上下文上再加一层可用性。
+   */
+  function runtimeFor(scope, { sessionId, query, batchKey, messageIds }) {
+    if (!batchKey) return null;
+    let status = null;
+    try { status = evolutionStatus(scope); } catch { status = null; }
+    const enabled = Boolean(status && status.enabled === true && status.compatible !== false && scope.confirmed === true);
+    /** 任务上下文独立于自进化：项目状态读不出来也要按当前任务判普通记忆，不能整段取消召回。 */
+    let tasks = null;
+    try { tasks = taskState(scope); } catch { tasks = null; }
+    tasks = tasks && typeof tasks === 'object' ? tasks : {};
     const ranges = rangesOf(scope);
     const routed = anchor.routeTask(tasks, {
       projectId: scope.key,
@@ -1184,15 +1232,15 @@ export function apply(ctx, config) {
       now: Date.now(),
     });
     if (routed.changed) {
-      const saved = saveTaskState(scope, routed.tasks, { operationId: `task_${batchKey}` });
-      if (!saved.ok) return null;
+      /** 落盘失败也不能取消本轮任务判断：进程内上下文仍然有效，只是不留任务历史。 */
+      saveTaskState(scope, routed.tasks, { operationId: `task_${batchKey}` });
     }
     const context = view.trustedContext(scope, anchor.contextOfAnchor(routed.anchor, {}));
     const thanks = anchor.isThanks(query);
     const decision = anchor.decideRead({
       mode: recallMode(),
-      enabled: true,
-      identityConfirmed: true,
+      enabled,
+      identityConfirmed: scope.confirmed === true,
       anchor: routed.anchor,
       ranges: [...ranges.taskKinds, ...ranges.series],
       thanks,
@@ -1201,24 +1249,66 @@ export function apply(ctx, config) {
     const contextId = anchor.contextIdFor(scope.key, batchKey, crypto.randomUUID().slice(0, 8));
     const episode = routed.tasks && routed.tasks.episodes ? routed.tasks.episodes[routed.anchor.episodeId] : null;
     let epoch = '';
-    try { epoch = String(evolutionStatus(scope).epoch || ''); } catch { epoch = ''; }
+    try { epoch = String(status && status.epoch ? status.epoch : ''); } catch { epoch = ''; }
+    const anchorTask = routed.anchor || {};
+    /** 与自进化开关无关的请求上下文：普通记忆也靠它判断项目、任务与代号。 */
+    const requestContext = anchor.buildRuntimeContext({
+      projectId: scope.key,
+      sessionId,
+      batchKey,
+      messageIds,
+      controlEpoch: epoch,
+      query,
+      anchor: anchorTask,
+      episode,
+    });
+    const task = {
+      ...requestContext.task,
+      kind: anchorTask.taskKind || requestContext.task.kind || context.taskKind || '',
+      seriesId: anchorTask.seriesId || requestContext.task.seriesId || context.seriesId || '',
+      artifactKey: requestContext.task.artifactKey || context.artifactKey || '',
+      phase: requestContext.task.phase || context.phase || '',
+    };
     const held = {
-      contextId, projectKey: scope.key, sessionId, batchKey, messageIds, query,
-      context, anchor: routed.anchor, ranges, decision, epoch,
+      contextId, requestId: requestContext.requestId, controlEpoch: epoch,
+      projectKey: scope.key, sessionId, batchKey, messageIds, query,
+      context, task, anchor: routed.anchor, ranges, decision, epoch,
+      experimental: enabled,
       episodeUpdatedAt: episode ? episode.updatedAt : '', injectedIds: [],
       at: Date.now(),
     };
-    win.experiment = held;
-    win.contexts.set(contextId, held);
-    return { text: renderExperiment(scope, decision, context, held, win), decision, held };
+    return { held, decision, ranges, enabled, status };
   }
 
-  /** 自动路径与工具共用一次解析：没有本轮上下文就退回普通检索，绝不猜一个空上下文。 */
+  /** 实验正文只在自进化开着时登记；普通记忆共享同一个任务上下文。 */
+  function experimentFor(scope, runtime, win) {
+    if (!runtime || !runtime.held) return null;
+    const held = runtime.held;
+    if (win) win.runtime = held;
+    if (!runtime.enabled) return null;
+    if (!experimentStillCurrent(scope, held)) return { text: '', held, decision: held.decision };
+    if (win) {
+      win.experiment = held;
+      win.contexts.set(held.contextId, held);
+    }
+    return { text: renderExperiment(scope, held.decision, held.context, held, win), decision: held.decision, held };
+  }
+
   function resolveRequestContext(execution, optionalContextId) {
     const scope = scopeOf(cwdOf(execution));
     const win = windowOf(execution && execution.agent);
     const contextId = typeof optionalContextId === 'string' ? optionalContextId.trim() : '';
     if (!contextId) {
+      /** 没有显式上下文时，用本请求已经路由出来的任务；这层不依赖自进化开关。 */
+      const runtime = win && win.runtime;
+      const sameRequest = runtime
+        && runtime.projectKey === scope.key
+        && (!runtime.sessionId || runtime.sessionId === String(win.sessionId || ''))
+        && runtime.batchKey === anchor.requestBatchKey(win.messageIds || []);
+      if (sameRequest) {
+        /** 普通记忆可以直接用本请求上下文；实验正文仍要求显式 contextId，不能顺手放行。 */
+        return { ok: true, scope, win, context: runtime.context, held: runtime, experimental: false };
+      }
       return { ok: true, scope, win, context: view.trustedContext(scope, {}), experimental: false };
     }
     /** 先认项目再找本地记录：别的项目的上下文要明确拒绝，不能只报过期。 */
@@ -1558,7 +1648,10 @@ export function apply(ctx, config) {
     description: `按需检索已有记忆：先搜，命中再 memory_read 读正文。用户提到「记住了什么 / 上次 / 规范 / 约定 / 路径 / 凭据怎么取」，或者眼前反复出现的报错、弹窗、异常时，先查这里有没有记过解法。跨项目的通用条目以 [global] 开头，项目条目以 [项目名] 开头。中文长句可以直接当查询。每行带 id，更新时把 id 传回 memory_save。默认只列当前有效的；已经归档或被更新替换的旧说法不混进来，要查历史就在参数里显式要 history。`,
     parameters: SEARCH_PARAMS,
     output: {
-      presentationMeta: (_args, value) => ({ kind: 'memory-search', count: value.count, status: value.status || 'ok', refs: value.refs || [] }),
+      presentationMeta: (_args, value) => ({
+        kind: 'memory-search', count: value.count, status: value.status || 'ok', refs: value.refs || [],
+        noTriggerReason: value.noTriggerReason || '',
+      }),
       schema: {
         type: 'object',
         properties: {
@@ -1618,13 +1711,16 @@ export function apply(ctx, config) {
       }
       const scope = resolved.scope;
       const context = resolved.context;
+      const gateRuntime = resolved.held || win?.runtime
+        || { projectId: scope.key, context, experimental: resolved.experimental === true };
       /** 检索只列当前任务真能用的条目；先取全量候选，过滤后再截断，避免不可用条目挤掉后面的命中。 */
       const limit = args.limit ?? 3;
       const rawHits = search(scope, args.query, 50, {
         context,
         history: args.history === true,
         allowExperimental: resolved.experimental === true,
-      }).filter((item) => !item.ownerProjectId || item.ownerProjectId === scope.key);
+      }).filter((item) => !item.ownerProjectId || item.ownerProjectId === scope.key)
+        .filter((item) => item.archived || view.eligibility(item, gateRuntime, 'search').ok);
       const hits = rawHits.filter((item) => item.archived || item.status === 'ok').slice(0, limit);
       const withheld = rawHits.filter((item) => !item.archived && item.status !== 'ok');
       const scopeName = scope.key === 'global' ? '' : projectNameOf(scope);
@@ -1647,6 +1743,7 @@ export function apply(ctx, config) {
             : '有相关的项目记忆，但当前任务明确不适用。',
           status: unresolved ? 'needs_context' : 'ok',
           reasonCode: unresolved ? 'applicability_unresolved' : 'not_applicable',
+          noTriggerReason: unresolved ? '适用条件未确认' : '当前任务不适用',
           refs: [],
         };
         if (win) {
@@ -1659,7 +1756,7 @@ export function apply(ctx, config) {
       }
       /** 没命中是正常结果，不是额度问题；空响应同样记一次本请求开销。 */
       if (!hits.length) {
-        const empty = { count: 0, chars: 0, text: '', status: 'ok', refs: [] };
+        const empty = { count: 0, chars: 0, text: '', status: 'ok', reasonCode: 'no_match', noTriggerReason: '没有匹配的记忆', refs: [] };
         if (win) {
           const bytes = jsonBytes(empty);
           if (!affordable(win, bytes)) return { ...empty, status: 'budget_exhausted' };
@@ -1749,7 +1846,13 @@ export function apply(ctx, config) {
       const allowExperimental = resolved.experimental === true;
       const agent = execution?.agent;
       const win = windowOf(agent);
+      const gateRuntime = resolved.held || win?.runtime
+        || { projectId: scope.key, context, experimental: resolved.experimental === true };
       if (args.view === 'links') {
+        const source = locate(scope, args.id);
+        if (source && !view.eligibility(source.record, gateRuntime, 'read').ok) {
+          return { id: '', scope: '', status: 'needs_context', links: '' };
+        }
         const found = readLinks(scope, args.id, { context, allowExperimental });
         if (!found) throw new Error(`没有 ${args.id} 这条记忆`);
         if (found.status !== 'ok') {
@@ -1778,20 +1881,8 @@ export function apply(ctx, config) {
       }
       const record = readEntry(scope, args.id, { context, allowExperimental });
       if (!record) throw new Error(`没有 ${args.id} 这条记忆`);
-      if (record.origin === 'project_evolution' && record.ownerProjectId && record.ownerProjectId !== scope.key) {
-        return { id: '', scope: record.scope, status: 'not_applicable', body: '' };
-      }
-      if (record.origin === 'project_evolution' && !allowExperimental) {
-        return { id: '', scope: record.scope, status: 'needs_context', body: '' };
-      }
-      /** 暂停、过期或条件不匹配的实验条目只给状态，不给标题和正文。 */
-      if (record.origin === 'project_evolution' && !view.experimentalUsable(record)) {
-        return { id: '', scope: record.scope, status: 'needs_context', body: '' };
-      }
-      const learningState = record.learning && typeof record.learning === 'object' ? record.learning : {};
-      if (record.origin === 'project_evolution' && (learningState.state === 'paused' || learningState.blockedReason)) {
-        return { id: '', scope: record.scope, status: 'needs_context', body: '' };
-      }
+      const gate = view.eligibility(record, gateRuntime, 'read');
+      if (!gate.ok) return { id: '', scope: record.scope, status: gate.status, body: '' };
       /** 条件未知或不适用的条目只报状态：正文和标题都不能绕过自动召回的门槛。 */
       if (record.status !== 'ok') {
         return { id: '', scope: record.scope, status: record.status === 'needs_context' ? 'needs_context' : 'not_applicable', body: '' };
@@ -1963,7 +2054,6 @@ export function apply(ctx, config) {
   });
 
   if (typeof ctx.on === 'function') ctx.on('agent/pre-step', async (payload, next) => {
-    const startedAt = Date.now();
     const agent = payload?.agent;
     syncMemoryTools(agent);
     let decision;
@@ -1973,6 +2063,8 @@ export function apply(ctx, config) {
       clearPrepared(agent);
       throw error;
     }
+    /** 宿主等待不算本地召回时间：额度从拿到这一步的开始算。 */
+    const startedAt = Date.now();
     try {
       if (!agent || decision?.kind !== 'enter') {
         clearPrepared(agent);
@@ -2018,7 +2110,8 @@ export function apply(ctx, config) {
         }
         if (fingerprint !== previous.fingerprint) {
           const win = windowOf(agent);
-          const snapshot = projectRecall(scope, previous.query, view.trustedContext(scope, {}), win);
+          if (win) win.autoBudget = { cards: 0, cardBytes: 0, experimentBytes: 0 };
+          const snapshot = projectRecall(scope, previous.query, win && win.runtime ? win.runtime.context : view.trustedContext(scope, {}), win, win && win.runtime ? win.runtime : null);
           let experimentText = '';
           if (win && win.experiment) {
             experimentText = renderExperiment(scope, win.experiment.decision, win.experiment.context, win.experiment, win);
@@ -2042,6 +2135,11 @@ export function apply(ctx, config) {
       /** 工具模式也要开额度窗口：只是不自动注入，工具调用同样受每请求预算约束。 */
       const ids = fresh.map((message) => String(message?.id ?? '')).filter(Boolean).sort();
       const win = openWindow(agent, { sessionId, turn, messageIds: ids });
+      const budgetBefore = win ? {
+        bytes: win.bytes, bodies: win.bodies, reads: win.reads,
+        provided: new Map(win.provided), readBodies: new Map(win.readBodies),
+        recallHeader: win.recallHeader, experimentBytes: win.experimentBytes,
+      } : null;
       /** 工具模式也要记下本轮真人原话：只用于核对绑定，不自动注入。 */
       const query = view.newestUserQuery(fresh).slice(0, RECALL_QUERY_CHARS);
       if (win && query) win.query = query;
@@ -2070,24 +2168,45 @@ export function apply(ctx, config) {
       const controlEpoch = controlStatus(scope).epoch || '';
       const batchKey = anchor.requestBatchKey(ids);
       dropStaleCandidate(sessionId, batchKey);
-      const experiment = experimentFor(scope, { sessionId, query, batchKey, messageIds: ids, win });
-      const remembered = experiment && experiment.held
-        ? rememberFeedback(scope, sessionId, fresh, experiment.held, turn)
+      /** 任务上下文独立于自进化开关：普通记忆按当前任务判适用，实验规则再叠一层可用性。 */
+      const runtime = runtimeFor(scope, { sessionId, query, batchKey, messageIds: ids });
+      const auto = { cards: 0, cardBytes: 0, experimentBytes: 0 };
+      if (win) win.autoBudget = auto;
+      const experiment = runtime ? experimentFor(scope, runtime, win) : null;
+      const recalledContext = runtime ? runtime.held.context : context;
+      const remembered = runtime && runtime.enabled
+        ? rememberFeedback(scope, sessionId, fresh, runtime.held, turn)
         : null;
-      const snapshot = projectRecall(scope, query, context, win);
-      if (generation !== generations.get(agent)) return decision;
+      const snapshot = projectRecall(scope, query, recalledContext, win, runtime ? runtime.held : null);
+      /** 没发布出去的投影要退还额度：不能因为一次超时把本请求的召回额度耗掉。 */
+      const rollbackBudget = () => {
+        if (!win || !budgetBefore) return;
+        win.bytes = budgetBefore.bytes;
+        win.bodies = budgetBefore.bodies;
+        win.reads = budgetBefore.reads;
+        win.provided = budgetBefore.provided;
+        win.readBodies = budgetBefore.readBodies;
+        win.recallHeader = budgetBefore.recallHeader;
+        win.experimentBytes = budgetBefore.experimentBytes;
+        win.experiment = null;
+        win.contexts.clear();
+      };
+      if (generation !== generations.get(agent)) { rollbackBudget(); return decision; }
       /** 投影期间开关被改过：丢弃这批内容，不把关闭前的记忆交给当前请求。 */
       if (!memoryEnabled(scope) || (controlStatus(scope).epoch || '') !== controlEpoch) {
+        rollbackBudget();
         clearPrepared(agent);
         return decision;
       }
       /** 超时或被取消：这一步不留半旧卡片，下一真人请求重新投影。 */
       if (signal?.aborted || Date.now() - startedAt > RECALL_DEADLINE_MS) {
+        rollbackBudget();
         clearPrepared(agent);
         return decision;
       }
       /** 实验上下文即使本轮零注入也要留着：工具绑定后同一请求还能补上规则。 */
       if (!snapshot && !experiment) {
+        rollbackBudget();
         clearPrepared(agent);
         return decision;
       }

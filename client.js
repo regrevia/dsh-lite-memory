@@ -98,6 +98,13 @@ window.__ModuleLoader__.load({
         origin: meta.origin === 'project_evolution' ? 'project_evolution' : 'user_explicit',
         kind,
         exposure: kind === 'memory-save' || kind === 'memory-forget' ? 'update' : 'reference',
+        reason: typeof meta.reason === 'string' ? meta.reason : '',
+        reasonCode: typeof meta.reasonCode === 'string' ? meta.reasonCode : '',
+        noTriggerReason: typeof meta.noTriggerReason === 'string' ? meta.noTriggerReason : '',
+        sourceExcerpt: meta.sourceExcerpt,
+        sourceRefs: meta.sourceRefs,
+        evidence: meta.evidence,
+        processingStatus: processingStatusOf(meta),
       };
     };
 
@@ -122,15 +129,22 @@ window.__ModuleLoader__.load({
     const citationsOfTurn = (nodes) => {
       if (!Array.isArray(nodes)) return EMPTY;
       const out = [];
+      let noTriggerReason = '';
       for (const node of nodes) {
         const root = node && node.root;
         if (root === null || typeof root !== 'object') continue;
         for (const block of [root, ...(Array.isArray(root.subCalls) ? root.subCalls : [])]) {
           const meta = metaOf(block);
           if (!meta) continue;
-          out.push(...citationsOfMeta(meta));
+          const citations = citationsOfMeta(meta);
+          out.push(...citations);
+          if (citations.length === 0 && meta.kind === 'memory-search') {
+            const reason = [meta.noTriggerReason, meta.reason].find((value) => typeof value === 'string' && value);
+            if (reason) noTriggerReason = reason;
+          }
         }
       }
+      if (noTriggerReason) Object.defineProperty(out, 'noTriggerReason', { value: noTriggerReason, enumerable: false, configurable: true });
       return out;
     };
 
@@ -147,6 +161,9 @@ window.__ModuleLoader__.load({
         } else {
           out[at] = item;
         }
+      }
+      if (items && typeof items.noTriggerReason === 'string' && items.noTriggerReason) {
+        Object.defineProperty(out, 'noTriggerReason', { value: items.noTriggerReason, enumerable: false, configurable: true });
       }
       return out;
     };
@@ -196,7 +213,9 @@ window.__ModuleLoader__.load({
         if (value !== lastNodes) {
           lastNodes = value;
           const next = dedupe(citationsOfTurn(value));
-          if (!sameList(next, snapshot)) snapshot = next;
+          const nextReason = next.noTriggerReason || '';
+          const lastReason = snapshot.noTriggerReason || '';
+          if (!sameList(next, snapshot) || nextReason !== lastReason) snapshot = next;
         }
         return snapshot;
       };
@@ -308,7 +327,9 @@ window.__ModuleLoader__.load({
           setState('failed');
         });
       };
-      const label = note || (firstLine(text) ?? RUNNING.memory_save);
+      const processing = processingStatusOf(meta);
+      const baseLabel = firstLine(text) ?? RUNNING.memory_save;
+      const label = note || `${baseLabel}${processing ? ` · ${PROCESSING_LABEL[processing]}` : ''}`;
       const button = changed && state !== 'dropped'
         ? h('button', { type: 'button', onClick: drop, disabled: !canDrop, 'aria-label': '撤销此次修改', style: state === 'idle' || state === 'failed' ? DROP : { ...DROP, opacity: 0.25, cursor: 'default' } }, '✕')
         : null;
@@ -316,10 +337,195 @@ window.__ModuleLoader__.load({
     };
 
     const scopeTag = (scope) => (scope === 'global' ? '[全局]' : '[项目]');
+
+    /** 处理状态只认服务端枚举，绝不从中文 reason 反推。 */
+    const PROCESSING = ['applied', 'unchanged', 'superseded', 'failed'];
+    const PROCESSING_LABEL = {
+      applied: '已应用', unchanged: '无变化', superseded: '已被新版本取代', failed: '处理失败',
+    };
+    const processingStatusOf = (source) => {
+      if (!source || typeof source !== 'object') return '';
+      for (const field of ['processingStatus', 'processing', 'outcome', 'status']) {
+        const value = source[field];
+        if (typeof value === 'string' && PROCESSING.includes(value)) return value;
+        if (value && typeof value === 'object' && typeof value.status === 'string' && PROCESSING.includes(value.status)) return value.status;
+      }
+      return '';
+    };
+
+    const recordOfPayload = (payload) =>
+      (payload && payload.record && typeof payload.record === 'object' && !Array.isArray(payload.record) ? payload.record : null);
+
+    const bodyTextOf = (value) => {
+      if (typeof value === 'string') return value;
+      if (!value || typeof value !== 'object') return '';
+      for (const field of ['body', 'text', 'value']) {
+        if (typeof value[field] === 'string') return value[field];
+      }
+      return '';
+    };
+
+    /** 当前正文与历史版本分开，历史不拼进正文。 */
+    const currentBodyOf = (payload) => {
+      if (!payload || typeof payload !== 'object') return '';
+      if (typeof payload.currentBody === 'string') return payload.currentBody;
+      const record = recordOfPayload(payload);
+      if (record) {
+        const recordBody = bodyTextOf(record.current);
+        if (recordBody) return recordBody;
+        if (typeof record.body === 'string') return record.body;
+      }
+      if (payload.current !== undefined && typeof payload.current !== 'boolean') {
+        const current = bodyTextOf(payload.current);
+        if (current) return current;
+      }
+      return typeof payload.body === 'string' ? payload.body : '';
+    };
+
+    const historyOfPayload = (payload) => {
+      const record = recordOfPayload(payload);
+      const current = payload && payload.current && typeof payload.current === 'object' ? payload.current : null;
+      const lists = [
+        payload && payload.versions,
+        payload && payload.history,
+        record && record.versions,
+        record && record.history,
+        current && current.versions,
+      ];
+      for (const list of lists) {
+        if (Array.isArray(list)) return list.filter((row) => row !== null && row !== undefined);
+      }
+      return EMPTY;
+    };
+
+    /** 历史行统一成 old → new，缺前后值用相邻版本补。 */
+    const historyDiffsOf = (payload) => {
+      const rows = historyOfPayload(payload);
+      if (rows.length === 0) return EMPTY;
+      const currentBody = currentBodyOf(payload);
+      const normalized = rows.map((row, index) => {
+        const value = row && typeof row === 'object' && !Array.isArray(row) ? row : { body: row };
+        const explicitOld = [value.old, value.from, value.before, value.previousBody]
+          .find((item) => typeof item === 'string');
+        const explicitNew = [value.next, value.to, value.after, value.newBody]
+          .find((item) => typeof item === 'string');
+        return {
+          key: `${Number.isInteger(value.revision) ? value.revision : 'v'}-${index}`,
+          at: typeof value.at === 'string' ? value.at : (typeof value.when === 'string' ? value.when : ''),
+          revision: Number.isInteger(value.revision) ? value.revision : null,
+          status: typeof value.status === 'string' ? value.status : '',
+          body: bodyTextOf(value), // ui-copy-ignore
+          old: explicitOld || '', // ui-copy-ignore
+          next: explicitNew || '', // ui-copy-ignore
+        };
+      });
+      const byRevision = normalized.every((row) => row.revision !== null);
+      if (byRevision) normalized.sort((a, b) => a.revision - b.revision);
+      else if (normalized.every((row) => Boolean(row.at))) normalized.sort((a, b) => a.at.localeCompare(b.at));
+      return normalized.map((row, index) => ({
+        ...row,
+        old: row.old || row.body || '',
+        next: row.next || (index + 1 < normalized.length ? normalized[index + 1].body : currentBody),
+      }));
+    };
+
+    const payloadFieldOf = (payload, field) => {
+      const record = recordOfPayload(payload);
+      const current = payload && payload.current && typeof payload.current === 'object' ? payload.current : null;
+      for (const owner of [payload, record, current]) {
+        if (owner && owner[field] !== undefined) return owner[field];
+      }
+      return undefined;
+    };
+
+    const sourceExcerptOf = (payload) => bodyTextOf(payloadFieldOf(payload, 'sourceExcerpt'));
+    const refsOfPayload = (payload) => {
+      const value = payloadFieldOf(payload, 'sourceRefs');
+      if (typeof value === 'string' && value) return [value];
+      if (Array.isArray(value)) return value;
+      if (value && typeof value === 'object') return [value];
+      return EMPTY;
+    };
+    const evidenceOfPayload = (payload) => {
+      const value = payloadFieldOf(payload, 'evidence');
+      if (typeof value === 'string' && value) return [value];
+      if (Array.isArray(value)) return value;
+      if (value && typeof value === 'object') return [value];
+      return EMPTY;
+    };
+
+    const refLabelOf = (ref, index) => {
+      if (typeof ref === 'string') return ref;
+      if (!ref || typeof ref !== 'object') return '';
+      if (typeof ref.label === 'string' && ref.label) return ref.label;
+      if (typeof ref.title === 'string' && ref.title) return ref.title;
+      if (typeof ref.text === 'string' && ref.text) return ref.text;
+      if (ref.message !== undefined) return `消息 ${ref.message}`;
+      if (ref.messageId !== undefined) return `消息 ${ref.messageId}`;
+      if (ref.turn !== undefined) return `第 ${ref.turn} 轮`;
+      if (ref.turnIndex !== undefined) return `第 ${ref.turnIndex} 轮`;
+      return ref.id !== undefined ? String(ref.id) : `引用 ${index + 1}`;
+    };
+    const refHrefOf = (ref) => (ref && typeof ref === 'object'
+      ? [ref.href, ref.url, ref.link].find((value) => typeof value === 'string' && value)
+      : '');
+
+    const linkStyle = { color: 'inherit', textDecoration: 'underline', textUnderlineOffset: '2px', wordBreak: 'break-all' };
+
+    const HistoryVersions = (props) => {
+      const rows = Array.isArray(props.rows) ? props.rows : EMPTY;
+      const [open, setOpen] = React.useState(false);
+      if (rows.length === 0) return null;
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px' } },
+        h('button', {
+          type: 'button',
+          onClick: () => setOpen((value) => !value),
+          'aria-expanded': open,
+          'aria-label': `${open ? '收起' : '展开'}历史版本`,
+          style: CHIP,
+        }, `历史 ${rows.length}${open ? ' · 收起' : ''}`),
+        open ? h('div', { style: BODY }, rows.map((row) => h('div', {
+          key: row.key, style: { margin: '0 0 4px', minWidth: 0 },
+        },
+        h('div', { style: { opacity: 0.65, fontSize: '11px' } },
+          [row.at, row.revision === null ? '' : `v${row.revision}`, row.status].filter(Boolean).join(' · ')),
+        h('div', null,
+          h('span', { style: { opacity: 0.6 } }, SHORT(row.old, 120) || '—'),
+          ' → ',
+          h('span', null, SHORT(row.next, 120) || '—'))))) : null,
+      );
+    };
+
+    const DetailExtras = (props) => {
+      const payload = props.payload;
+      const excerpt = sourceExcerptOf(payload);
+      const refs = refsOfPayload(payload);
+      const evidence = evidenceOfPayload(payload);
+      const history = historyDiffsOf(payload);
+      if (!excerpt && refs.length === 0 && evidence.length === 0 && history.length === 0) return null;
+      const links = (items, label) => (items.length === 0 ? null : h('div', { style: { display: 'flex', gap: '6px', minWidth: 0 } },
+        h('span', { style: { opacity: 0.6, flex: '0 0 auto' } }, label),
+        h('span', { style: { minWidth: 0, wordBreak: 'break-word' } }, items.map((item, index) => {
+          const href = refHrefOf(item);
+          const text = refLabelOf(item, index);
+          const key = `${index}-${text}`;
+          if (!href) return h('span', { key }, index > 0 ? ' · ' : '', text);
+          return h('span', { key }, index > 0 ? ' · ' : '', h('a', {
+            href, target: '_blank', rel: 'noreferrer', style: linkStyle,
+          }, text));
+        }))));
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+        excerpt ? h('div', { style: BODY }, h('span', { style: { opacity: 0.65 } }, '来源'), ' ', excerpt) : null,
+        links(refs, '消息'),
+        links(evidence, '依据'),
+        h(HistoryVersions, { rows: history }));
+    };
+
     const versionLine = (shown) => {
       const scope = shown.scopeLabel || (shown.scope === 'global' ? '全局' : '项目');
       const archived = shown.status === 'archived' ? ' · 已归档' : '';
-      return `${scope}${archived}`;
+      const processing = processingStatusOf(shown.processingStatus ? { processingStatus: shown.processingStatus } : shown);
+      return `${scope}${archived}${processing ? ` · ${PROCESSING_LABEL[processing]}` : ''}`;
     };
 
     /** 一段引用：点开是名字，再点是当前正文。 */
@@ -341,7 +547,10 @@ window.__ModuleLoader__.load({
         setShown(null);
         setNote('');
       }, [sessionId, props.turnKey]);
-      if (items.length === 0) return null;
+      if (items.length === 0) {
+        const reason = typeof props.noTriggerReason === 'string' ? props.noTriggerReason : '';
+        return reason ? h('div', { style: DOCK }, `${props.label ? `${props.label} 0 条 · ` : ''}${reason}`) : null;
+      }
       const close = () => {
         generation.current += 1;
         setShown(null);
@@ -378,19 +587,25 @@ window.__ModuleLoader__.load({
             scopeLabel: typeof payload.scopeLabel === 'string' ? payload.scopeLabel : '',
             revision: Number.isInteger(payload.revision) ? payload.revision : item.revision,
             status: typeof payload.status === 'string' ? payload.status : 'ok',
-            body: typeof payload.body === 'string' ? payload.body : '',
+            body: currentBodyOf(payload),
+            processingStatus: processingStatusOf(payload) || item.processingStatus || '',
+            payload,
             current: payload.revision === item.revision,
           });
         });
       };
-      const rows = open ? items.map((item) => h('button', {
-        key: `${item.scope}|${item.id}|${item.revision}`, // ui-copy-ignore
-        type: 'button', // ui-copy-ignore
-        onClick: () => show(item), // ui-copy-ignore
-        'aria-label': `查看记忆 ${item.title || item.id}`,
-        title: item.title || item.id,
-        style: ITEM, // ui-copy-ignore
-      }, `${scopeTag(item.scope)} ${item.title || item.id}${item.origin === 'project_evolution' ? ' · 实验' : ''}`)) : [];
+      const rows = open ? items.map((item) => {
+        const reason = item.noTriggerReason || item.reason;
+        const label = `${scopeTag(item.scope)} ${item.title || item.id}${item.origin === 'project_evolution' ? ' · 实验' : ''}${reason ? ` · ${SHORT(reason, 36)}` : ''}`;
+        return h('button', {
+          key: `${item.scope}|${item.id}|${item.revision}`, // ui-copy-ignore
+          type: 'button', // ui-copy-ignore
+          onClick: () => show(item), // ui-copy-ignore
+          'aria-label': `查看记忆 ${item.title || item.id}${reason ? `，${reason}` : ''}`,
+          title: reason || item.title || item.id,
+          style: ITEM, // ui-copy-ignore
+        }, label);
+      }) : [];
       const detail = shown && shown.ref && items.some((item) => item.id === shown.id && item.revision === shown.ref.revision)
         ? h('div', { style: BODY },
           shown.loading ? '读取中' : null,
@@ -401,6 +616,7 @@ window.__ModuleLoader__.load({
             h('div', null, versionLine(shown)),
             shown.when ? h('div', null, shown.when) : null,
             shown.body ? h('div', null, shown.body) : null,
+            h(DetailExtras, { payload: { ...shown.ref, ...shown.payload } }),
           ) : null,
         )
         : null;
@@ -601,7 +817,8 @@ window.__ModuleLoader__.load({
     };
 
     const graphOf = (records) => {
-      const rows = (Array.isArray(records) ? records : EMPTY).slice(0, 60);
+      const all = Array.isArray(records) ? records : EMPTY;
+      const rows = all.slice(0, 60);
       const byId = new Map(rows.map((record) => [record.id, record]));
       const tagCount = new Map();
       const topicCount = new Map();
@@ -637,12 +854,17 @@ window.__ModuleLoader__.load({
           if (byId.has(link.id)) addEdge(record.id, link.id, 'link');
         }
       }
-      return layoutGraph(nodes, edges, 'memory');
+      return {
+        ...layoutGraph(nodes, edges, 'memory'),
+        shown: rows.length,
+        total: all.length,
+      };
     };
 
     /** 经验图谱只连共享条件。 */
     const ruleGraphOf = (rules) => {
-      const rows = (Array.isArray(rules) ? rules : EMPTY).slice(0, 60);
+      const all = Array.isArray(rules) ? rules : EMPTY;
+      const rows = all.slice(0, 60);
       const conditionCount = new Map();
       for (const rule of rows) {
         const seen = new Set();
@@ -679,7 +901,11 @@ window.__ModuleLoader__.load({
           }
         }
       }
-      return layoutGraph(nodes, edges, 'rule');
+      return {
+        ...layoutGraph(nodes, edges, 'rule'),
+        shown: rows.length,
+        total: all.length,
+      };
     };
 
     /** 关系图只画真实关系；节点沿用原始 id，位置由 id 决定。 */
@@ -690,6 +916,27 @@ window.__ModuleLoader__.load({
       const [hoveredId, setHoveredId] = React.useState('');
       const selectedId = props.selectedId;
       const labelSet = graph.people <= 40;
+      const shownCount = Number.isInteger(graph.shown) ? graph.shown : graph.people;
+      const totalCount = Number.isInteger(props.total) && props.total >= shownCount
+        ? props.total
+        : (Number.isInteger(graph.total) ? graph.total : shownCount);
+      const truncated = totalCount > shownCount;
+      const nearIds = React.useMemo(() => {
+        const set = new Set();
+        if (!selectedId) return set;
+        set.add(selectedId);
+        for (const edge of graph.edges) {
+          if (edge.from === selectedId) set.add(edge.to);
+          if (edge.to === selectedId) set.add(edge.from);
+        }
+        return set;
+      }, [graph.edges, selectedId]);
+      const orderedEdges = selectedId
+        ? [...graph.edges].sort((a, b) => Number(a.from === selectedId || a.to === selectedId) - Number(b.from === selectedId || b.to === selectedId))
+        : graph.edges;
+      const orderedNodes = selectedId
+        ? [...graph.nodes].sort((a, b) => (Number(nearIds.has(a.id)) - Number(nearIds.has(b.id))) || (Number(a.id === selectedId) - Number(b.id === selectedId)))
+        : graph.nodes;
       const pickHub = props.onPickHub;
       const stepZoom = (delta) => setZoom((value) => Math.min(2.5, Math.max(0.75, Math.round((value + delta) * 100) / 100)));
       const frame = React.useMemo(() => {
@@ -752,44 +999,59 @@ window.__ModuleLoader__.load({
           style: { width: '100%', height: '100%', flex: 1, minHeight: 0, display: 'block' },
           role: 'img', 'aria-label': props.ariaLabel || '关系图',
         },
-        h('g', null, graph.edges.map((edge, index) => {
+        h('g', null, orderedEdges.map((edge, index) => {
           const from = graph.nodes.find((node) => node.id === edge.from);
           const to = graph.nodes.find((node) => node.id === edge.to);
           if (!from || !to) return null;
           const linked = selectedId && (edge.from === selectedId || edge.to === selectedId);
+          const dimmed = selectedId && !nearIds.has(edge.from) && !nearIds.has(edge.to);
           return h('line', {
             key: `e${index}`, x1: from.x, y1: from.y, x2: to.x, y2: to.y,
             stroke: linked ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-label-secondary)',
             strokeWidth: linked ? 1.4 : 1,
-            opacity: linked ? 0.65 : edge.type === 'link' ? 0.38 : 0.16,
+            opacity: linked ? 0.72 : dimmed ? 0.08 : edge.type === 'link' ? 0.38 : 0.16,
             strokeDasharray: edge.type === 'link' ? undefined : '2 4',
           });
         })),
-        h('g', null, graph.nodes.map((node) => {
+        h('g', null, orderedNodes.map((node) => {
           const isPrimary = node.kind === primaryKind;
           const active = node.id === selectedId;
           const hovered = node.id === hoveredId;
+          const near = nearIds.has(node.id);
+          const dimmed = Boolean(selectedId) && !near;
           const pick = isPrimary ? props.onPick : (pickHub || undefined);
           const fill = !isPrimary ? 'var(--dsw-alias-label-secondary)'
             : node.state ? (STAGE_TONE[node.state] || 'var(--dsw-alias-brand-primary)')
               : node.experimental ? 'var(--dsw-alias-state-warn-primary)' : 'var(--dsw-alias-brand-primary)';
-          const showLabel = active || hovered || (isPrimary && labelSet) || !isPrimary;
+          const showLabel = active || hovered || near || (isPrimary && labelSet) || !isPrimary;
           const nameChars = active || hovered ? 14 : isPrimary ? 7 : 10;
           return h('g', {
             key: node.id,
             transform: `translate(${node.x} ${node.y})`,
             onClick: pick ? () => pick(node) : undefined,
+            onKeyDown: pick ? (event) => {
+              if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
+                event.preventDefault();
+                pick(node);
+              }
+            } : undefined,
+            onFocus: () => setHoveredId(node.id),
+            onBlur: () => setHoveredId((value) => (value === node.id ? '' : value)),
             onMouseEnter: () => setHoveredId(node.id),
             onMouseLeave: () => setHoveredId((value) => (value === node.id ? '' : value)),
-            style: { cursor: pick ? 'pointer' : 'default' },
+            tabIndex: pick ? 0 : undefined,
+            role: pick ? 'button' : undefined,
+            focusable: pick ? 'true' : 'false',
+            'aria-label': pick ? (node.title || node.label) : undefined,
+            style: { cursor: pick ? 'pointer' : 'default', outline: 'none' },
           },
           h('circle', { r: Math.max(12, node.radius + 6), fill: 'transparent' }),
           active ? h('circle', { r: node.radius + 5, fill: 'none', stroke: 'var(--dsw-alias-brand-primary)', strokeWidth: 1.4, opacity: 0.5 }) : null,
           h('circle', {
             r: node.radius, fill,
-            opacity: active ? 1 : isPrimary ? 0.9 : 0.5,
-            stroke: hovered ? 'var(--dsw-alias-brand-primary)' : 'none',
-            strokeWidth: hovered ? 1.2 : 0,
+            opacity: active ? 1 : dimmed ? (isPrimary ? 0.35 : 0.14) : isPrimary ? 0.9 : 0.5,
+            stroke: hovered || near ? 'var(--dsw-alias-brand-primary)' : 'none',
+            strokeWidth: hovered || near ? 1.2 : 0,
           }),
           showLabel ? h('text', {
             y: node.radius + 12, textAnchor: 'middle',
@@ -804,12 +1066,21 @@ window.__ModuleLoader__.load({
         h('div', {
           style: {
             position: 'absolute', left: '10px', bottom: '8px', zIndex: 1,
-            maxWidth: 'calc(100% - 60px)', padding: '2px 6px', borderRadius: '6px',
+            maxWidth: truncated ? 'calc(100% - 178px)' : 'calc(100% - 60px)', padding: '2px 6px', borderRadius: '6px',
             background: 'var(--dsw-alias-bg-layer-1)',
             color: 'var(--dsw-alias-label-secondary)', fontSize: '11px', lineHeight: '1.5',
             pointerEvents: 'none',
           },
         }, props.legend || '圆点 记忆 · 小点 标签/主题 · 虚线 关联'),
+        truncated ? h('div', {
+          style: {
+            position: 'absolute', right: '10px', bottom: '8px', zIndex: 1,
+            padding: '2px 6px', borderRadius: '6px',
+            background: 'var(--dsw-alias-bg-layer-1)',
+            color: 'var(--dsw-alias-label-secondary)', fontSize: '11px', lineHeight: '1.5',
+            pointerEvents: 'none', whiteSpace: 'nowrap',
+          },
+        }, `显示 ${shownCount} / 共 ${totalCount} 条`) : null,
       );
     };
 
@@ -1333,6 +1604,7 @@ window.__ModuleLoader__.load({
             onClick: () => { setSelectedMemory(record.id); setSelectedRule(''); },
           }));
 
+      const detailProcessing = detail ? processingStatusOf(detail) : '';
       const memoryDetail = selectedMemory
         ? h('div', { style: { ...PANEL_CARD, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px' } },
           detail
@@ -1341,11 +1613,12 @@ window.__ModuleLoader__.load({
                 h('div', { style: { flex: 1, minWidth: 0, fontSize: '13px', lineHeight: '1.45', fontWeight: 600, wordBreak: 'break-word' } }, detail.title),
                 h(Action, { onClick: () => setSelectedMemory('') }, '关闭'),
               ),
-              h('div', { style: PANEL_MUTED }, `${KIND_LABEL[detailRecord && detailRecord.kind] || '记忆'} · ${detail.scopeLabel || ''}`),
+              h('div', { style: PANEL_MUTED }, `${KIND_LABEL[detailRecord && detailRecord.kind] || '记忆'} · ${detail.scopeLabel || ''}${detailProcessing ? ` · ${PROCESSING_LABEL[detailProcessing]}` : ''}`),
               Array.isArray(detailRecord && detailRecord.tags) && detailRecord.tags.length
                 ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '4px' } },
                   detailRecord.tags.slice(0, 6).map((tag) => h('span', { key: tag, style: { ...PANEL_MUTED, padding: '0 6px', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '999px' } }, `#${tag}`))) : null,
-              h('div', { style: { fontSize: '12px', lineHeight: '1.65', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, detail.body || '没有正文'),
+              h('div', { style: { fontSize: '12px', lineHeight: '1.65', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, currentBodyOf(detail) || '没有正文'),
+              h(DetailExtras, { payload: detail }),
             )
             : h('div', { style: PANEL_MUTED }, detailNote || '读取中…'),
         )
@@ -1382,7 +1655,8 @@ window.__ModuleLoader__.load({
         style: { ...PANEL_CARD, padding: 0, minHeight: 0, overflow: 'hidden', display: 'flex' },
       },
       h(MemoryGraph, {
-        records: filtered, selectedId: selectedMemory, onPick: onPickNode,
+        records: filtered, total: query ? filtered.length : total,
+        selectedId: selectedMemory, onPick: onPickNode,
         onPickHub: (node) => {
           setQuery(node.kind === 'tag' ? node.label.replace(/^#/, '') : node.label);
           setMemoryView('list');
@@ -1483,7 +1757,7 @@ window.__ModuleLoader__.load({
         style: { ...PANEL_CARD, padding: 0, minHeight: 0, overflow: 'hidden', display: 'flex' },
       },
       h(MemoryGraph, {
-        records: filteredRules, graphOf: ruleGraphOf, primaryKind: 'rule',
+        records: filteredRules, total: filteredRules.length, graphOf: ruleGraphOf, primaryKind: 'rule',
         selectedId: selectedRule, onPick: onPickRuleNode,
         emptyText: evolutionEmptyText, ariaLabel: '经验关系图',
         legend: '圆点 经验 · 小点 条件 · 虚线 共用条件 · 点圆点查看',
@@ -1568,8 +1842,15 @@ window.__ModuleLoader__.load({
           update: list.filter((item) => item.exposure === 'update'),
         };
       }, [refs]);
+      const noTriggerReason = typeof props.noTriggerReason === 'string' && props.noTriggerReason
+        ? props.noTriggerReason
+        : (typeof refs.noTriggerReason === 'string' ? refs.noTriggerReason : '');
       if (!sessionId && refs.length === 0) return null;
-      if (groups.found.length === 0 && groups.provided.length === 0 && groups.update.length === 0) return null;
+      if (groups.found.length === 0 && groups.provided.length === 0 && groups.update.length === 0) {
+        return noTriggerReason
+          ? h('div', { style: TAIL }, h(RefSection, { label: '搜索命中', items: EMPTY, sessionId, turnKey: turn, noTriggerReason }))
+          : null;
+      }
       return h('div', { style: TAIL },
         h(RefSection, { label: '搜索命中', items: groups.found, sessionId, turnKey: turn }),
         h(RefSection, { label: '读过正文', items: groups.provided, sessionId, turnKey: turn }),
@@ -1581,7 +1862,7 @@ window.__ModuleLoader__.load({
 
     // 测试缝：Node 里验引用投影，浏览器里没有任何副作用。
     if (typeof globalThis.__LITE_MEMORY_TEST__ === 'function') {
-      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, MemoryPanel });
+      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel });
     }
 
     return {

@@ -885,4 +885,226 @@ test('R26 显式长正文加短摘要时补上摘要原文，不把两者混成�
   assert.match(body, /现场记录/);
 });
 
+
+// ── 长摘要尾巴、凭据、归属、冷归档、lastUsed、未绑作品 ──────────────────
+test('反复改长摘要只留一份「摘要原文」，不会越改越长', () => {
+  const scope = fresh('summary-tail-once');
+  const long = '完整摘要'.repeat(20);
+  const saved = upsert(scope, { title: '反复改的条目', summary: long, body: '第一版正文' });
+  const id = saved.record.id;
+  for (const body of ['第二版正文', '第三版正文', '第四版正文']) {
+    upsert(scope, { id, title: '反复改的条目', summary: long, body });
+  }
+  const body = bodyOf(scope, id);
+  assert.equal((body.match(/摘要原文：/g) || []).length, 1);
+  assert.equal(body, `第四版正文${'\n\n摘要原文：'}${long}`);
+  for (const next of ['甲版摘要内容', '乙版摘要内容']) {
+    upsert(scope, { id, title: '反复改的条目', summary: `${long}${next}`, body: '第四版正文' });
+  }
+  const changed = bodyOf(scope, id);
+  assert.equal((changed.match(/摘要原文：/g) || []).length, 1, '换摘要也只留最新一份原文');
+  assert.match(changed, /乙版摘要内容/);
+  assert.equal(loadIndex(scope).entries[0].bytes <= LIMITS.entryBytes, true);
+});
+
+test('只改摘要不写正文时，旧尾巴被替换而不是叠上去', () => {
+  const scope = fresh('summary-tail-summary-only');
+  const head = '摘要主体'.repeat(15);
+  const first = upsert(scope, { title: '只改摘要', summary: `${head}甲` });
+  const id = first.record.id;
+  const sizes = [];
+  for (const tail of ['乙', '丙', '丁']) {
+    upsert(scope, { id, title: '只改摘要', summary: `${head}${tail}` });
+    sizes.push(Buffer.byteLength(bodyOf(scope, id)));
+  }
+  const body = bodyOf(scope, id);
+  assert.equal((body.match(/摘要原文：/g) || []).length, 1);
+  assert.match(body, /丁$/);
+  assert.equal(sizes[1], sizes[2], '改到第三、四版时正文不再变长');
+});
+
+test('被截掉的摘尾巴里藏凭据也要拒绝', () => {
+  const scope = fresh('summary-tail-secret');
+  const mask = '这条摘要的前半段可以短一点'.repeat(5);
+  const secret = ' token = sk-abcdefghijklmnopqrst';
+  assert.throws(() => upsert(scope, {
+    title: '凭据藏尾巴', summary: `${mask}${secret}`, body: '显式正文',
+  }), /凭据/);
+  assert.equal(fs.existsSync(path.join(scope.dir, 'state.json')), false);
+});
+
+test('归属路由：本机痕迹的「通用流程」留在项目层，干净流程带依据才进全局', () => {
+  const project = { confirmed: true };
+  const bound = store.routeScope({
+    title: '部署脚本', summary: '本机部署脚本的位置', body: 'bash /tmp/deploy.sh，再看 127.0.0.1:8080',
+    memoryClass: 'portable_procedure', scope: 'global',
+  }, { project });
+  assert.equal(bound.chosenScope, 'project');
+  assert.equal(bound.reasonCode, 'machine_bound_scope');
+
+  const boundNoScope = store.routeScope({
+    title: '本机路径', summary: '部署脚本在 /tmp 下', body: 'bash /tmp/deploy.sh',
+    memoryClass: 'portable_procedure',
+  }, { project });
+  assert.equal(boundNoScope.chosenScope, 'project');
+  assert.equal(boundNoScope.reasonCode, 'machine_bound_procedure');
+
+  const noEvidence = store.routeScope({
+    title: '提交前跑测试', summary: '提交前跑测试', body: 'pnpm test',
+    memoryClass: 'portable_procedure',
+  }, { project });
+  assert.equal(noEvidence.chosenScope, 'project');
+  assert.equal(noEvidence.reasonCode, 'unbound_evidence');
+
+  const withEvidence = store.routeScope({
+    title: '提交前跑测试', summary: '提交前跑测试', body: 'pnpm test',
+    memoryClass: 'portable_procedure', evidenceRef: '团队 wiki 的提交流程页',
+  }, { project });
+  assert.equal(withEvidence.chosenScope, 'global');
+  assert.equal(withEvidence.reasonCode, 'class_portable_procedure');
+
+  const evidencePath = store.routeScope({
+    title: '提交前跑测试', summary: '提交前跑测试', body: 'pnpm test',
+    memoryClass: 'portable_procedure', evidenceRef: '/tmp/notes/deploy.md',
+  }, { project });
+  assert.equal(evidencePath.chosenScope, 'project', '依据本身是本机文件不算普适证据');
+  assert.equal(evidencePath.reasonCode, 'machine_bound_procedure');
+
+  const unconfirmed = store.routeScope({
+    title: '部署脚本', summary: '本机部署脚本', body: 'bash /tmp/deploy.sh',
+    memoryClass: 'portable_procedure', scope: 'global',
+  }, { project: { confirmed: false } });
+  assert.equal(unconfirmed.needsScope, true);
+  assert.equal(unconfirmed.reasonCode, 'needs_environment');
+  assert.deepEqual(unconfirmed.requiredConditions.map((row) => row.key), ['machine', 'runtime']);
+
+  const humanGlobal = store.routeScope({
+    title: '部署脚本', summary: '本机部署脚本', body: 'bash /tmp/deploy.sh',
+    memoryClass: 'portable_procedure', scope: 'global',
+  }, { project, humanScope: true });
+  assert.equal(humanGlobal.chosenScope, 'global');
+  assert.equal(humanGlobal.reasonCode, 'explicit');
+
+  const modelGlobalFact = store.routeScope({
+    title: '发布分支', summary: '本仓库发布分支是 main', body: 'main',
+    memoryClass: 'project_fact', scope: 'global',
+  }, { project });
+  assert.equal(modelGlobalFact.chosenScope, 'project', '模型自填 global 不能把项目事实送进全局层');
+  assert.equal(modelGlobalFact.reasonCode, 'model_global_project_fact');
+
+  const modelGlobalProcedure = store.routeScope({
+    title: '提交前跑测试', summary: '提交前跑测试', body: 'pnpm test',
+    memoryClass: 'portable_procedure', scope: 'global',
+  }, { project });
+  assert.equal(modelGlobalProcedure.chosenScope, 'project', '模型自填 global 少了依据也不能进全局层');
+  assert.equal(modelGlobalProcedure.reasonCode, 'unbound_evidence');
+});
+
+test('几百条归档的正文不进热状态，下一次保存照样能过', () => {
+  const scope = fresh('cold-archives');
+  fs.mkdirSync(scope.dir, { recursive: true });
+  const at = new Date(Date.now() - 86_400_000).toISOString();
+  const row = (id, status, title, body) => ({
+    id,
+    revision: 1,
+    status,
+    origin: 'user_explicit',
+    createdAt: at,
+    updatedAt: at,
+    current: {
+      title, summary: title, body, kind: 'note', when: '', keywords: [], topicKey: '',
+      triggers: [], applicability: 'all_in_scope', conditions: [], selection: null, links: [], aliases: [],
+    },
+    maintenance: { reviewState: 'current', sourceRefs: [], retiredNames: [], versions: [], checks: [], hits: 0, merges: 0, lastUsed: at },
+  });
+  const build = (chars) => {
+    const big = state.emptyState(scope);
+    big.entries.push(row('mem_cold00000001', 'active', '现役条目', '现役正文'));
+    const body = '归档正文示例'.repeat(1).padEnd(1) + '归'.repeat(chars);
+    for (let i = 0; i < 480; i += 1) {
+      big.entries.push(row(`mem_cold${String(i + 2).padStart(8, '0')}`, 'archived', `旧条目 ${i}`, body));
+    }
+    return state.encodeState(big);
+  };
+  let chars = 1400;
+  let encoded = build(chars);
+  for (let attempt = 0; attempt < 30 && Buffer.byteLength(encoded) > LIMITS.stateBytes - 1200; attempt += 1) {
+    const over = Buffer.byteLength(encoded) - (LIMITS.stateBytes - 1200);
+    chars -= Math.max(1, Math.ceil(over / (480 * 3)));
+    encoded = build(chars);
+  }
+  const seeded = Buffer.byteLength(encoded);
+  assert.ok(seeded <= LIMITS.stateBytes, '造出的热状态本身还得读得动');
+  assert.ok(seeded > LIMITS.stateBytes - 3200, '离上限只差一条新记忆');
+  fs.writeFileSync(path.join(scope.dir, 'state.json'), encoded);
+
+  const saved = upsert(scope, { title: '新的一条', summary: '归档再多也要能写', body: '新正文'.repeat(400) });
+  assert.equal(saved.record.title, '新的一条');
+  assert.ok(Buffer.byteLength(rawState(scope)) < LIMITS.stateBytes, '热状态回到上限内');
+  assert.equal(fs.existsSync(path.join(scope.dir, 'cold')), true);
+  assert.equal(fs.existsSync(path.join(scope.dir, 'archive')), false);
+  const archivedId = 'mem_cold00000002';
+  assert.match(readEntry(scope, archivedId).body, /归档正文示例/, '归档正文还能读到');
+  assert.match(search(scope, '新的一条')[0].title, /新的一条/);
+});
+
+test('lastUsed 只在真读过且够旧时回写，刚存下的条目不动', () => {
+  const scope = fresh('last-used-touch');
+  const created = upsert(scope, { title: '会被读的条目', summary: '读一次要记下用过', body: '正文' });
+  const id = created.record.id;
+  const freshUsed = loadIndex(scope).entries.find((entry) => entry.id === id).lastUsed;
+  readEntry(scope, id);
+  assert.equal(loadIndex(scope).entries.find((entry) => entry.id === id).lastUsed, freshUsed, '十分钟内不写盘');
+  search(scope, '会被读的条目');
+  assert.equal(loadIndex(scope).entries.find((entry) => entry.id === id).lastUsed, freshUsed);
+
+  const stale = new Date(Date.now() - 11 * 60 * 1000).toISOString();
+  const index = loadIndex(scope);
+  index.entries.find((entry) => entry.id === id).lastUsed = stale;
+  store.saveIndex(scope, index);
+  assert.equal(stateOf(scope).entries.find((entry) => entry.id === id).maintenance.lastUsed, stale);
+  readEntry(scope, id);
+  const touched = loadIndex(scope).entries.find((entry) => entry.id === id).lastUsed;
+  assert.notEqual(touched, stale);
+  assert.ok(Date.now() - Date.parse(touched) < 60_000, '过旧时读一次就回写');
+
+  const other = upsert(scope, { title: '葡萄柚检索目标', summary: '葡萄柚专用的检索记录', body: '葡萄柚正文' });
+  assert.ok(other.record, '第二条要真的新建出来');
+  const staleSearch = new Date(Date.now() - 11 * 60 * 1000).toISOString();
+  const again = loadIndex(scope);
+  again.entries.find((entry) => entry.id === other.record.id).lastUsed = staleSearch;
+  store.saveIndex(scope, again);
+  search(scope, '葡萄柚检索目标');
+  assert.notEqual(loadIndex(scope).entries.find((entry) => entry.id === other.record.id).lastUsed, staleSearch);
+});
+
+test('项目层未绑作品的候选也能开始整理并提交成规则', () => {
+  const scope = fresh('learning-unbound');
+  const on = setEvolution(scope, true, { operationId: 'evo-unbound-on' });
+  assert.equal(on.ok, true);
+  const started = store.beginLearningAttempt(scope, { episodeId: '', operationId: 'unbound-start' });
+  assert.equal(started.ok, true, started.reason);
+  assert.equal(started.episodeId, '', '不编造作品 id');
+  const change = {
+    target: 'new', feedbackType: 'spec_change', topicKey: '口播开头',
+    currentText: '开头三句内给结论。', applicability: 'conditional',
+    conditions: [{ key: 'seriesId', value: '口播' }], evidence: ['u0'], persistence: 'project_candidate',
+  };
+  const committed = store.commitLearning(scope, {
+    operationId: 'unbound-commit', epoch: started.epoch, episodeId: '', projectId: scope.key,
+    sessionId: 's-unbound', messageIds: ['m1'], changes: [change], preparedTargets: [],
+  });
+  assert.equal(committed.ok, true, committed.reason);
+  const rules = stateOf(scope).entries.filter((entry) => entry.origin === 'project_evolution');
+  assert.equal(rules.length, 1);
+  assert.match(rules[0].current.title, /开头|口播/);
+
+  const foreign = store.commitLearning(scope, {
+    operationId: 'unbound-foreign', epoch: started.epoch, episodeId: '', projectId: 'other-project',
+    sessionId: 's-unbound', messageIds: ['m1'], changes: [change], preparedTargets: [],
+  });
+  assert.equal(foreign.ok, false);
+  assert.match(foreign.reason, /缺少作品标识/);
+});
+
 console.log(`store.test.mjs: ${passed} passed`);

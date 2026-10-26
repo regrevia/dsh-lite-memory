@@ -524,3 +524,111 @@ test('R42 栏目只被提到、否定或搁置时都不算用户选中', () => {
   assert.equal(anchor.seriesChosenBy('日志里提到口播吗', '口播'), false);
   assert.equal(anchor.seriesChosenBy('先放着口播，改数据库', '口播'), false);
 });
+
+test('R43 任务类型判断：工程词优先于创作词，纯创作才归 content', () => {
+  assert.equal(anchor.taskKindOf('审阅口播插件的源码，修复上下文串扰问题'), 'code');
+  assert.equal(anchor.taskKindOf('日志里提到口播'), 'code');
+  assert.equal(anchor.taskKindOf('先不做口播，排查 PostgreSQL 连接池故障'), 'code');
+  assert.equal(anchor.taskKindOf('再做一期口播'), 'content');
+  assert.equal(anchor.taskKindOf('改成口播'), 'content');
+  assert.equal(anchor.taskKindOf('帮我看看这个'), '');
+  assert.equal(anchor.taskKindOf(''), '');
+});
+
+test('R44 栏目名后跟代码对象时只算读源码，不算选中栏目', () => {
+  assert.equal(anchor.seriesChosenBy('审阅口播插件的源码，修复上下文串扰问题', '口播'), false);
+  assert.equal(anchor.seriesChosenBy('检查口播插件代码', '口播'), false);
+  assert.equal(anchor.seriesChosenBy('口播源码里日志有问题', '口播'), false);
+  assert.equal(anchor.seriesChosenBy('再做一期口播', '口播'), true);
+  assert.equal(anchor.seriesChosenBy('改成口播', '口播'), true);
+});
+
+test('R45 明确撤销栏目：先不做口播优先于续作和旧栏目', () => {
+  const tasks = activeVideoSession();
+  const next = anchor.routeTask(tasks, {
+    sessionId: 'sess-switch',
+    batchKey: 'rb_revoke',
+    messageIds: ['m2'],
+    query: '先不做口播，排查 PostgreSQL 连接池故障',
+    registeredSeries: ['口播'],
+    now: 2000,
+  });
+  assert.equal(next.decision.kind, 'revoked');
+  assert.deepEqual(next.decision.revoked, ['口播']);
+  assert.equal(next.anchor.status, 'active');
+  assert.equal(next.anchor.seriesId, undefined);
+  assert.equal(next.anchor.taskKind, 'code');
+  assert.equal(next.episode.taskKind, 'code');
+  assert.equal(next.episode.previousEpisodeId, tasks.sessions['sess-switch'].episodeId);
+  assert.equal(anchor.revokeSeriesBy('不要按口播的规矩来', ['口播']).length, 0);
+  assert.deepEqual(anchor.revokeSeriesBy('先不做口播，排查故障', ['口播', 'Vlog']), ['口播']);
+});
+
+test('R46 读源码/提到栏目都不建内容绑定，项目默认值不能趁机补栏目', () => {
+  const tasks = anchor.emptyTasks();
+  tasks.defaults = { taskKind: 'video', seriesId: '口播' };
+  const reading = anchor.routeTask(tasks, {
+    sessionId: 'sess-reading', batchKey: 'rb_reading', messageIds: ['m1'],
+    query: '审阅口播插件的源码，修复上下文串扰问题', registeredSeries: ['口播'], now: 1000,
+  });
+  assert.equal(reading.anchor.seriesId, undefined);
+  assert.equal(reading.episode.taskKind, 'code');
+  assert.notEqual(reading.decision.kind, 'selected');
+  assert.notEqual(reading.decision.kind, 'default');
+
+  const mention = anchor.routeTask(tasks, {
+    sessionId: 'sess-mention', batchKey: 'rb_mention', messageIds: ['m1'],
+    query: '日志里提到口播', registeredSeries: ['口播'], now: 1000,
+  });
+  assert.equal(mention.anchor.seriesId, undefined);
+  assert.equal(mention.anchor.taskKind, 'code');
+});
+
+test('R47 项目默认值只补缺失字段，不覆盖显式任务类型和撤销', () => {
+  const tasks = anchor.emptyTasks();
+  tasks.defaults = { taskKind: 'video', seriesId: '口播' };
+  const filled = anchor.routeTask(tasks, {
+    sessionId: 'sess-default', batchKey: 'rb_default', messageIds: ['m1'],
+    query: '继续改上次那期的开头', registeredSeries: ['口播'], now: 1000,
+  });
+  assert.equal(filled.decision.kind, 'default');
+  assert.equal(filled.anchor.seriesId, '口播');
+  assert.equal(filled.anchor.taskKind, 'video');
+
+  const explicit = anchor.routeTask(tasks, {
+    sessionId: 'sess-explicit-kind', batchKey: 'rb_explicit_kind', messageIds: ['m1'],
+    query: '帮我看看 PostgreSQL 连接池', taskKind: 'code', registeredSeries: ['口播'], now: 1000,
+  });
+  assert.equal(explicit.anchor.taskKind, 'code');
+  assert.equal(explicit.anchor.seriesId, undefined);
+  assert.equal(explicit.decision.taskKind, 'code');
+  assert.notEqual(explicit.decision.kind, 'default');
+});
+
+test('R48 RuntimeContext 形状确定，任务字段来自锚点与本句判断', () => {
+  const routed = anchor.routeTask(anchor.emptyTasks(), {
+    sessionId: 'sess-ctx', batchKey: 'rb_ctx', messageIds: ['m1'],
+    query: '审阅口播插件的源码，修复上下文串扰问题', registeredSeries: ['口播'], now: 1000,
+  });
+  const ctx = anchor.buildRuntimeContext({
+    projectId: '/work/demo', sessionId: 'sess-ctx', batchKey: 'rb_ctx', messageIds: ['m1'],
+    controlEpoch: 7, query: '继续看这段代码', anchor: routed.anchor, episode: routed.episode,
+  });
+  assert.deepEqual(Object.keys(ctx).sort(), ['controlEpoch', 'projectId', 'requestId', 'sessionId', 'task']);
+  assert.deepEqual(Object.keys(ctx.task).sort(), ['artifactKey', 'evidence', 'kind', 'phase', 'seriesId']);
+  assert.equal(ctx.projectId, '/work/demo');
+  assert.equal(ctx.sessionId, 'sess-ctx');
+  assert.equal(ctx.requestId, anchor.contextIdFor('/work/demo', 'rb_ctx', routed.episode.episodeId));
+  assert.equal(ctx.controlEpoch, '7');
+  assert.equal(ctx.task.kind, 'code');
+  assert.equal(ctx.task.seriesId, '');
+  assert.equal(ctx.task.phase, 'brief');
+  assert.equal(ctx.task.evidence, 'explicit');
+
+  const inferred = anchor.buildRuntimeContext({
+    projectId: '/work/demo', sessionId: 'sess-ctx', batchKey: 'rb_ctx', messageIds: ['m1'],
+    query: '审阅口播插件的源码',
+  });
+  assert.equal(inferred.task.kind, 'code');
+  assert.equal(inferred.task.evidence, 'query');
+});

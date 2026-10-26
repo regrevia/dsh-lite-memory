@@ -22,6 +22,8 @@ export const LIMITS = {
   receipts: 64,
   samples: 4,
   checkpoints: 3,
+  callRules: 6,
+  organizerRules: 8,
 };
 
 export const FEEDBACK_TYPES = ['spec_change', 'execution_miss', 'task_exception', 'aspect_accept', 'artifact_accept', 'unclear'];
@@ -82,10 +84,16 @@ export function isLongTerm(text) {
   return has(LONG_TERM, String(text || ''));
 }
 
-/** 只有已绑定作品的人类反馈才进入整理候选；初始任务要求本身不是纠正。 */
-export function candidateFrom({ messages, anchor, sessionId, projectId, now } = {}) {
-  if (!anchor || !anchor.episodeId) return null;
-  if (!['active', 'continuable', 'proposed'].includes(anchor.status)) return null;
+const BOUND_STATUSES = ['active', 'continuable', 'proposed'];
+
+/** 人类反馈原文的短摘录；来源是历史消息，不重写。 */
+export function sourceExcerptOf(input, { max = 160 } = {}) {
+  const clean = String(input || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return '';
+  return clean.length > max ? `${clean.slice(0, max)}…` : clean;
+}
+
+function humanFeedback(messages) {
   const ids = [];
   const texts = [];
   for (const message of Array.isArray(messages) ? messages : []) {
@@ -95,22 +103,68 @@ export function candidateFrom({ messages, anchor, sessionId, projectId, now } = 
     ids.push(String(message.id ?? ''));
     texts.push(text);
   }
-  if (!texts.length) return null;
-  const text = texts.join('\n').slice(0, 1200);
+  return { ids: ids.filter(Boolean), text: texts.join('\n').slice(0, 1200) };
+}
+
+/**
+ * 有作品绑定就走作品候选；没有绑定、但有明确长期要求的项目反馈，
+ * 仍可形成 project 作用域的 pending 候选。跨项目一律不接收，也不把整个项目绑到单条栏目。
+ */
+export function candidateFrom({ messages, anchor, sessionId, projectId, now } = {}) {
+  const bound = Boolean(anchor && anchor.episodeId);
+  if (bound && !BOUND_STATUSES.includes(anchor.status)) return null;
+  if (anchor?.projectId && projectId && String(anchor.projectId) !== String(projectId)) return null;
+  const { ids, text } = humanFeedback(messages);
+  if (!text) return null;
   const cue = classifyFeedback(text);
   if (!cue.worth) return null;
+  const at = now || Date.now();
+  const messageIds = ids.slice(-8);
+  const sourceExcerpt = sourceExcerptOf(text);
+  if (bound) {
+    return {
+      projectId,
+      sessionId: String(sessionId || ''),
+      scope: 'episode',
+      state: 'pending',
+      episodeId: anchor.episodeId,
+      taskKind: anchor.taskKind || '',
+      seriesId: anchor.seriesId || '',
+      phase: anchor.phase || '',
+      messageIds,
+      text,
+      sourceExcerpt,
+      cue,
+      expectedTarget: {
+        scope: 'episode',
+        projectId,
+        episodeId: anchor.episodeId,
+        ...(anchor.taskKind ? { taskKind: anchor.taskKind } : {}),
+        ...(anchor.seriesId ? { seriesId: anchor.seriesId } : {}),
+        ...(anchor.phase ? { phase: anchor.phase } : {}),
+      },
+      episodeUpdatedAt: anchor.updatedAt || '',
+      at,
+    };
+  }
+  if (!projectId) return null;
+  if (cue.type !== 'spec_change' || !cue.explicitLongTerm) return null;
   return {
     projectId,
     sessionId: String(sessionId || ''),
-    episodeId: anchor.episodeId,
-    taskKind: anchor.taskKind || '',
-    seriesId: anchor.seriesId || '',
-    phase: anchor.phase || '',
-    messageIds: ids.filter(Boolean).slice(-8),
+    scope: 'project',
+    state: 'pending',
+    episodeId: '',
+    taskKind: '',
+    seriesId: '',
+    phase: '',
+    messageIds,
     text,
+    sourceExcerpt,
     cue,
-    episodeUpdatedAt: anchor.updatedAt || '',
-    at: now || Date.now(),
+    expectedTarget: { scope: 'project', projectId, applicability: 'unresolved' },
+    episodeUpdatedAt: '',
+    at,
   };
 }
 
@@ -157,16 +211,94 @@ export function normalizeConditions(conditions) {
   return out.slice(0, 8);
 }
 
+const STATE_WEIGHT = { active: 3, trial: 2, pending: 1, paused: 0 };
+
+function gramsOf(input) {
+  const text = String(input || '').toLowerCase();
+  const out = new Set();
+  for (const word of text.match(/[a-z0-9_]+/g) || []) if (word.length >= 2) out.add(word);
+  for (const run of text.match(/[\u4e00-\u9fa5]+/g) || []) {
+    for (let index = 0; index + 1 < run.length; index += 1) out.add(run.slice(index, index + 2));
+  }
+  return out;
+}
+
+function relevanceOf(record, context) {
+  const query = String(context.query || '').toLowerCase();
+  const dimensions = (Array.isArray(context.dimensions) ? context.dimensions : [])
+    .map((value) => String(value || '').toLowerCase()).filter(Boolean);
+  const topicKey = String(record.topicKey || '').toLowerCase();
+  const conditions = normalizeConditions(record.conditions);
+  const hay = [
+    topicKey,
+    record.title || '',
+    record.summary || '',
+    record.body || '',
+    conditions.map((row) => `${row.key}=${row.value}`).join(' '),
+  ].join(' ').toLowerCase();
+  let score = 0;
+  if (topicKey && query) {
+    if (query.includes(topicKey)) score += 150;
+    else {
+      const shared = [...gramsOf(topicKey)].filter((gram) => query.includes(gram)).length;
+      if (shared) score += 90;
+    }
+  }
+  for (const dimension of dimensions) if (hay.includes(dimension)) score += 80;
+  const queryGrams = gramsOf(query);
+  const fieldWeights = [[record.title, 10], [record.summary, 6], [record.body, 4]];
+  for (const [text, weight] of fieldWeights) {
+    let hits = 0;
+    for (const gram of gramsOf(text)) if (queryGrams.has(gram)) hits += 1;
+    score += Math.min(hits, 6) * weight;
+  }
+  for (const row of conditions) {
+    if (row.key === 'taskKind' && context.taskKind && row.value === context.taskKind) score += 15;
+    else if (row.key === 'seriesId' && context.seriesId && row.value === context.seriesId) score += 15;
+    else if (row.key === 'phase' && context.phase && row.value === context.phase) score += 15;
+  }
+  return score;
+}
+
+/** 先按相关性和可用性排序，再截断；排序稳定可复现，不依赖输入顺序。 */
+export function rankRules(rules, context = {}) {
+  const rows = (Array.isArray(rules) ? rules : [])
+    .filter((record) => record && record.id)
+    .map((record, index) => ({
+      record,
+      index,
+      relevance: relevanceOf(record, context),
+      stateWeight: STATE_WEIGHT[record.learning?.state || record.state] ?? 1,
+      updated: String(record.updated || record.updatedAt || record.created || ''),
+      id: String(record.id),
+    }));
+  rows.sort((a, b) => b.relevance - a.relevance
+    || b.stateWeight - a.stateWeight
+    || b.updated.localeCompare(a.updated)
+    || a.id.localeCompare(b.id)
+    || a.index - b.index);
+  return rows.map((row) => row.record);
+}
+
+export function selectRules(rules, context = {}) {
+  const limit = Number(context.limit || LIMITS.organizerRules);
+  return rankRules(rules, context).slice(0, Math.max(1, limit));
+}
+
 /** 构造一次受限调用输入：无工具、无前台历史，只有身份、少量规则和反馈映射。 */
 export function buildCallInput({ projectId, episodeId, taskKind, seriesId, phase, feedback, rules, ranges, maxBytes = LIMITS.inputBytes } = {}) {
   const refs = { feedback: {}, rules: {} };
   const source = (Array.isArray(rules) ? rules : []).filter((record) => record && record.id);
-  /** 用户这次纠正涉及的规则先入输入：固定取前 6 条会把真正相关的旧经验挤掉。 */
+  /** 先按本次反馈的相关性排序，再取前几条：固定取前 6 条会把真正相关的旧经验挤掉。 */
   const dimension = String(feedback?.cue?.dimension || '');
-  const prioritized = dimension
-    ? [...source.filter((record) => `${record.title || ''}${record.summary || ''}${record.body || ''}`.includes(dimension)),
-      ...source.filter((record) => !`${record.title || ''}${record.summary || ''}${record.body || ''}`.includes(dimension))]
-    : source;
+  const prioritized = selectRules(source, {
+    query: feedback?.text || '',
+    dimensions: dimension ? [dimension] : [],
+    taskKind,
+    seriesId,
+    phase,
+    limit: LIMITS.callRules,
+  });
   refs.feedback.u0 = feedback.messageIds[0] || '';
   const project = {
     projectId: bounded(projectId, 80),
@@ -277,6 +409,22 @@ export function validateChange(change, { refs, rules, ranges } = {}) {
     revision: byRef.get(target).revision,
     conditions: byRef.get(target).conditions,
   };
+  /** 反馈类型决定能改什么：例外、检查点、认可都不能借机重写规范。 */
+  if (checkpointOnly && (change.topicKey !== undefined || change.title !== undefined
+    || change.summary !== undefined || change.applicability !== undefined || change.conditions !== undefined)) {
+    return { ok: false, reason: '执行检查点只记录检查点，不改规范' };
+  }
+  if (change.feedbackType === 'aspect_accept') {
+    if (target === 'new') return { ok: false, reason: '认可只能挂到匹配的已有规则' };
+    if (change.currentText !== undefined || change.topicKey !== undefined || change.title !== undefined
+      || change.summary !== undefined || change.applicability !== undefined) {
+      return { ok: false, reason: '认可只记录验收，不改规范' };
+    }
+    if (change.conditions !== undefined
+      && JSON.stringify(normalizeConditions(change.conditions)) !== JSON.stringify(normalizeConditions(existing?.conditions))) {
+      return { ok: false, reason: '认可条件与目标规则不一致' };
+    }
+  }
   if (change.persistence !== undefined && change.persistence !== 'project_candidate') return { ok: false, reason: '持久化方式不认' };
   const topicKey = change.topicKey === undefined ? (existing || sampleOnly ? undefined : '') : String(change.topicKey || '').trim();
   if (!existing && !sampleOnly && !topicKey) return { ok: false, reason: '新规则缺少主题键' };
@@ -406,22 +554,59 @@ export function addCheckpoint(learning, checkpoint = {}) {
   return next;
 }
 
-/** 状态只看证据强度：明确长期要求或两个独立作品才 active；条件不确定就 pending。 */
+const NON_NORM_TYPES = new Set(['execution_miss', 'artifact_accept', 'aspect_accept']);
+
+/**
+ * 状态只看证据强度：明确长期要求或两个独立作品才 active；条件不确定就 pending。
+ * 例外/含糊/验收/执行检查点不形成长期规范；目标或规范变了，旧证据立即失效。
+ */
 export function nextLearningState({ existing, change, evidence, now, specChanged = false } = {}) {
   const at = new Date(now || Date.now()).toISOString();
   const learning = existing?.learning ? JSON.parse(JSON.stringify(existing.learning)) : { state: 'pending', supportedEpisodeIds: [], evidence: [] };
   const priorState = LEARNING_STATES.includes(learning.state) ? learning.state : 'pending';
-  /** 规范正文或适用条件变了：旧证据不再支持新规范，只保留本次这一条。 */
-  const episodes = specChanged ? [] : (Array.isArray(learning.supportedEpisodeIds) ? learning.supportedEpisodeIds.slice() : []);
+  const feedbackType = change?.feedbackType || '';
+  learning.updatedAt = at;
+  learning.lastFeedbackType = feedbackType || learning.lastFeedbackType || '';
+  /** 这些反馈只补充验收或检查点，不抬升状态，也不产生长期规范。 */
+  if (NON_NORM_TYPES.has(feedbackType) || feedbackType === 'task_exception' || feedbackType === 'unclear') {
+    if (!existing) learning.state = 'pending';
+    return learning;
+  }
+  const targetChanged = Boolean(change?.id && existing?.id && String(change.id) !== String(existing.id));
+  /** 规范正文、适用条件或目标对象变了：旧证据不再支持新规范，只保留本次这一条。 */
+  const reset = specChanged === true || targetChanged;
+  const episodes = reset ? [] : (Array.isArray(learning.supportedEpisodeIds) ? learning.supportedEpisodeIds.slice() : []);
   if (evidence?.episodeId && !episodes.includes(evidence.episodeId)) episodes.push(evidence.episodeId);
-  const anchors = specChanged ? [] : (Array.isArray(learning.evidence) ? learning.evidence.slice() : []);
+  const anchors = reset ? [] : (Array.isArray(learning.evidence) ? learning.evidence.slice() : []);
   if (evidence?.episodeId && !anchors.some((row) => row.episodeId === evidence.episodeId)) anchors.push(evidence);
   learning.supportedEpisodeIds = episodes.slice(-LIMITS.evidence);
   learning.evidence = anchors.slice(-LIMITS.evidence).map((row) => ({ ...row }));
-  learning.updatedAt = at;
-  learning.lastFeedbackType = change?.feedbackType || learning.lastFeedbackType || '';
+  if (reset) {
+    learning.evidenceResetAt = at;
+    learning.evidenceResetReason = targetChanged ? 'target_changed' : 'spec_changed';
+    delete learning.samples;
+  }
+  const sourceRefs = Array.isArray(evidence?.messageIds) ? evidence.messageIds : [];
+  if (evidence?.episodeId || evidence?.sourceExcerpt || sourceRefs.length) {
+    const excerpt = bounded(evidence?.sourceExcerpt || evidence?.excerpt || '', 160);
+    const messageIds = (Array.isArray(evidence?.messageIds) ? evidence.messageIds : []).slice(-3).map((id) => bounded(id, 80));
+    if (excerpt) learning.sourceExcerpt = excerpt;
+    learning.sourceRefs = [...(Array.isArray(learning.sourceRefs) ? learning.sourceRefs : []), {
+      excerpt,
+      messageIds,
+      episodeId: String(evidence?.episodeId || ''),
+      feedbackType,
+      at,
+    }].slice(-LIMITS.evidence);
+    learning.binding = {
+      targetId: String(change?.id || existing?.id || 'new'),
+      baseRevision: Number(existing?.revision || 0),
+      messageIds,
+      at,
+    };
+  }
   if (change?.currentText) learning.lastText = change.currentText;
-  if (priorState === 'paused' && !specChanged && !Boolean(evidence?.explicitLongTerm)) {
+  if (priorState === 'paused' && !reset && !Boolean(evidence?.explicitLongTerm)) {
     learning.state = 'paused';
     return learning;
   }
@@ -456,6 +641,58 @@ export function nextLearningState({ existing, change, evidence, now, specChanged
     delete learning.trialUntil;
   }
   return learning;
+}
+
+/** 过期 pending 只是待复核失效，不销毁候选内容；可重新唤起。 */
+export function candidateExpired(learning, now) {
+  const at = now || Date.now();
+  if (!learning || learning.state !== 'pending' || !learning.createdAt) return false;
+  return at - Date.parse(learning.createdAt) > LIMITS.trialMs;
+}
+
+/** 只数还有效的 pending；过期候选不占名额。 */
+export function pendingCount(entries, now) {
+  const at = now || Date.now();
+  return (Array.isArray(entries) ? entries : []).filter((entry) => {
+    const learning = entry && entry.learning ? entry.learning : entry;
+    return learning && learning.state === 'pending' && !candidateExpired(learning, at);
+  }).length;
+}
+
+/** 重新唤起过期候选：换新的待确认窗口，但不伪造新的证据。 */
+export function reviveCandidate(learning, { now } = {}) {
+  if (!learning) return learning;
+  const at = now || Date.now();
+  const next = JSON.parse(JSON.stringify(learning));
+  next.state = 'pending';
+  next.createdAt = new Date(at).toISOString();
+  next.updatedAt = next.createdAt;
+  next.recoveredAt = next.createdAt;
+  delete next.trialUntil;
+  delete next.blockedReason;
+  delete next.pausedAt;
+  delete next.pausedBy;
+  return next;
+}
+
+/**
+ * 准入顺序：先算目标状态，再看上限。pending 满了不能挡住会直接变成 trial/active 的更新，
+ * 已有规则的修订也永不因配额被挡。
+ */
+export function admitChange({ existing, change, evidence, now, explicitLongTerm = false, pending = 0, rules = 0 } = {}) {
+  const merged = mergeChange(existing || null, change, { now });
+  const learning = nextLearningState({
+    existing: existing || { learning: merged.learning },
+    change,
+    evidence: { ...evidence, explicitLongTerm },
+    specChanged: merged.specChanged === true,
+    now,
+  });
+  const next = { merged, learning };
+  if (existing) return { ok: true, ...next };
+  if (Number(rules) + 1 > LIMITS.rules) return { ok: false, reason: '项目实验规则已经到上限' };
+  if (learning.state === 'pending' && Number(pending) >= LIMITS.pending) return { ok: false, reason: '待确认候选已经到上限' };
+  return { ok: true, ...next };
 }
 
 export function pauseLearning(learning, { by = 'feedback', reason = 'feedback_pending', now } = {}) {
@@ -569,17 +806,18 @@ export function effectSummary(learning) {
   };
 }
 
-/** 到期的 trial/paused 按边界清理；active 与用户固定规范不走 TTL。 */
+/** 到期的 trial/paused 按边界清理；过期 pending 只标可恢复，不销毁；active 与用户固定规范不走 TTL。 */
 export function lifecycle(entries, now) {
   const at = now || Date.now();
   const purge = [];
   const paused = [];
+  const recoverable = [];
   for (const entry of Array.isArray(entries) ? entries : []) {
     const learning = entry?.learning;
     if (!learning || entry.origin !== 'project_evolution' || learning.pinned === true) continue;
-    if (learning.state === 'pending' && learning.createdAt && at - Date.parse(learning.createdAt) > LIMITS.trialMs) purge.push(entry.id);
+    if (learning.state === 'pending' && candidateExpired(learning, at)) recoverable.push(entry.id);
     else if (learning.state === 'trial' && learning.trialUntil && at - Date.parse(learning.trialUntil) > 0) paused.push(entry.id);
     else if (learning.state === 'paused' && learning.pausedAt && at - Date.parse(learning.pausedAt) > LIMITS.pausedMs) purge.push(entry.id);
   }
-  return { purge, paused };
+  return { purge, paused, recoverable };
 }

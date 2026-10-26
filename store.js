@@ -30,6 +30,9 @@ const SECRET_PATTERNS = [
 
 const SUGGESTION_ID = /^sug_[a-z0-9]{6,}$/;
 
+/** 托管尾巴标记：摘要被截短时，完整原文补在正文末尾，同一份只留一次。 */
+const SUMMARY_TAIL = '\n\n摘要原文：';
+
 /**
  * 实验来源的条目默认不属于普通记忆读取面：开关关闭、暂停或身份未知时，
  * 老 ID、病史查询和关联跳转都不能把正文带出来。管理面显式传 allowExperimental。
@@ -54,7 +57,11 @@ const bodyCache = new Map();
 
 function cacheBodies(scope, entries) {
   const map = new Map();
-  for (const entry of entries) map.set(entry.id, entry.current && entry.current.body);
+  for (const entry of entries) {
+    const body = entry.current && entry.current.body;
+    /** 空正文不进缓存：归档条目的正文可能冷存，读取时要能回冷存兜底。 */
+    if (typeof body === 'string' && body !== '') map.set(entry.id, body);
+  }
   bodyCache.set(scope.dir, map);
 }
 
@@ -161,7 +168,14 @@ export function loadIndex(scope, options = {}) {
   }
   const loaded = state.load(scope, options);
   const entries = loaded.state.entries.filter((entry) => entry.status === 'active').map(toFlat);
-  const archived = loaded.state.entries.filter((entry) => entry.status === 'archived').map(toFlat);
+  /** 归档条目热状态里只有元数据，正文在冷存；读的时候再补回来。 */
+  const archived = loaded.state.entries.filter((entry) => entry.status === 'archived').map((entry) => {
+    const body = hydrateCold(scope, entry);
+    const record = toFlat(entry);
+    record.cold = Boolean(entry.maintenance && entry.maintenance[COLD_MARK]);
+    record.coldBody = body;
+    return record;
+  });
   cacheBodies(scope, loaded.state.entries);
   const index = {
     version: 2,
@@ -190,10 +204,11 @@ export function loadIndex(scope, options = {}) {
 }
 
 /** 扁平索引 → v2 状态：整层重写，条目、候选、回执一次换完。 */
-function applyFlat(draft, index) {
+function applyFlat(scope, draft, index) {
   const next = [];
   for (const record of index.entries) next.push(fromFlat(record));
-  for (const record of index.archived || []) next.push(fromFlat(record, 'archived'));
+  /** 归档正文不写回热状态：先落冷存再摘空，冷存写失败就整次保存失败，不丢正文。 */
+  for (const record of index.archived || []) next.push(fromFlat(coldStored(scope, record), 'archived'));
   draft.entries = next;
   draft.candidates = Array.isArray(index.suggestions) ? JSON.parse(JSON.stringify(index.suggestions)) : [];
   draft.receipts = Array.isArray(index.receipts) ? JSON.parse(JSON.stringify(index.receipts)) : [];
@@ -211,7 +226,7 @@ export function saveIndex(scope, index) {
   const expected = meta.exists ? { generation: meta.generation, epoch: meta.epoch } : null;
   const result = state.transact(scope, { expected, expectCreate: !meta.exists }, (draft) => {
     const before = JSON.stringify([draft.entries, draft.candidates, draft.receipts, draft.suppressions, draft.lastSuggestedAt]);
-    applyFlat(draft, index);
+    applyFlat(scope, draft, index);
     const after = JSON.stringify([draft.entries, draft.candidates, draft.receipts, draft.suppressions, draft.lastSuggestedAt]);
     return { changed: before !== after };
   });
@@ -319,7 +334,10 @@ export function normalizeDraft(source, options = {}) {
   const autoBody = !bodyExplicit && summaryShortened ? rawSummary : '';
   const checked = bodyExplicit ? body : autoBody;
   const bodyBytes = Buffer.byteLength(checked);
-  if (bodyBytes > LIMITS.entryBytes) {
+  /** 预算按真正会存进去的正文算：摘要被截短时，托管尾巴也占字节。 */
+  const tailNeeded = Boolean(summaryShortened) && !checked.includes(rawSummary);
+  const storedBytes = bodyBytes + (tailNeeded ? Buffer.byteLength(`${SUMMARY_TAIL}${rawSummary}`) : 0);
+  if (storedBytes > LIMITS.entryBytes) {
     throw new Error(autoBody
       ? `摘要 ${rawSummary.length} 字，超过单条 ${LIMITS.entryBytes} 字节；先拆成两条写，别丢后半段`
       : `正文 ${bodyBytes} 字节，超过单条 ${LIMITS.entryBytes} 字节；只留原则、判断规则和触发条件`);
@@ -337,7 +355,9 @@ export function normalizeDraft(source, options = {}) {
   const links = view.normalizeLinks(draft.links, id);
   const applicability = view.normalizeApplicability(draft.applicability);
   const topicKey = has('topicKey') ? textField(draft.topicKey, LIMITS.tagChars, '主题') : undefined;
-  const secret = detectSecret([title, summary, when, body, tags.join(' '), topicKey || ''].join('\n'));
+  /** 凭据扫描必须覆盖完整原文和托管尾巴：截短后的摘要看不出凭据，原文里有也不行。 */
+  const scannedBody = checked + (tailNeeded ? `${SUMMARY_TAIL}${rawSummary}` : '');
+  const secret = detectSecret([title, summary, rawSummary, when, body, scannedBody, tags.join(' '), topicKey || ''].join('\n'));
   if (secret) throw new Error(`疑似凭据（${secret}），只记位置，不记值`);
   return {
     id,
@@ -381,9 +401,17 @@ function newId() {
 /** 正文就在状态里；缓存只是省一次读盘，得手时一律回状态读。 */
 function readBody(scope, id) {
   const cached = cachedBody(scope, id);
-  if (typeof cached === 'string') return cached;
+  if (typeof cached === 'string' && cached !== '') return cached;
   const found = state.readEntryBody(scope, id);
   if (!found) throw new Error(`记忆正文缺失：${id} 在索引里，但正文文件不在了`);
+  /** 归档正文不在热状态里：状态里是空串时回冷存读一次，读到就顺手缓存。 */
+  if (!found.body && found.entry && found.entry.status === 'archived') {
+    const payload = readCold(scope, id);
+    if (payload && typeof payload.body === 'string' && payload.body) {
+      writeBody(scope, id, payload.body);
+      return payload.body;
+    }
+  }
   return found.body;
 }
 
@@ -396,6 +424,155 @@ function writeBody(scope, id, body) {
 function removeBody(scope, id) {
   const map = bodyCache.get(scope.dir);
   if (map) map.delete(id);
+}
+
+/**
+ * 归档正文冷存：热状态只留元数据，正文和旧版本正文放 scope.dir/cold/<id>.json。
+ * 五百条归档 ≈ 2 MiB 时，只有真看过的那几条会回到内存，保存不再被整层预算卡死。
+ */
+const COLD_DIR = 'cold';
+const COLD_MARK = 'coldBody';
+
+function coldDirOf(scope) {
+  return path.join(scope.dir, COLD_DIR);
+}
+
+function coldFileOf(scope, id) {
+  return path.join(coldDirOf(scope), `${id}.json`);
+}
+
+function coldPayload(record) {
+  return {
+    id: record.id,
+    at: new Date().toISOString(),
+    body: typeof record.body === 'string' ? record.body : '',
+    versions: (Array.isArray(record.versions) ? record.versions : [])
+      .map((version) => ({ at: String((version && version.at) || ''), body: typeof (version && version.body) === 'string' ? version.body : '' }))
+      .filter((version) => version.body),
+  };
+}
+
+/** 冷存写失败就报错：宁可整次保存失败，也不能把正文悄悄丢掉。 */
+function writeCold(scope, record) {
+  const dir = coldDirOf(scope);
+  fs.mkdirSync(dir, { recursive: true });
+  const file = coldFileOf(scope, record.id);
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(coldPayload(record))}\n`);
+  fs.renameSync(tmp, file);
+}
+
+function readCold(scope, id) {
+  let raw;
+  try {
+    raw = fs.readFileSync(coldFileOf(scope, id), 'utf8');
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return null;
+    throw error;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+/** 归档条目读回冷存正文，旧版本正文按 at 对回；返回补回的正文（没有就是空串）。 */
+function hydrateCold(scope, entry) {
+  if (entry.status !== 'archived' || !(entry.maintenance && entry.maintenance[COLD_MARK])) return '';
+  const payload = readCold(scope, entry.id);
+  if (!payload) return '';
+  const body = typeof payload.body === 'string' ? payload.body : '';
+  if (body) entry.current.body = body;
+  const versions = Array.isArray(entry.maintenance.versions) ? entry.maintenance.versions : [];
+  const stored = new Map((Array.isArray(payload.versions) ? payload.versions : [])
+    .map((row) => [String((row && row.at) || ''), row && row.body]));
+  for (const version of versions) {
+    if (typeof (version && version.body) === 'string' && version.body) continue;
+    const hit = stored.get(String((version && version.at) || ''));
+    if (hit) version.body = hit;
+  }
+  return body;
+}
+
+/** 写回状态前把归档正文摘出去：只有正文/旧版本真变了才重写冷存文件。 */
+function coldStored(scope, record) {
+  if (record.status !== 'archived') return record;
+  const versions = Array.isArray(record.versions) ? record.versions : [];
+  const hasVersionBodies = versions.some((version) => typeof (version && version.body) === 'string' && version.body);
+  /** 内存记录的正文可能已经是空串（占位/摘过）：先按 coldBody、冷存文件、热状态顺序找回。 */
+  let body = typeof record.body === 'string' ? record.body : '';
+  const known = typeof record.coldBody === 'string' ? record.coldBody : null;
+  if (body || known !== null) {
+    body = body || known;
+  } else {
+    const payload = readCold(scope, record.id);
+    if (payload && typeof payload.body === 'string' && payload.body) body = payload.body;
+    if (!body) {
+      const found = state.readEntryBody(scope, record.id);
+      if (found && typeof found.body === 'string') body = found.body;
+    }
+  }
+  /** 正文和冷存里的一致就不重写：五百条归档每次保存只动真变过的那几条。 */
+  const cached = record.cold === true && known !== null && known === body;
+  if ((body || hasVersionBodies) && !cached) writeCold(scope, { ...record, body });
+  return {
+    ...record,
+    body: '',
+    cold: true,
+    coldBody: body,
+    versions: versions.map((version) => ({ ...(version || {}), body: '' })),
+    maintenance: { ...(record.maintenance || {}), [COLD_MARK]: true },
+  };
+}
+
+/** 彻底删除前先清冷存副本：正文冷存在这里，清完 state.purge 才扫描不到残留。 */
+function purgeCold(scope, ids, sentinels) {
+  const dir = coldDirOf(scope);
+  let names = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return;
+  }
+  const wanted = new Set((ids || []).map((id) => `${id}.json`));
+  for (const name of names) {
+    const file = path.join(dir, name);
+    if (wanted.has(name)) {
+      fs.rmSync(file, { force: true });
+      continue;
+    }
+    if (!(sentinels || []).length) continue;
+    let raw = '';
+    try {
+      raw = fs.readFileSync(file, 'utf8');
+    } catch {
+      continue;
+    }
+    for (const sentinel of sentinels) {
+      if (typeof sentinel !== 'string' || sentinel.length < 4) continue;
+      const escaped = JSON.stringify(sentinel).slice(1, -1);
+      if (raw.includes(sentinel) || raw.includes(escaped)) {
+        fs.rmSync(file, { force: true });
+        break;
+      }
+    }
+  }
+}
+
+/** 要从冷存里扫掉的原文片段：标题、摘要、正文和旧版本正文。 */
+function coldSentinels(records) {
+  const out = [];
+  for (const record of records || []) {
+    if (!record) continue;
+    for (const value of [record.title, record.summary, record.when, record.body, record.topicKey]) {
+      if (typeof value === 'string' && value.length >= 4) out.push(value);
+    }
+    for (const version of Array.isArray(record.versions) ? record.versions : []) {
+      if (version && typeof version.body === 'string' && version.body.length >= 4) out.push(version.body);
+    }
+  }
+  return out;
 }
 
 function entrySize(record, body) {
@@ -651,12 +828,24 @@ function rulesOf(draft, body, index, foreign) {
   return rules;
 }
 
-/** 长摘要的尾部不能丢：正文里没有这段时补在末尾，已有则不动。 */
+/** 摘掉正文里托管的摘要原文尾巴：反复改摘要时不能越堆越长。 */
+function stripSummaryTail(text) {
+  let out = String(text || '');
+  for (;;) {
+    const mark = out.lastIndexOf(SUMMARY_TAIL);
+    if (mark < 0) return out;
+    out = out.slice(0, mark);
+  }
+}
+
+/** 长摘要的原文不能丢：正文里没有这段时补在末尾，已有或重写时只留最新一份。 */
 function bodyWithSummaryTail(body, draft) {
-  const raw = String(draft.summaryRaw || '');
   const current = String(body || '');
-  if (!raw || !draft.summaryShortened || current.includes(raw)) return { body: current, added: false };
-  return { body: current ? `${current}\n\n摘要原文：${raw}` : raw, added: true };
+  const raw = String(draft.summaryRaw || '');
+  if (!raw || !draft.summaryShortened) return { body: current, added: false };
+  const base = stripSummaryTail(current);
+  if (base.includes(raw)) return { body: base, added: false };
+  return { body: base ? `${base}${SUMMARY_TAIL}${raw}` : raw, added: true };
 }
 
 function mergedFields(draft, record, oldBody, index, writeMode = 'patch', foreign) {
@@ -672,9 +861,8 @@ function mergedFields(draft, record, oldBody, index, writeMode = 'patch', foreig
       selection: draft.has.selection ? draft.selection : null,
       links: draft.has.links ? draft.links : [],
       topicKey: draft.has.topicKey ? draft.topicKey : '',
-      body: bodyWithSummaryTail(draft.body, draft).body,
+      body: String(draft.body || ''),
     };
-    if (next.body !== draft.body) draft.fullTextInBody = true;
     next.applicability = view.validateApplicability(draft.has.applicability ? draft.applicability : undefined,
       next.conditions, next.selection, next.when);
     assertLinksVisible(next.links, index, foreign);
@@ -754,7 +942,9 @@ function applyDraft(scope, index, source, now, options = {}) {
     const next = mergedFields(draft, record, oldBody, index, writeMode, foreign);
     const tail = bodyWithSummaryTail(next.body, draft);
     next.body = tail.body;
-    if (tail.added) draft.fullTextInBody = true;
+    /** 回执只说真话：摘要原文确实在正文里，才标 fullTextInBody。 */
+    draft.fullTextInBody = Boolean(draft.summaryShortened)
+      && next.body.includes(String(draft.summaryRaw || ''));
     const noop = next.title === record.title && next.summary === record.summary
       && next.when === (record.when || '') && next.kind === (record.kind || 'note')
       && JSON.stringify(next.tags) === JSON.stringify(record.tags || [])
@@ -792,7 +982,7 @@ function applyDraft(scope, index, source, now, options = {}) {
   const seed = draft.autoBody || draft.body;
   const tail = bodyWithSummaryTail(seed, draft);
   const createdBody = tail.body;
-  if (tail.added || draft.autoBody) draft.fullTextInBody = true;
+  draft.fullTextInBody = Boolean(draft.summaryShortened) && createdBody.includes(String(draft.summaryRaw || ''));
   const rules = rulesOf(draft, createdBody, index, foreign);
   const created = {
     id: newId(),
@@ -1055,8 +1245,41 @@ export function setTaskDefault(scope, defaults, options = {}) {
  * 返回的记录带着「本次检索之前」的 lastUsed，给 renderIndex 判断陈旧用；
  * 命中计数在返回前写入，所以同一次调用既改盘又不污染展示。
  */
+/** 「用过」的判定门槛：lastUsed 超过这么久才回写，检索不至于每次都抢锁落盘。 */
+const USED_TOUCH_MS = 10 * 60 * 1000;
+
+function usedStale(record, now) {
+  const at = Date.parse(String((record && (record.lastUsed || record.updated)) || ''));
+  return !Number.isFinite(at) || now - at >= USED_TOUCH_MS;
+}
+
+/**
+ * 真正被搜到/读过才算用过：只回写 lastUsed，不动 hits，也不改正文。
+ * 抢不到锁或并发冲突都吞掉——这个是提示字段，不该让检索/阅读失败。
+ */
+function touchUsed(scope, ids) {
+  const wanted = new Set((ids || []).filter((id) => typeof id === 'string' && id));
+  if (wanted.size === 0) return;
+  try {
+    withLock(scope, () => {
+      const index = loadIndex(scope);
+      const now = Date.now();
+      const stamp = new Date(now).toISOString();
+      let changed = false;
+      for (const record of index.entries) {
+        if (!wanted.has(record.id) || !usedStale(record, now)) continue;
+        record.lastUsed = stamp;
+        changed = true;
+      }
+      if (changed) saveIndex(scope, index);
+    });
+  } catch {
+    /* lastUsed 只是提示：失败不影响这次检索/阅读的结果。 */
+  }
+}
+
 export function search(scope, query, limit = 4, options = {}) {
-  return withLocks([scope, globalScope()], () => {
+  const found = withLocks([scope, globalScope()], () => {
     const grams = bigrams(query);
     if (grams.size === 0) return [];
     const runs = queryRuns(query);
@@ -1098,14 +1321,23 @@ export function search(scope, query, limit = 4, options = {}) {
       || Number(a.archived) - Number(b.archived)
       || String(b.item.lastUsed).localeCompare(String(a.item.lastUsed)));
     const chosen = visible.slice(0, limit);
-    /** 检索不改盘：hits/lastUsed 只在用户真的处理过结果时才算数。 */
+    /** hits 不在检索里记，lastUsed 也只在锁外补写；这里先把层信息和结果一起带出去。 */
     return chosen.map((row) => ({
-      ...row.item,
-      scope: row.source.key === 'global' ? 'global' : 'project',
-      status: row.archived ? 'archived' : view.statusOf(row.item, options.context || {}),
+      record: {
+        ...row.item,
+        scope: row.source.key === 'global' ? 'global' : 'project',
+        status: row.archived ? 'archived' : view.statusOf(row.item, options.context || {}),
+        archived: Boolean(row.archived),
+      },
+      source: row.source,
       archived: Boolean(row.archived),
     }));
   });
+  /** 锁外回写：在层锁里再抢同一层的锁会死锁。 */
+  for (const row of found) {
+    if (!row.archived) touchUsed(row.source, [row.record.id]);
+  }
+  return found.map((row) => row.record);
 }
 
 /**
@@ -1146,7 +1378,7 @@ export function peek(scope, query, limit = 3, options = {}) {
 }
 
 export function readEntry(scope, id, options = {}) {
-  return withLocks([scope, globalScope()], () => {
+  const found = withLocks([scope, globalScope()], () => {
     for (const source of [scope, globalScope()]) {
       const index = loadIndex(source);
       const record = index.entries.find((item) => item.id === id);
@@ -1155,14 +1387,22 @@ export function readEntry(scope, id, options = {}) {
       if (!readableRecord(record || archived, options, index)) continue;
       const body = readBody(source, id);
       return {
-        ...(record || archived),
-        scope: source.key === 'global' ? 'global' : 'project',
-        body,
-        status: archived ? 'archived' : view.statusOf(record, options.context || {}),
+        source,
+        archived: Boolean(archived),
+        record: {
+          ...(record || archived),
+          scope: source.key === 'global' ? 'global' : 'project',
+          body,
+          status: archived ? 'archived' : view.statusOf(record, options.context || {}),
+        },
       };
     }
     return null;
   });
+  if (!found) return null;
+  /** 读过才算用过；归档的不回写（看病史不等于「在用」）。 */
+  if (!found.archived) touchUsed(found.source, [id]);
+  return found.record;
 }
 
 /**
@@ -1179,6 +1419,8 @@ export function forget(scope, id, options = {}) {
       for (const source of [scope, globalScope()]) {
         const pending = state.purgeIntent(source);
         if (!pending) continue;
+        /** 冷存里有待删条目的正文副本：先删掉，state.purge 的残留扫描才收得干净。 */
+        purgeCold(source, pending.ids, []);
         const result = state.purge(source, { resume: true });
         removeBody(source, id);
         if (pending.ids.includes(id)) {
@@ -1217,6 +1459,7 @@ export function forget(scope, id, options = {}) {
       }
       if (archived) {
         /** 归档条目也能彻底删除：state.purge 本来就按 id 清整份状态，只是以前没走到这里。 */
+        purgeCold(source, [id], coldSentinels([record]));
         const result = state.purge(source, { ids: [id], operationId: options.operationId });
         removeBody(source, id);
         return {
@@ -1228,6 +1471,7 @@ export function forget(scope, id, options = {}) {
           scopeKey: source.key,
         };
       }
+      purgeCold(source, [id], coldSentinels([record]));
       const result = state.purge(source, { ids: [id], operationId: options.operationId });
       removeBody(source, id);
       return {
@@ -1893,6 +2137,27 @@ const ENVIRONMENT_KEYS = ['machine', 'targetOs', 'runtime', 'shell'];
  * 范围路由：用户明确说的范围最高；没有就按记忆类别提案，设备事实必须带设备条件。
  * 判不出来就返回 needsScope，让调用方问一句，而不是默默写进某一层。
  */
+/** 本机痕迹：路径、回环地址、端口。带这些字样的「通用」规则换个项目就用不了。 */
+const MACHINE_BOUND_PATTERNS = [
+  /(?:^|[\s(（'"`])(?:\/tmp|\/Users|\/home|\/opt|\/private|\/var|\/etc)(?:[\/]|$)/m,
+  /(?:^|[\s(（'"`])~\//m,
+  /(?:^|[^A-Za-z0-9])[A-Za-z]:\\/,
+  /(?:^|[^0-9])127\.0\.0\.1(?::\d+)?/,
+  /(?:^|[^A-Za-z0-9.])localhost(?::\d+)?/,
+  /\b\d{1,3}(?:\.\d{1,3}){3}:\d{2,5}\b/,
+];
+
+function machineBoundText(source) {
+  const text = [source?.title, source?.summary, source?.when, source?.body, source?.topicKey]
+    .filter((value) => typeof value === 'string' && value)
+    .join('\n');
+  return MACHINE_BOUND_PATTERNS.some((re) => re.test(text));
+}
+
+/**
+ * 适用范围判定：内容/依据的普适性优先，模型声明的 scope 只是提案。
+ * 模型说 global、但正文写死了本机路径或依据是本机文件时，先留在项目层（或问一次条件）。
+ */
 export function routeScope(draft, options = {}) {
   const source = draft || {};
   const explicit = source.scope === 'global' || source.scope === 'project' ? source.scope : '';
@@ -1900,9 +2165,30 @@ export function routeScope(draft, options = {}) {
   const projectReady = Boolean(options.project) && options.project.confirmed !== false;
   const cls = typeof source.memoryClass === 'string' ? source.memoryClass : '';
   const durability = typeof source.durability === 'string' ? source.durability : 'durable';
+  const evidence = typeof source.evidenceRef === 'string' ? source.evidenceRef.trim() : '';
+  /** 依据本身是本机文件/路径的，不能算通用流程；正文里带本机痕迹同理。 */
+  const machineBound = machineBoundText(source) || (evidence ? machineBoundText({ title: evidence }) : false);
   const base = { chosenScope: '', reasonCode: '', requiredConditions: [], needsScope: false, explicit };
+  /** 通用层拿不出普适证据时：有项目就留在项目层，没有就问一次运行环境。 */
+  const fallbackToProject = (reasonCode) => {
+    if (projectReady) return { ...base, chosenScope: 'project', reasonCode };
+    return {
+      ...base,
+      needsScope: true,
+      reasonCode: 'needs_environment',
+      requiredConditions: [{ key: 'machine', value: '' }, { key: 'runtime', value: '' }],
+    };
+  };
+  /** 人明确点过「就存全局」才算数；模型自己提的 global 不抵消本机痕迹。 */
+  const humanConfirmed = options.humanScope === true || source.scopeConfirmed === true;
   if (durability === 'task') return { ...base, needsScope: true, reasonCode: 'task_state' };
   if (explicit) {
+    /** 模型自己填的 global 只是提案：本机痕迹、项目事实、无依据的通用流程都按提案降级。 */
+    if (explicit === 'global' && !humanConfirmed) {
+      if (machineBound) return fallbackToProject('machine_bound_scope');
+      if (cls === 'project_fact') return fallbackToProject('model_global_project_fact');
+      if (cls === 'portable_procedure' && !evidence) return fallbackToProject('unbound_evidence');
+    }
     if (explicit === 'project' && !projectReady) {
       const reasonCode = options.project && options.project.confirmed === false ? 'unconfirmed_project' : 'no_project';
       return { ...base, needsScope: true, reasonCode, requiredConditions: [{ key: 'projectRoot', value: '' }] };
@@ -1923,8 +2209,17 @@ export function routeScope(draft, options = {}) {
     }
     return { ...base, chosenScope: 'project', reasonCode: 'class_project_fact' };
   }
-  if (cls === 'personal_preference') return { ...base, chosenScope: 'global', reasonCode: 'class_personal_preference' };
-  if (cls === 'portable_procedure') return { ...base, chosenScope: 'global', reasonCode: 'class_portable_procedure' };
+  if (cls === 'personal_preference') {
+    /** 偏好也分「我的习惯」和「这台机器上的习惯」：后者绑机器，不进通用层。 */
+    if (machineBound) return fallbackToProject('machine_bound_preference');
+    return { ...base, chosenScope: 'global', reasonCode: 'class_personal_preference' };
+  }
+  if (cls === 'portable_procedure') {
+    if (machineBound) return fallbackToProject('machine_bound_procedure');
+    /** 说能搬去别的项目，就要有能搬的依据；没有就先留在本项目。 */
+    if (!evidence) return fallbackToProject('unbound_evidence');
+    return { ...base, chosenScope: 'global', reasonCode: 'class_portable_procedure' };
+  }
   const conditions = view.normalizeConditions(source.conditions) || [];
   const scoped = conditions.some((item) => ENVIRONMENT_KEYS.includes(item.key));
   if (!scoped) {
@@ -2467,16 +2762,17 @@ export function learningRulesForOrganizer(scope) {
  */
 export function beginLearningAttempt(scope, options = {}) {
   const episodeId = String(options.episodeId || '');
-  if (!episodeId) return { ok: false, reason: '缺少作品标识' };
+  /** 项目层候选没有作品绑定：按项目身份记一次尝试，限额照样生效，不编造作品 id。 */
+  const attemptKey = episodeId || `project:${scope.key}`;
   const now = options.now || Date.now();
   return withLock(scope, () => {
     const index = loadIndex(scope);
     const evolution = index.__evolution;
     if (!evolution.enabled || evolution.compatible === false) return { ok: false, reason: '实验没有开启' };
     if (evolution.policyVersion !== learning.POLICY_VERSION) return { ok: false, reason: '实验策略版本不认' };
-    const check = learning.quota(evolution.learning, { episodeId, now });
+    const check = learning.quota(evolution.learning, { episodeId: attemptKey, now });
     if (!check.ok) return { ...check, learning: evolution.learning };
-    const next = learning.recordAttempt(evolution.learning, { episodeId, now });
+    const next = learning.recordAttempt(evolution.learning, { episodeId: attemptKey, now });
     try {
       const result = state.transact(scope, {
         operationId: options.operationId || '',
@@ -2527,7 +2823,11 @@ export function commitLearning(scope, batch = {}) {
   const operationId = String(batch.operationId || '');
   const now = batch.now || Date.now();
   const at = new Date(now).toISOString();
-  if (!episodeId) return { ok: false, reason: '缺少作品标识' };
+  /**
+   * 没绑作品的候选（learning.candidateFrom 在项目层给的空 episodeId）按项目身份提交：
+   * 不编造作品 id，但必须由本项目发起；规则版本、epoch 与目标版本照旧要对得上。
+   */
+  if (!episodeId && String(batch.projectId || '') !== scope.key) return { ok: false, reason: '缺少作品标识' };
   if (!operationId) return { ok: false, reason: '缺少提交标识' };
   if (changes.length > learning.LIMITS.maxChanges) return { ok: false, reason: '一次改动太多' };
   return withLock(scope, () => {
@@ -2542,13 +2842,13 @@ export function commitLearning(scope, batch = {}) {
         if (!evolution || evolution.enabled !== true) throw new Error('实验没有开启，这次整理作废');
         if (evolution.policyVersion !== learning.POLICY_VERSION) throw new Error('实验策略版本不认');
         if (batch.epoch && evolution.epoch !== batch.epoch) throw new Error('实验已经重新开启过，这次整理作废');
-        const episode = episodeOfEvolution(evolution, episodeId);
-        if (!episode) throw new Error('作品已经失效，这次整理作废');
-        if (batch.sessionId) {
+        const episode = episodeId ? episodeOfEvolution(evolution, episodeId) : null;
+        if (episodeId && !episode) throw new Error('作品已经失效，这次整理作废');
+        if (episodeId && batch.sessionId) {
           const focus = evolution.tasks?.sessions?.[batch.sessionId];
           if (!focus || focus.episodeId !== episodeId) throw new Error('这期已经换到别的作品，这轮结果没采用');
         }
-        if (batch.episodeUpdatedAt && episode.updatedAt !== batch.episodeUpdatedAt) throw new Error('用户又改过这期，这次整理作废');
+        if (episode && batch.episodeUpdatedAt && episode.updatedAt !== batch.episodeUpdatedAt) throw new Error('用户又改过这期，这次整理作废');
         const prepared = new Map((Array.isArray(batch.preparedTargets) ? batch.preparedTargets : []).map((row) => [row.id, row]));
         let touched = 0;
         const currentRules = draft.entries.filter((entry) => entry.status === 'active' && isExperimentalRecord(toFlat(entry)));
