@@ -39,6 +39,8 @@ import {
   undoLearningChange,
   pinLearningRule,
   resumeLearningRule,
+  adoptLearningRule,
+  editLearningRule,
   expireLearning,
   LIMITS,
 } from './store.js';
@@ -455,8 +457,11 @@ function keepHandler(webServer, cwdForSession) {
       const learningAction = typeof body.learningAction === 'string' ? body.learningAction : '';
       if (learningAction) {
         try {
+          if (learningAction !== 'snapshot' && !memoryEnabled(scope)) {
+            return sendJson(res, 409, { ok: false, code: 'memory_disabled', reason: '本项目记忆已关闭' });
+          }
           if (learningAction === 'snapshot') {
-            try { expireLearning(scope, { operationId: `expire_${Date.now()}` }); } catch { /* 清理失败不影响查看 */ }
+            /** 查看不改盘：到期状态在写入事务里清理，读路径不写文件。 */
             const request = typeof body.sessionId === 'string' ? body.sessionId : '';
             return sendJson(res, 200, {
               ok: true,
@@ -480,12 +485,30 @@ function keepHandler(webServer, cwdForSession) {
             });
             return sendJson(res, result && result.ok !== false ? 200 : 409, { ...result });
           }
+          if (learningAction === 'adopt') {
+            const result = adoptLearningRule(scope, id, {
+              expectedRevision: Number(body.expectedRevision || 0),
+              title: typeof body.title === 'string' ? body.title : '',
+              body: typeof body.body === 'string' ? body.body : '',
+              operationId: operationId || `adopt_learn_${id}_${Date.now()}`,
+            });
+            return sendJson(res, result && result.ok !== false ? 200 : 409, { ...result });
+          }
+          if (learningAction === 'edit') {
+            const result = editLearningRule(scope, id, {
+              expectedRevision: Number(body.expectedRevision || 0),
+              title: typeof body.title === 'string' ? body.title : '',
+              body: typeof body.body === 'string' ? body.body : '',
+              operationId: operationId || `edit_learn_${id}_${Date.now()}`,
+            });
+            return sendJson(res, result && result.ok !== false ? 200 : 409, { ...result });
+          }
           if (learningAction === 'pause') {
             const ids = Array.isArray(body.ids) ? body.ids.filter((value) => typeof value === 'string').slice(0, 12) : [];
             const result = pauseLearningRules(scope, ids, { operationId: operationId || `pause_learn_${Date.now()}`, by: 'management', reason: 'paused_by_user' });
             return sendJson(res, result && result.ok !== false ? 200 : 409, { ...result });
           }
-          if (learningAction === 'delete') {
+          if (learningAction === 'delete' || learningAction === 'discard') {
             const result = removeLearningRule(scope, id, {
               expectedRevision: Number(body.expectedRevision || 0),
               operationId: operationId || `delete_learn_${id}_${Date.now()}`,
@@ -1269,6 +1292,11 @@ export function apply(ctx, config) {
       if (state.signal && signal && state.signal !== signal) return '';
       const sessionId = agent?.session?.id;
       if (state.sessionId !== (typeof sessionId === 'string' ? sessionId : '')) return '';
+      /** 开关/自进化换代后，关掉前准备好的正文一律不再输出。 */
+      const scope = scopeOf(cwdOf({ agent }));
+      if (!memoryEnabled(scope)) return '';
+      const epoch = controlStatus(scope).epoch || '';
+      if (state.controlEpoch && epoch && state.controlEpoch !== epoch) return '';
       return [state.experimentText, state.text].filter(Boolean).join('\n\n');
     } catch {
       return '';
@@ -1943,6 +1971,7 @@ export function apply(ctx, config) {
       }
       const context = view.trustedContext(scope, {});
       const fingerprint = fingerprintOf(scope);
+      const controlEpoch = controlStatus(scope).epoch || '';
       const batchKey = anchor.requestBatchKey(ids);
       dropStaleCandidate(sessionId, batchKey);
       const experiment = experimentFor(scope, { sessionId, query, batchKey, messageIds: ids, win });
@@ -1951,6 +1980,11 @@ export function apply(ctx, config) {
         : null;
       const snapshot = projectRecall(scope, query, context, win);
       if (generation !== generations.get(agent)) return decision;
+      /** 投影期间开关被改过：丢弃这批内容，不把关闭前的记忆交给当前请求。 */
+      if (!memoryEnabled(scope) || (controlStatus(scope).epoch || '') !== controlEpoch) {
+        clearPrepared(agent);
+        return decision;
+      }
       /** 超时或被取消：这一步不留半旧卡片，下一真人请求重新投影。 */
       if (signal?.aborted || Date.now() - startedAt > RECALL_DEADLINE_MS) {
         clearPrepared(agent);
@@ -1970,6 +2004,7 @@ export function apply(ctx, config) {
         turn,
         signal,
         fingerprint,
+        controlEpoch,
         at: Date.now(),
       };
       prepared.set(agent, state);

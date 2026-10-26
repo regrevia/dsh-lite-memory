@@ -282,3 +282,155 @@ test('R14 无候选栏目时返回 none，不再要求选栏目', () => {
   assert.equal(read.kind, 'none');
   assert.equal(read.reason, 'no_range');
 });
+
+/** 已绑定的口播任务：用于验证换任务时旧范围确实被撤销。 */
+function activeVideoSession() {
+  const first = anchor.routeTask(anchor.emptyTasks(), {
+    sessionId: 'sess-switch',
+    batchKey: 'rb_video',
+    messageIds: ['m1'],
+    query: '帮我把这期口播视频的开头改一下',
+    selection: { seriesId: '口播', taskKind: '口播视频' },
+    now: 1000,
+  });
+  const anchorState = first.tasks.sessions['sess-switch'];
+  anchorState.status = 'active';
+  return first.tasks;
+}
+
+test('R20 带「继续」但出现新对象时，先撤销旧范围', () => {
+  const tasks = activeVideoSession();
+  const next = anchor.routeTask(tasks, {
+    sessionId: 'sess-switch',
+    batchKey: 'rb_pg_continue',
+    messageIds: ['m2'],
+    query: '接下来继续排查 PostgreSQL 连接超时',
+    registeredSeries: ['口播'],
+    now: 2000,
+  });
+  assert.equal(next.decision.kind, 'unbound');
+  assert.equal(next.decision.reason, 'new_task');
+  assert.equal(next.anchor.seriesId, undefined);
+  assert.equal(next.episode.previousEpisodeId, tasks.sessions['sess-switch'].episodeId);
+});
+
+test('R21 带「这个」但出现新对象时，不沿用旧范围', () => {
+  const tasks = activeVideoSession();
+  const next = anchor.routeTask(tasks, {
+    sessionId: 'sess-switch',
+    batchKey: 'rb_pg_this',
+    messageIds: ['m2'],
+    query: '现在帮我排查这个 PostgreSQL 连接超时',
+    registeredSeries: ['口播'],
+    now: 2000,
+  });
+  assert.equal(next.decision.kind, 'unbound');
+  assert.equal(next.decision.reason, 'new_task');
+  assert.equal(next.anchor.seriesId, undefined);
+});
+
+test('R22 真正的续改保留原任务范围', () => {
+  const tasks = activeVideoSession();
+  const next = anchor.routeTask(tasks, {
+    sessionId: 'sess-switch',
+    batchKey: 'rb_video_continue',
+    messageIds: ['m2'],
+    query: '继续改刚才那版脚本，开头再直接一点',
+    registeredSeries: ['口播'],
+    now: 2000,
+  });
+  assert.equal(next.decision.kind, 'continuation');
+  assert.equal(next.anchor.seriesId, '口播');
+  assert.equal(next.episode.previousEpisodeId, tasks.sessions['sess-switch'].episodeId);
+});
+
+test('R23 只指代旧稿的局部修改不被当成换任务', () => {
+  const tasks = activeVideoSession();
+  const next = anchor.routeTask(tasks, {
+    sessionId: 'sess-switch',
+    batchKey: 'rb_video_tweak',
+    messageIds: ['m2'],
+    query: '现在把开头改短一点',
+    registeredSeries: ['口播'],
+    now: 2000,
+  });
+  assert.equal(next.decision.kind, 'focus');
+  assert.equal(next.anchor.seriesId, '口播');
+});
+
+test('R24 继续做新领域的中文任务也算换任务', () => {
+  const tasks = activeVideoSession();
+  const next = anchor.routeTask(tasks, {
+    sessionId: 'sess-switch',
+    batchKey: 'rb_research',
+    messageIds: ['m2'],
+    query: '继续看看竞品定价',
+    registeredSeries: ['口播'],
+    now: 2000,
+  });
+  assert.equal(next.decision.kind, 'unbound');
+  assert.equal(next.decision.reason, 'new_task');
+});
+
+test('R25 单独说「继续」不沿用旧任务范围', () => {
+  const tasks = activeVideoSession();
+  const previous = tasks.sessions['sess-switch'];
+  const next = anchor.routeTask(tasks, {
+    sessionId: 'sess-switch',
+    batchKey: 'rb_weak_continue',
+    messageIds: ['m2'],
+    query: '继续',
+    registeredSeries: ['口播'],
+    now: 2000,
+  });
+  assert.equal(next.decision.kind, 'unbound');
+  assert.equal(next.decision.reason, 'new_task');
+  assert.equal(next.anchor.seriesId, undefined);
+  assert.equal(next.episode.previousEpisodeId, previous.episodeId);
+});
+
+test('R26 单独说「这个」不沿用旧任务范围', () => {
+  const tasks = activeVideoSession();
+  const next = anchor.routeTask(tasks, {
+    sessionId: 'sess-switch',
+    batchKey: 'rb_weak_this',
+    messageIds: ['m2'],
+    query: '这个',
+    registeredSeries: ['口播'],
+    now: 2000,
+  });
+  assert.equal(next.decision.kind, 'unbound');
+  assert.equal(next.decision.reason, 'new_task');
+  assert.equal(next.anchor.seriesId, undefined);
+});
+
+test('R27 单独说「之前」不沿用旧任务范围', () => {
+  const tasks = activeVideoSession();
+  const next = anchor.routeTask(tasks, {
+    sessionId: 'sess-switch',
+    batchKey: 'rb_weak_before',
+    messageIds: ['m2'],
+    query: '之前',
+    registeredSeries: ['口播'],
+    now: 2000,
+  });
+  assert.equal(next.decision.kind, 'unbound');
+  assert.equal(next.decision.reason, 'new_task');
+  assert.equal(next.anchor.seriesId, undefined);
+});
+
+test('R28 指代加动作的续接仍保留旧任务范围', () => {
+  const tasks = activeVideoSession();
+  const previous = tasks.sessions['sess-switch'];
+  const next = anchor.routeTask(tasks, {
+    sessionId: 'sess-switch',
+    batchKey: 'rb_strong_continue',
+    messageIds: ['m2'],
+    query: '把刚才那个再调一下',
+    registeredSeries: ['口播'],
+    now: 2000,
+  });
+  assert.notEqual(next.decision.kind, 'unbound');
+  assert.equal(next.anchor.episodeId, previous.episodeId);
+  assert.equal(next.anchor.seriesId, '口播');
+});

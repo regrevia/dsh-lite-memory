@@ -92,6 +92,10 @@ const toggle = (scope, enabled) => store.setMemoryEnabled(scope, enabled, { oper
   assert.equal((await runtime.exec('memory_forget', { id: globalId, mode: 'archive' }, agent)).mode, 'memory_disabled');
   const suggested = await runtime.exec('memory_suggest', { title: '新偏好', summary: '一条偏好' }, agent);
   assert.equal(suggested.asked, false);
+  const saved = await runtime.exec('memory_save', { title: '关闭后写入', summary: '应当拒绝', body: '不该落盘' }, agent);
+  assert.equal(saved.changed, false);
+  assert.equal(saved.reason, 'memory_disabled');
+  assert.equal(saved.id, '');
 }
 
 /* C02：关闭期间所有写入入口都拒绝，自进化不能绕过总开关打开。 */
@@ -107,11 +111,12 @@ const toggle = (scope, enabled) => store.setMemoryEnabled(scope, enabled, { oper
   const committed = store.commitLearning(scope, { title: '学习规则', summary: '摘要', body: '正文' }, {}, { operationId: 'learn-blocked' });
   assert.equal(committed.ok, false);
   const run = store.setEvolution(scope, false, { operationId: 'evo-off' });
-  assert.equal(run.ok, true);
+  assert.equal(run.ok, false);
+  assert.equal(run.code, 'memory_disabled');
   assert.equal(store.controlStatus(scope).enabled, false);
 }
 
-/* C03：关一个项目不影响另一个；重新打开恢复原来的自进化设置。 */
+/* C03：关一个项目不影响另一个；重新打开记忆后自进化仍保持关闭。 */
 {
   const dirA = mkdir('iso-a');
   const dirB = mkdir('iso-b');
@@ -132,8 +137,10 @@ const toggle = (scope, enabled) => store.setMemoryEnabled(scope, enabled, { oper
 
   toggle(scopeB, false);
   assert.equal(store.evolutionStatus(scopeB).enabled, false);
-  assert.equal(store.evolutionStatus(scopeB).configuredEnabled, true);
+  assert.equal(store.evolutionStatus(scopeB).configuredEnabled, false);
   toggle(scopeB, true);
+  assert.equal(store.evolutionStatus(scopeB).enabled, false);
+  assert.equal(store.setEvolution(scopeB, true, { operationId: 'evo-b-again' }).ok, true);
   assert.equal(store.evolutionStatus(scopeB).enabled, true);
 }
 
@@ -154,6 +161,78 @@ const toggle = (scope, enabled) => store.setMemoryEnabled(scope, enabled, { oper
   const stale = await runtime.exec('memory_search', { query: '口播开头', contextId: held.contextId }, agent);
   assert.equal(stale.status !== 'ok', true);
   assert.equal((await runtime.exec('memory_search', { query: '口播开头' }, agent)).status, 'ok');
+}
+
+/* C05：关闭保留候选、试用、结果与整理回执；重开记忆后自进化仍是关闭。 */
+{
+  const dir = mkdir('preserve');
+  const scope = scopeOf(dir);
+  const id = seedRule(scope, '口播开头');
+  assert.equal(store.setEvolution(scope, true, { operationId: 'evo-preserve' }).ok, true);
+  const before = store.learningSnapshot(scope);
+  assert.equal(before.counts.active, 1);
+  assert.equal(toggle(scope, false).ok, true);
+  const closed = store.learningSnapshot(scope);
+  assert.equal(closed.enabled, false);
+  assert.equal(closed.rules.length, before.rules.length);
+  assert.equal(closed.counts.active, 1);
+  assert.equal(toggle(scope, true).ok, true);
+  const reopened = store.learningSnapshot(scope);
+  assert.equal(reopened.enabled, false);
+  assert.equal(reopened.counts.active, 1);
+  assert.equal(store.evolutionStatus(scope).configuredEnabled, false);
+  assert.equal(store.setEvolution(scope, true, { operationId: 'evo-resume' }).ok, true);
+  assert.equal(store.learningSnapshot(scope).counts.active, 1);
+  assert.ok(id);
+}
+
+/* C06：关闭期间管理面写操作一律拒绝，只读快照不写盘。 */
+{
+  const dir = mkdir('managed-off');
+  const scope = scopeOf(dir);
+  const id = seedRule(scope, '口播开头');
+  assert.equal(store.setEvolution(scope, true, { operationId: 'evo-managed' }).ok, true);
+  toggle(scope, false);
+  const file = state.stateFiles(scope).current;
+  const before = fs.readFileSync(file);
+  const snapshot = store.learningSnapshot(scope);
+  const rule = snapshot.rules[0];
+  assert.equal(rule.id, id);
+  assert.equal(Buffer.compare(before, fs.readFileSync(file)), 0);
+  for (const action of ['pin', 'pause', 'resume', 'delete', 'undo', 'adopt', 'edit']) {
+    let result;
+    if (action === 'pin') result = store.pinLearningRule(scope, id, { pinned: true, expectedRevision: rule.revision });
+    if (action === 'pause') result = store.pauseLearningRules(scope, [id], { operationId: 'pause-off' });
+    if (action === 'resume') result = store.resumeLearningRule(scope, id);
+    if (action === 'delete') result = store.removeLearningRule(scope, id, { expectedRevision: rule.revision });
+    if (action === 'undo') result = store.undoLearningChange(scope, id, { expectedRevision: rule.revision });
+    if (action === 'adopt') result = store.adoptLearningRule(scope, id, { expectedRevision: rule.revision });
+    if (action === 'edit') result = store.editLearningRule(scope, id, { expectedRevision: rule.revision, body: '改过的正文' });
+    assert.equal(result.ok, false, action);
+    assert.equal(result.code, 'memory_disabled', action);
+  }
+  assert.equal(Buffer.compare(before, fs.readFileSync(file)), 0);
+}
+
+/* C07：采纳把候选转为生效；编辑只保存并留上一版，不改状态以外的东西。 */
+{
+  const dir = mkdir('adopt');
+  const scope = scopeOf(dir);
+  const id = seedRule(scope, '口播开头');
+  const first = store.learningSnapshot(scope).rules[0];
+  const edited = store.editLearningRule(scope, id, { expectedRevision: first.revision, body: '开头两句内给结论。', title: '口播结论前置' });
+  assert.equal(edited.ok, true);
+  const afterEdit = store.learningSnapshot(scope).rules[0];
+  assert.equal(afterEdit.state, 'trial');
+  assert.equal(afterEdit.body, '开头两句内给结论。');
+  assert.equal(afterEdit.title, '口播结论前置');
+  assert.equal(afterEdit.learning.versions.length, 1);
+  const adopted = store.adoptLearningRule(scope, id, { expectedRevision: afterEdit.revision });
+  assert.equal(adopted.ok, true);
+  const afterAdopt = store.learningSnapshot(scope).rules[0];
+  assert.equal(afterAdopt.state, 'active');
+  assert.equal(afterAdopt.body, '开头两句内给结论。');
+  assert.equal(afterAdopt.title, '口播结论前置');
 }
 
 console.log('control.test.mjs: all passed');

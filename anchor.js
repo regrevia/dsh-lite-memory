@@ -14,8 +14,14 @@ const REVISE_WORDS = /(再改一下|改一版|再改改|调整一下|这版再|�
 const THANKS_WORDS = /^(谢谢|多谢|谢了|辛苦了|thanks|thank\s*you)[!！。.～~\s]*$/i;
 const REFERENCE_WORDS = /(这个|这条|这次|上次|之前|刚才|上面|前面|它|这里|继续|接着|还是|同样|再改)/;
 const TASK_STOP = new Set(['一个','一下','这个','那个','我们','你们','他们','什么','怎么','可以','需要','帮我','帮忙','请问','然后','现在','还是','就是','没有','不是','以及','关于','进行','使用','问题','任务','内容','时候','已经','如果','因为','所以','但是','而且','或者','这些','那些','这样','那样','一下','一点','一些']);
+/** 判断任务是否换了对象时，这些词只表示动作或指代，不算对象证据。 */
+const TASK_NOISE = /(继续|再做一期|下一期|再来一期|再开一期|续一集|再拍一期|接着|然后|接下来|现在|帮我|帮忙|这个|这条|这次|上次|之前|刚才|上面|前面|下面|后面|这里|还是|同样|再改|排查|处理|检查|看看|看一下|看下|修复|解决|优化|调整|修改|分析|研究|对比|评估|调研|测试|设计|实现|开发|搭建|部署|定位|复现|查一下|找一下|问题|任务|内容|一下)/g;
+const NEW_OBJECT_VERB = /(排查|检查|看看|看一下|看下|分析|研究|对比|评估|调研|测试|设计|实现|开发|搭建|部署|修复|解决|处理|定位|复现|查一下|找一下)/;
+const NEW_TASK_MARKER = /(现在|接下来|然后|下面|新任务|另一个|重新|改做|换个|换一个)/;
+/** 续接词后面还得跟一个动作，才算真正在改旧稿；单说「继续 / 这个 / 之前」不构成复用依据。 */
+const CONTINUATION_ACTION = /(继续|接着|然后|再|还是|同样)\s*(做|改|调|弄|看|写|处理|优化|调整|检查|完成)/;
 function taskTerms(value) {
-  const plain = text(value, 200).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  const plain = text(value, 200).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').replace(TASK_NOISE, ' ').replace(/\s+/g, ' ').trim();
   const terms = new Set();
   for (const word of plain.match(/[a-z][a-z0-9_-]{2,}/g) || []) terms.add(word);
   const runs = plain.match(/[\u4e00-\u9fff]+/g) || [];
@@ -28,16 +34,22 @@ function taskTerms(value) {
   }
   return terms;
 }
-/** 继承旧任务要有正面证据：新要求与本轮任务没有实质词交集时，先按新任务处理。 */
+/** 继承旧任务要有正面证据：新要求与本轮任务没有实质对象交集时，先按新任务处理。 */
 export function looksLikeNewTask(query, previousText) {
   const current = text(query, 200);
-  if (!current || isThanks(current) || isContinuation(current) || isRevision(current)) return false;
-  if (REFERENCE_WORDS.test(current)) return false;
+  if (!current || isThanks(current) || isRevision(current)) return false;
   const next = taskTerms(current);
   const previous = taskTerms(previousText);
-  if (!next.size || !previous.size) return false;
+  const cue = isContinuation(current) || REFERENCE_WORDS.test(current);
+  /** 只剩指代或续接词时，必须另有动作才算续接；否则宁可换任务也不沿用旧范围。 */
+  if (!next.size) return cue ? !CONTINUATION_ACTION.test(current) : false;
+  if (!previous.size) return false;
   for (const term of next) if (previous.has(term)) return false;
-  return true;
+  /** 只有指代或「继续」时，还要有明确的新对象动作、转向词或新英文对象才换任务。 */
+  if (!cue) return true;
+  if (NEW_OBJECT_VERB.test(current) || NEW_TASK_MARKER.test(current)) return true;
+  for (const term of next) if (/^[a-z]/.test(term)) return true;
+  return false;
 }
 
 export function emptyTasks() {
@@ -299,6 +311,25 @@ export function routeTask(tasksInput, input = {}) {
     return { tasks, anchor: current, episode: currentEpisode, decision: { kind: 'none', reason: 'thanks', pointer: true }, changed: false };
   }
 
+  /** 先认新对象，再认续作：带「继续 / 这个」但换了对象，也必须撤销旧范围。 */
+  if (current && currentEpisode && currentEpisode.status !== 'unbound'
+    && !SWITCH_WORDS.test(query) && !changedSeries
+    && looksLikeNewTask(query, currentEpisode.taskText || '')) {
+    const transitionId = transitionIdFor(batchKey, tasks.revision);
+    const existing = Object.values(tasks.episodes).find((episode) => episode.transitionId === transitionId);
+    const episode = existing || createEpisode(tasks, {
+      status: 'unbound',
+      phase: 'brief',
+      transitionId,
+      previousEpisodeId: currentEpisode.episodeId,
+      taskText: query,
+      now,
+    });
+    const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status: 'unbound', bindingRevision: tasks.revision, now });
+    tasks.sessions[sessionId] = anchor;
+    return { tasks, anchor, episode, decision: { kind: 'unbound', anchor, reason: 'new_task' }, changed: true };
+  }
+
   if (isContinuation(query) && current && currentEpisode) {
     const previousRevision = current.bindingRevision || 1;
     const transitionId = transitionIdFor(batchKey, previousRevision);
@@ -368,22 +399,6 @@ export function routeTask(tasksInput, input = {}) {
   }
 
   if (current && currentEpisode) {
-    /** 没有切换词也不等于同一任务：与上一轮要求没有实质交集时，撤销旧范围。 */
-    if (currentEpisode.status !== 'unbound' && looksLikeNewTask(query, currentEpisode.taskText || '')) {
-      const transitionId = transitionIdFor(batchKey, tasks.revision);
-      const existing = Object.values(tasks.episodes).find((episode) => episode.transitionId === transitionId);
-      const episode = existing || createEpisode(tasks, {
-        status: 'unbound',
-        phase: 'brief',
-        transitionId,
-        previousEpisodeId: currentEpisode.episodeId,
-        taskText: query,
-        now,
-      });
-      const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status: 'unbound', bindingRevision: tasks.revision, now });
-      tasks.sessions[sessionId] = anchor;
-      return { tasks, anchor, episode, decision: { kind: 'unbound', anchor, reason: 'new_task' }, changed: true };
-    }
     /** 任务文本只作后续「是否换任务」的比对材料，不改锚点时间，免得把正在整理的这期作废。 */
     const nextTaskText = text(query, 200);
     if (nextTaskText && currentEpisode.taskText !== nextTaskText) {

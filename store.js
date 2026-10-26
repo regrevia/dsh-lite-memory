@@ -964,9 +964,9 @@ export function setEvolution(scope, enabled, options = {}) {
   return withLock(scope, () => {
     const before = loadIndex(scope);
     const config = before.__evolution || {};
-    /** 关总开关后不能再打开自进化；关闭自进化只是管理操作，允许落盘。 */
-    if (enabled === true && !(before.__control || state.controlOf(null)).enabled) {
-      return { ok: false, reason: '先开启本项目记忆，再开自进化' };
+    /** 总开关关掉后，自进化开关也不能改：先恢复本项目记忆。 */
+    if (!(before.__control || state.controlOf(null)).enabled) {
+      return { ok: false, code: 'memory_disabled', reason: '本项目记忆已关闭' };
     }
     if (config.compatible === false) {
       return { ok: false, reason: '实验配置版本不认，先不要改动开关', compatible: false };
@@ -2754,12 +2754,19 @@ export function recordLearningFailure(scope, options = {}) {
   });
 }
 
+/** 管理面写操作的统一闸门：总开关关掉时服务端直接拒绝，不写盘也不返回旧正文。 */
+function managementClosed(scope) {
+  const index = loadIndex(scope);
+  return !(index.__control || state.controlOf(null)).enabled;
+}
+
 /** 删除：仍按管理面看到的版本比对，删掉正文与旧版本，只留审计回执。 */
 export function removeLearningRule(scope, id, options = {}) {
   const expectedRevision = Number(options.expectedRevision);
   const operationId = String(options.operationId || '');
   const at = new Date(options.now || Date.now()).toISOString();
   return withLock(scope, () => {
+    if (managementClosed(scope)) return { ok: false, code: 'memory_disabled', reason: '本项目记忆已关闭' };
     try {
       const result = state.transact(scope, { operationId }, (draft) => {
         const evolution = draft.experimental && draft.experimental.projectEvolution;
@@ -2803,6 +2810,7 @@ export function undoLearningChange(scope, id, options = {}) {
   const now = options.now || Date.now();
   const at = new Date(now).toISOString();
   return withLock(scope, () => {
+    if (managementClosed(scope)) return { ok: false, code: 'memory_disabled', reason: '本项目记忆已关闭' };
     try {
       const result = state.transact(scope, { operationId }, (draft) => {
         const evolution = draft.experimental && draft.experimental.projectEvolution;
@@ -2848,6 +2856,7 @@ export function pinLearningRule(scope, id, options = {}) {
   const operationId = String(options.operationId || '');
   const at = new Date(options.now || Date.now()).toISOString();
   return withLock(scope, () => {
+    if (managementClosed(scope)) return { ok: false, code: 'memory_disabled', reason: '本项目记忆已关闭' };
     try {
       const result = state.transact(scope, { operationId }, (draft) => {
         const evolution = draft.experimental && draft.experimental.projectEvolution;
@@ -2871,12 +2880,122 @@ export function pinLearningRule(scope, id, options = {}) {
   });
 }
 
+/**
+ * 管理面编辑：只保存内容，不改变学习状态；正文变了就清掉旧证据并留上一版。
+ * 已生效规则改写后降回试用，避免拿新正文沿用旧证据直接当默认。
+ */
+export function editLearningRule(scope, id, options = {}) {
+  const expectedRevision = Number(options.expectedRevision);
+  const operationId = String(options.operationId || '');
+  const now = options.now || Date.now();
+  const at = new Date(now).toISOString();
+  const title = typeof options.title === 'string' ? options.title.trim() : '';
+  const body = typeof options.body === 'string' ? options.body.trim() : '';
+  if (!title && !body) throw new Error('没有要保存的内容');
+  if (title && title.length > LIMITS.titleChars) throw new Error(`标题超过 ${LIMITS.titleChars} 字`);
+  if (body && Buffer.byteLength(body) > LIMITS.entryBytes) throw new Error(`正文超过单条 ${LIMITS.entryBytes} 字节`);
+  return withLock(scope, () => {
+    if (managementClosed(scope)) return { ok: false, code: 'memory_disabled', reason: '本项目记忆已关闭' };
+    try {
+      const result = state.transact(scope, { operationId }, (draft) => {
+        const entry = draft.entries.find((row) => row.id === id && row.status === 'active');
+        if (!entry || !isExperimentalRecord(toFlat(entry))) throw new Error('没有这条实验规则');
+        if (!Number.isInteger(expectedRevision) || Number(entry.revision) !== expectedRevision) throw new Error('这条规则刚被改过，先刷新再保存');
+        const flat = toFlat(entry);
+        const nextTitle = title || flat.title;
+        const nextBody = body || flat.body;
+        if (nextTitle === flat.title && nextBody === flat.body) return { changed: false };
+        const nextCurrent = { ...entry.current, title: nextTitle, body: nextBody };
+        const learningState = { ...(flat.learning || {}) };
+        if (!learningState.specDigest) learningState.specDigest = learning.specDigestOf(flat);
+        learningState.versions = [...(Array.isArray(learningState.versions) ? learningState.versions : []),
+          { digest: learningState.specDigest, body: flat.body, at }].slice(-learning.LIMITS.versions);
+        learningState.specDigest = learning.specDigestOf(nextCurrent);
+        learningState.supportedEpisodeIds = [];
+        learningState.evidence = [];
+        learningState.updatedAt = at;
+        if (learningState.state === 'active') {
+          learningState.state = 'trial';
+          learningState.trialUntil = new Date(now + learning.LIMITS.trialMs).toISOString();
+        }
+        if (learningState.state === 'paused') {
+          learningState.blockedReason = 'edited';
+          learningState.pausedAt = at;
+          learningState.pausedBy = 'management';
+        }
+        entry.current = nextCurrent;
+        entry.maintenance = { ...(entry.maintenance || {}), learning: learningState };
+        entry.revision = Number(entry.revision) + 1;
+        entry.updatedAt = at;
+        return { changed: true, kind: 'learning_edit' };
+      });
+      return { ok: true, changed: result.changed === true, replayed: result.replayed === true };
+    } catch (error) {
+      if (error && error.code === 'conflict') return { ok: false, reason: '项目状态刚被改过，重试一次', retry: true };
+      return { ok: false, reason: error instanceof Error ? error.message : '没有保存' };
+    }
+  });
+}
+
+/** 采纳：候选/试用转为生效，默认在适用任务中参与召回；可选同时保存改过的标题或正文。 */
+export function adoptLearningRule(scope, id, options = {}) {
+  const expectedRevision = Number(options.expectedRevision);
+  const operationId = String(options.operationId || '');
+  const now = options.now || Date.now();
+  const at = new Date(now).toISOString();
+  const title = typeof options.title === 'string' ? options.title.trim() : '';
+  const body = typeof options.body === 'string' ? options.body.trim() : '';
+  if (!Number.isInteger(expectedRevision) || expectedRevision < 1) throw new Error('缺少版本，先刷新');
+  if (title && title.length > LIMITS.titleChars) throw new Error(`标题超过 ${LIMITS.titleChars} 字`);
+  if (body && Buffer.byteLength(body) > LIMITS.entryBytes) throw new Error(`正文超过单条 ${LIMITS.entryBytes} 字节`);
+  return withLock(scope, () => {
+    if (managementClosed(scope)) return { ok: false, code: 'memory_disabled', reason: '本项目记忆已关闭' };
+    try {
+      const result = state.transact(scope, { operationId }, (draft) => {
+        const entry = draft.entries.find((row) => row.id === id && row.status === 'active');
+        if (!entry || !isExperimentalRecord(toFlat(entry))) throw new Error('没有这条实验规则');
+        if (Number(entry.revision) !== expectedRevision) throw new Error('这条规则刚被改过，先刷新再采纳');
+        const flat = toFlat(entry);
+        const learningState = { ...(flat.learning || {}) };
+        if (learningState.state === 'active' && !title && !body) return { changed: false };
+        const nextTitle = title || flat.title;
+        const nextBody = body || flat.body;
+        const nextCurrent = { ...entry.current, title: nextTitle, body: nextBody };
+        if (!learningState.specDigest) learningState.specDigest = learning.specDigestOf(flat);
+        if (nextBody !== flat.body || nextTitle !== flat.title) {
+          learningState.versions = [...(Array.isArray(learningState.versions) ? learningState.versions : []),
+            { digest: learningState.specDigest, body: flat.body, at }].slice(-learning.LIMITS.versions);
+          learningState.specDigest = learning.specDigestOf(nextCurrent);
+          learningState.supportedEpisodeIds = [];
+          learningState.evidence = [];
+        }
+        learningState.state = 'active';
+        delete learningState.trialUntil;
+        delete learningState.blockedReason;
+        delete learningState.pausedAt;
+        delete learningState.pausedBy;
+        learningState.updatedAt = at;
+        entry.current = nextCurrent;
+        entry.maintenance = { ...(entry.maintenance || {}), learning: learningState };
+        entry.revision = Number(entry.revision) + 1;
+        entry.updatedAt = at;
+        return { changed: true, kind: 'learning_adopt' };
+      });
+      return { ok: true, changed: result.changed === true, replayed: result.replayed === true };
+    } catch (error) {
+      if (error && error.code === 'conflict') return { ok: false, reason: '项目状态刚被改过，重试一次', retry: true };
+      return { ok: false, reason: error instanceof Error ? error.message : '没有采纳' };
+    }
+  });
+}
+
 /** 结构化负反馈先在本地暂停命中的试用规则，再决定是否调用整理器。 */
 export function pauseLearningRules(scope, ids, options = {}) {
   const targets = Array.isArray(ids) ? ids.filter(Boolean).slice(0, 12) : [];
   if (!targets.length) return { ok: true, changed: 0 };
   const at = new Date(options.now || Date.now()).toISOString();
   return withLock(scope, () => {
+    if (managementClosed(scope)) return { ok: false, code: 'memory_disabled', reason: '本项目记忆已关闭' };
     try {
       const result = state.transact(scope, { operationId: options.operationId || '' }, (draft) => {
         let changed = 0;
@@ -2906,6 +3025,7 @@ export function resumeLearningRule(scope, id, options = {}) {
   const operationId = String(options.operationId || '');
   const at = new Date(options.now || Date.now()).toISOString();
   return withLock(scope, () => {
+    if (managementClosed(scope)) return { ok: false, code: 'memory_disabled', reason: '本项目记忆已关闭' };
     try {
       const result = state.transact(scope, { operationId }, (draft) => {
         const entry = draft.entries.find((row) => row.id === id && row.status === 'active');
@@ -2932,6 +3052,7 @@ export function expireLearning(scope, options = {}) {
   const now = options.now || Date.now();
   const at = new Date(now).toISOString();
   return withLock(scope, () => {
+    if (managementClosed(scope)) return { ok: false, code: 'memory_disabled', reason: '本项目记忆已关闭' };
     try {
       const result = state.transact(scope, { operationId: options.operationId || '' }, (draft) => {
         const evolution = draft.experimental && draft.experimental.projectEvolution;

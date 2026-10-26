@@ -419,6 +419,55 @@ const evoDelete = await call('/lite-memory/evolution', {
 assert.equal(evoDelete.status, 200);
 assert.equal(evoDelete.body.ok, true);
 
+// ── 关闭项目记忆后：面板只读，管理面写操作全部拒绝，工具也不落盘 ─────────────
+const closedCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-closed-'));
+sessionCwds.set('session-closed', closedCwd);
+const closedScope = store.scopeOf(closedCwd);
+const closedAgent = { id: 'session-closed', cwd: closedCwd, session: { id: 'session-closed', header: { cwd: closedCwd } } };
+const closedSeed = await defs.get('memory_save').execute(
+  { title: '口播开头', summary: '口播开头三句内给结论', body: '开场三句内给结论。' },
+  { agent: closedAgent },
+);
+state.transact(closedScope, {}, (draft) => {
+  const row = draft.entries.find((entry) => entry.id === closedSeed.id);
+  row.origin = 'project_evolution';
+  row.maintenance = { ...(row.maintenance || {}), learning: { state: 'active' } };
+  return { changed: true };
+});
+assert.equal((await call('/lite-memory/evolution', { sessionId: 'session-closed', enabled: true })).status, 200);
+const closedOff = await call('/lite-memory/control', { sessionId: 'session-closed', enabled: false, operationId: 'op_close_contract' });
+assert.equal(closedOff.status, 200);
+assert.equal(closedOff.body.enabled, false);
+const closedFile = path.join(closedScope.dir, 'state.json');
+const closedBefore = fs.readFileSync(closedFile);
+const closedSnapshot = await call('/lite-memory/evolution', { sessionId: 'session-closed', learningAction: 'snapshot' });
+assert.equal(closedSnapshot.status, 200);
+assert.equal(closedSnapshot.body.enabled, false);
+assert.equal(closedSnapshot.body.rules.length, 1);
+assert.equal(Buffer.compare(closedBefore, fs.readFileSync(closedFile)), 0);
+const closedRevision = closedSnapshot.body.rules[0].revision;
+for (const action of ['adopt', 'edit', 'delete', 'pause', 'resume', 'pin', 'undo']) {
+  const payload = { sessionId: 'session-closed', learningAction: action, id: closedSeed.id, expectedRevision: closedRevision, body: '改过的正文' };
+  if (action === 'pin') payload.pinned = true;
+  if (action === 'pause') payload.ids = [closedSeed.id];
+  const result = await call('/lite-memory/evolution', payload);
+  assert.equal(result.status, 409, action);
+  assert.equal(result.body.code, 'memory_disabled', action);
+}
+const closedTool = await defs.get('memory_save').execute(
+  { title: '关闭后写入', summary: '应当拒绝', body: '不该落盘' },
+  { agent: closedAgent },
+);
+assert.equal(closedTool.changed, false);
+assert.equal(closedTool.reason, 'memory_disabled');
+assert.equal(closedTool.id, '');
+assert.equal(Buffer.compare(closedBefore, fs.readFileSync(closedFile)), 0);
+const reopened = await call('/lite-memory/control', { sessionId: 'session-closed', enabled: true, operationId: 'op_reopen_contract' });
+assert.equal(reopened.status, 200);
+const reopenedSnapshot = await call('/lite-memory/evolution', { sessionId: 'session-closed', learningAction: 'snapshot' });
+assert.equal(reopenedSnapshot.body.enabled, false);
+assert.equal(reopenedSnapshot.body.rules.length, 1);
+
 // ── 界面只吃持久元数据，不猜文案 ─────────────────────────────────────────────
 const metaOf = (name, args, value) => defs.get(name).output.presentationMeta(args, value);
 const savedMeta = metaOf('memory_save', {}, saved);

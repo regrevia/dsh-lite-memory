@@ -117,8 +117,9 @@ export function controlOf(state) {
 }
 
 /**
- * 关总开关只停运行层：保留自进化的设置与已有规则，旋转代次让在途召回、候选和整理全部失效。
- * 重新打开也换代次，关闭前排队的任务不能在重开后补交。
+ * 关总开关只是收回授权：候选、试用、生效规则、证据、默认绑定和已用额度都保留，
+ * 只清运行层（在途整理、临时锚点、旧召回快照）。重新打开也换代次，关闭前排队的任务不能补交。
+ * 自进化跟随总开关一起停：重新打开记忆后，自进化仍是关闭的，等用户单独开启。
  */
 export function applyControl(draft, enabled) {
   const now = new Date().toISOString();
@@ -129,19 +130,20 @@ export function applyControl(draft, enabled) {
   draft.control = config;
   const evolution = draft.experimental && draft.experimental.projectEvolution;
   if (evolution && typeof evolution === 'object' && !Array.isArray(evolution)) {
+    const ledger = normalizeLearning(evolution.learning);
+    evolution.enabled = false;
     evolution.epoch = crypto.randomUUID();
     evolution.feedbackGeneration = Number.isInteger(evolution.feedbackGeneration) ? evolution.feedbackGeneration + 1 : 1;
-    evolution.tasks = emptyTasks();
-    evolution.learning = emptyLearning();
-  }
-  if (!next) {
-    draft.entries = draft.entries.filter((entry) => !(entry && entry.maintenance && entry.maintenance.learning && entry.maintenance.learning.state === 'pending'));
-    draft.candidates = draft.candidates.filter((row) => !row || row.origin !== 'project_evolution');
+    evolution.changedAt = now;
+    /** 默认绑定属于已确认结果；临时锚点和在途观察不属于。 */
+    evolution.tasks = { ...emptyTasks(), ...(evolution.tasks && evolution.tasks.defaults ? { defaults: evolution.tasks.defaults } : {}) };
+    /** 额度只增不减：次数与回执留着，最近观察清掉。 */
+    evolution.learning = { ...ledger, recent: [] };
   }
   return { changed: true, enabled: next, epoch: config.epoch };
 }
 
-/** 开关事务里的纯状态部分：旋转 epoch、推进反馈代次；关闭时把试用条目转暂停待复核。 */
+/** 自进化开关只停运行层：规则、候选、试用、证据和额度都保留，恢复时接着用。 */
 export function applyEvolution(draft, enabled) {
   const now = new Date().toISOString();
   const current = evolutionOf(draft);
@@ -156,10 +158,11 @@ export function applyEvolution(draft, enabled) {
     changedAt: now,
     /** 开与关都让上一轮锚点失效；已经确认的项目默认保留，它不属于临时作品状态。 */
     tasks: { ...emptyTasks(), ...(current.tasks && current.tasks.defaults ? { defaults: current.tasks.defaults } : {}) },
-    /** 关开不继承在途整理与旧提案；已学规则的来源与版本仍留在条目里。 */
-    learning: emptyLearning(),
+    /** 只清在途观察；已学规则的来源、版本和候选都在条目里，关开不动它们。 */
+    learning: { ...normalizeLearning(current.learning), recent: [] },
   };
   draft.experimental = { ...(draft.experimental || {}), projectEvolution: config };
+  /** 显式关闭自进化：试用转暂停待复核，不删除候选与证据；重新打开后可逐条恢复。 */
   if (!next) {
     for (const entry of draft.entries) {
       const learning = entry && entry.maintenance && entry.maintenance.learning;
@@ -170,9 +173,6 @@ export function applyEvolution(draft, enabled) {
         learning.pausedBy = 'experiment_off';
       }
     }
-    /** 未提交的候选随关闭清掉，不保留一份看不见却还能被旧提案命中的正文。 */
-    draft.entries = draft.entries.filter((entry) => !(entry && entry.maintenance && entry.maintenance.learning && entry.maintenance.learning.state === 'pending'));
-    draft.candidates = draft.candidates.filter((row) => !row || row.origin !== 'project_evolution');
   }
   return { changed: true, enabled: next, epoch: config.epoch };
 }
