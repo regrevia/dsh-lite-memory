@@ -952,7 +952,11 @@ window.__ModuleLoader__.load({
       const primaryKind = props.primaryKind || 'memory';
       const graph = React.useMemo(() => (props.graphOf || graphOf)(props.records), [props.records, props.graphOf]);
       const [zoom, setZoom] = React.useState(1);
+      const [pan, setPan] = React.useState({ x: 0, y: 0 });
+      const [dragging, setDragging] = React.useState(false);
       const [hoveredId, setHoveredId] = React.useState('');
+      const svgRef = React.useRef(null);
+      const dragRef = React.useRef(null);
       const selectedId = props.selectedId;
       const labelSet = graph.people <= 40;
       const shownCount = Number.isInteger(graph.shown) ? graph.shown : graph.people;
@@ -977,7 +981,56 @@ window.__ModuleLoader__.load({
         ? [...graph.nodes].sort((a, b) => (Number(nearIds.has(a.id)) - Number(nearIds.has(b.id))) || (Number(a.id === selectedId) - Number(b.id === selectedId)))
         : graph.nodes;
       const pickHub = props.onPickHub;
-      const stepZoom = (delta) => setZoom((value) => Math.min(2.5, Math.max(0.75, Math.round((value + delta) * 100) / 100)));
+      const MIN_ZOOM = 0.2;
+      const MAX_ZOOM = 2.5;
+      const stepZoom = (delta) => setZoom((value) => {
+        const next = delta > 0 ? value * 1.25 : value / 1.25;
+        return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.round(next * 100) / 100));
+      });
+      const pointAt = (event, matrix) => {
+        const svg = svgRef.current;
+        if (!svg || !matrix) return null;
+        const point = svg.createSVGPoint();
+        point.x = event.clientX;
+        point.y = event.clientY;
+        return point.matrixTransform(matrix);
+      };
+      const startPan = (event) => {
+        if (event.button !== 0) return;
+        if (event.target && event.target.closest && event.target.closest('[data-node]')) return;
+        const svg = svgRef.current;
+        if (!svg) return;
+        const ctm = svg.getScreenCTM();
+        if (!ctm) return;
+        const inverse = ctm.inverse();
+        const point = pointAt(event, inverse);
+        if (!point) return;
+        dragRef.current = [event.pointerId, inverse, point.x, point.y, pan.x, pan.y];
+        setDragging(true);
+        if (svg.setPointerCapture) svg.setPointerCapture(event.pointerId);
+        event.preventDefault();
+      };
+      const movePan = (event) => {
+        const drag = dragRef.current;
+        if (!drag || drag[0] !== event.pointerId) return;
+        const point = pointAt(event, drag[1]);
+        if (!point) return;
+        setPan({ x: drag[4] - (point.x - drag[2]), y: drag[5] - (point.y - drag[3]) });
+        event.preventDefault();
+      };
+      const endPan = (event) => {
+        const drag = dragRef.current;
+        if (!drag || (event && drag[0] !== event.pointerId)) return;
+        dragRef.current = null;
+        setDragging(false);
+        const svg = svgRef.current;
+        if (event && svg && svg.releasePointerCapture && svg.hasPointerCapture && svg.hasPointerCapture(event.pointerId)) {
+          svg.releasePointerCapture(event.pointerId);
+        }
+      };
+      React.useEffect(() => {
+        setPan({ x: 0, y: 0 });
+      }, [props.records, primaryKind]);
       const frame = React.useMemo(() => {
         const list = graph.nodes;
         if (list.length === 0) return { x: 0, y: 0, width: 640, height: 472 };
@@ -1003,13 +1056,13 @@ window.__ModuleLoader__.load({
       const viewHeight = frame.height / zoom;
       const zoomButton = (label, delta, icon) => h('button', {
         type: 'button', onClick: () => stepZoom(delta),
-        disabled: delta > 0 ? zoom >= 2.5 : zoom <= 0.75,
+        disabled: delta > 0 ? zoom >= MAX_ZOOM : zoom <= MIN_ZOOM,
         'aria-label': label, title: label,
         style: {
           width: '26px', height: '26px', padding: 0, display: 'inline-flex',
           alignItems: 'center', justifyContent: 'center', border: 'none',
           borderRadius: '6px', background: 'transparent', color: 'inherit',
-          opacity: delta > 0 ? (zoom >= 2.5 ? 0.28 : 0.68) : (zoom <= 0.75 ? 0.28 : 0.68),
+          opacity: delta > 0 ? (zoom >= MAX_ZOOM ? 0.28 : 0.68) : (zoom <= MIN_ZOOM ? 0.28 : 0.68),
           cursor: 'pointer',
         },
       }, icon);
@@ -1034,9 +1087,20 @@ window.__ModuleLoader__.load({
         zoomButton('缩小图谱', -0.25, magnifier(-1)),
         zoomButton('放大图谱', 0.25, magnifier(1))),
         h('svg', {
-          viewBox: `${frame.x + frame.width / 2 - viewWidth / 2} ${frame.y + frame.height / 2 - viewHeight / 2} ${viewWidth} ${viewHeight}`,
+          ref: svgRef,
+          viewBox: `${frame.x + frame.width / 2 - viewWidth / 2 + pan.x} ${frame.y + frame.height / 2 - viewHeight / 2 + pan.y} ${viewWidth} ${viewHeight}`,
           preserveAspectRatio: 'xMidYMid meet',
-          style: { width: '100%', height: '100%', flex: 1, minHeight: 0, display: 'block' },
+          style: {
+            width: '100%', height: '100%', flex: 1, minHeight: 0, display: 'block',
+            cursor: dragging ? 'grabbing' : 'grab', touchAction: 'none',
+            userSelect: 'none', WebkitUserSelect: 'none',
+          },
+          onPointerDown: startPan,
+          onPointerMove: movePan,
+          onPointerUp: endPan,
+          onPointerCancel: endPan,
+          onLostPointerCapture: endPan,
+          onDragStart: (event) => event.preventDefault(),
           role: 'img', 'aria-label': props.ariaLabel || '关系图',
         },
         h('g', null, orderedEdges.map((edge, index) => {
@@ -1068,6 +1132,7 @@ window.__ModuleLoader__.load({
           const nameChars = active || hovered ? 15 : isPrimary ? 8 : 12;
           return h('g', {
             key: node.id,
+            'data-node': 'true',
             transform: `translate(${node.x} ${node.y})`,
             onClick: pick ? () => pick(node) : undefined,
             onKeyDown: pick ? (event) => {
@@ -1907,7 +1972,7 @@ window.__ModuleLoader__.load({
 
     // 测试缝：Node 里验引用投影，浏览器里没有任何副作用。
     if (typeof globalThis.__LITE_MEMORY_TEST__ === 'function') {
-      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel });
+      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph });
     }
 
     return {
