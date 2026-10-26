@@ -55,19 +55,25 @@ Each completed turn keeps a few lines under 「已编辑 N 个文件」, built f
 
 ## 记忆面板 / Memory panel
 
-会话头的大脑图标打开居中的记忆面板。默认看当前项目，也可以切到其他项目或全局层；切过去只读，不回写、不迁移旧格式。面板里能看到真实记忆画成的图谱、类型分布和计数，右侧按「记忆 / 规则 / 归档」列出条目，点一条读当前正文。项目自进化的开关也在这里，只对当前项目可改。
+会话头的大脑图标打开居中的记忆面板。只有两个开关：「启用记忆」「自进化」；内容分「记忆」「自进化」两个页签。默认看当前项目，也可以切到其他项目或全局层；切过去只读，不回写、不迁移旧格式。
 
-The brain icon in the session header opens a centered memory panel. It starts on the current project and can switch to another project or the global layer; switched scopes are read-only and never migrate or create state. The panel draws the graph from real entries, shows the kind breakdown and counts, and lists memories, rules and archived notes on the right; selecting one reads its current body. The project self-evolution switch lives here too and is editable only for the current project.
+「记忆」页签里，搜索框右侧可以在「列表」「图谱」之间切换：列表或图谱只占左栏，右侧始终是选中记忆的正文与归属。图谱按真实数据画，点记忆节点读正文，点标签或主题节点转成搜索。「自进化」页签只作用于当前项目，按「全部 / 候选 / 试用 / 生效 / 暂停」筛选，详情给出当前经验、适用范围、当前状态、学习依据和变化记录；候选可采纳、修改、放弃，试用可采纳、修改、暂停，生效可修改、暂停，暂停可恢复或查看记录。
 
-- 项目记忆总开关关闭后，这个项目不再使用任何记忆（包括全局层）：自动注入、检索、读取、引用、保存全部停，面板只能查看；重新打开后沿用原来的自进化设置。
-- 图谱只按数据画：每条有效记忆一个节点，共享标签和主题做枢纽，显式关联画实线；位置由 id 决定，同一批数据每次一样。
+The brain icon in the session header opens a centered memory panel. It has exactly two switches, Memory and Self-evolution, and two tabs, Memories and Self-evolution. It starts on the current project and can switch to another project or the global layer; switched scopes are read-only and never migrate or create state.
+
+On the Memories tab, the search row also switches the left column between list and graph. The graph is drawn from real data: a memory node opens its body, a tag or topic hub becomes a search. The Self-evolution tab acts on the current project only, filters by All / Candidate / Trial / Active / Paused, and shows the current rule, scope, state, evidence and change history. Candidates can be adopted, edited or discarded; trials can be adopted, edited or paused; active rules can be edited or paused; paused rules can be resumed or inspected.
+
+- 关闭项目记忆后，这个项目不再使用任何记忆（包括全局层）：自动注入、检索、读取、引用、保存全部停，服务端也拒绝记忆工具和面板修改动作。自进化同时关闭并禁用；重新打开记忆后自进化仍为关闭，要单独开启。
+- 关闭只改权限，不删数据：候选、试用、生效、证据、整理额度和默认绑定都保留，计数照常显示。
+- 记忆工具与面板管理动作都在服务端拒绝，不能靠改前端绕过；其他项目不受影响。
 - 范围只来自服务端枚举的层；不接受客户端拼路径，也不能写别的项目。
-- 关闭后停止整理与晚到写入，已固定的项目规范继续生效，实验成果留在「规则」和「归档」里。
+- 图谱只按数据画：每条有效记忆一个节点，共享标签和主题做枢纽，显式关联画实线；位置由 id 决定，同一批数据每次一样。
 
-- Turning the project memory switch off stops all memory use in that project, including the global layer: no injection, search, read, citation or save, and the panel is read-only. Turning it back on restores the previous self-evolution setting.
-- The graph is data only: one node per active memory, shared tags and topics as hubs, explicit links as solid edges; positions derive from ids, so the same data looks the same every time.
+- Turning project memory off stops all memory use in that project, including the global layer: no injection, search, read, citation or save, and the server rejects both memory tools and panel mutations. Self-evolution turns off with it; after memory is reopened, self-evolution stays off until switched on.
+- Closing is a permission change, not deletion: candidates, trials, active rules, evidence, organize quota and default bindings are kept, and counts stay visible.
+- Memory tools and panel management actions are rejected server-side, so a modified client cannot bypass the switch; other projects are unaffected.
 - Scopes come only from the server-side list; the page cannot assemble a path or write another project's notes.
-- Turning evolution off stops organizing and late writes; pinned project rules keep working and experimental results stay under Rules and Archive.
+- The graph is data only: one node per active memory, shared tags and topics as hubs, explicit links as solid edges; positions derive from ids, so the same data looks the same every time.
 
 ## 为什么轻 / Why it stays light
 
@@ -90,17 +96,17 @@ The brain icon in the session header opens a centered memory panel. It starts on
 Off by default, per project only. When enabled it distills a few project rules from your corrections and approvals: corrections revise the approach, approvals attach one bounded sample to an existing rule, and an execution miss adds a checkpoint instead of a ban. Matching tasks read them on demand, never per turn. It adds one bounded background organize call and the memory reads that actually hit.
 
 - 一次整理最多 2 处改动、768 输出 token、15 秒；输入不超过 8 KiB，同一作品最多 2 次，同一项目 24 小时内最多 6 次。
-- 成果停在 `pending` / `trial` / `active` / `paused`；明确说「以后都这样」或两个独立作品支持才 `active`，试用与暂停 30 天后清理。
+- 成果停在 `pending` / `trial` / `active` / `paused`；明确说「以后都这样」或两个独立作品支持才 `active`，试用与暂停 30 天后清理。试用会参与条件匹配任务的读取，不是预览稿；到期自动暂停。
 - 规则 32 条、待定 12 条、每规则样例 4 个/检查点 3 个/来源 3 条、旧版本 2 个，都有硬上限；到顶先暂停新学习，不静默丢已生效规则。
 - 面板显示整理次数和已知用量；usage 没返回就写未知，不补零。
-- 关闭后停止学习、读取和晚到写入；已固定为普通项目规范的内容继续生效，实验成果保留可查看。
+- 关闭后停止学习、读取和晚到写入；成果保留可查看。记忆总开关关闭时自进化一定也是关闭，不能单独打开。
 - 同一项目换栏目、新一期、临时例外不会互相继承；仓库子目录、符号链接、worktree 视为同一项目，不同克隆分开。
 
 - At most 2 changes, 768 output tokens and 15 s per organize call; input ≤ 8 KiB, ≤ 2 calls per episode and ≤ 6 per project in 24 h.
-- Results stay `pending` / `trial` / `active` / `paused`; they become `active` only on an explicit long-term ask or two independent episodes; trial and paused entries expire after 30 days.
+- Results stay `pending` / `trial` / `active` / `paused`; they become `active` only on an explicit long-term ask or two independent episodes; trial and paused entries expire after 30 days. A trial is read by matching tasks — it is not a preview — and pauses when it expires.
 - Hard caps: 32 rules, 12 pending, 4 samples / 3 checkpoints / 3 sources per rule, 2 old versions. At the ceiling new learning pauses; active explicit rules are never silently dropped.
 - The panel reports organize calls and known usage; missing usage is shown as unknown, never zero.
-- Turning it off stops learning, reads and late writes; rules pinned as ordinary project norms keep working, experimental results stay viewable.
+- Turning it off stops learning, reads and late writes; results stay viewable. While project memory is off, self-evolution is necessarily off and cannot be switched on by itself.
 - Switching columns, a new episode and one-off exceptions do not leak into each other; a repository subdirectory, symlink or worktree is the same project, separate clones are not.
 
 ## 安装 / Install

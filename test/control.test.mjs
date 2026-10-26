@@ -235,4 +235,44 @@ const toggle = (scope, enabled) => store.setMemoryEnabled(scope, enabled, { oper
   assert.equal(afterAdopt.title, '口播结论前置');
 }
 
+/* C08：关闭保留已消耗额度与默认绑定，重开后仍按原额度限额。 */
+{
+  const dir = mkdir('preserve-quota');
+  const scope = scopeOf(dir);
+  assert.equal(store.setEvolution(scope, true, { operationId: 'evo-quota' }).ok, true);
+  const defaults = { taskKind: 'video', seriesId: '口播' };
+  assert.equal(store.saveTaskState(scope, { version: 1, sessions: {}, episodes: {}, defaults, revision: 1 }, { operationId: 'defaults' }).ok, true);
+  assert.equal(store.beginLearningAttempt(scope, { episodeId: 'ep-preserve', operationId: 'a1' }).ok, true);
+  assert.equal(store.beginLearningAttempt(scope, { episodeId: 'ep-preserve', operationId: 'a2' }).ok, true);
+  assert.equal(store.beginLearningAttempt(scope, { episodeId: 'ep-preserve', operationId: 'a3' }).ok, false);
+  toggle(scope, false);
+  toggle(scope, true);
+  assert.deepEqual(store.taskState(scope).defaults, { ...defaults, confirmedBy: 'user', confirmedAt: '' });
+  assert.equal(store.setEvolution(scope, true, { operationId: 'evo-quota-again' }).ok, true);
+  const limited = store.beginLearningAttempt(scope, { episodeId: 'ep-preserve', operationId: 'a4' });
+  assert.equal(limited.ok, false);
+  assert.equal(limited.reason, 'episode_limit');
+}
+
+/* C09：同一项目两个会话都已准备内容，关闭后两边都立即失效。 */
+{
+  const dir = mkdir('two-sessions');
+  const scope = scopeOf(dir);
+  seedRule(scope, '口播开头');
+  assert.equal(store.setEvolution(scope, true, { operationId: 'evo-two' }).ok, true);
+  const runtime = boot();
+  const a1 = makeAgent('two-1', dir);
+  const a2 = makeAgent('two-2', dir);
+  const sig = new AbortController().signal;
+  await runtime.preStep({ agent: a1, signal: sig, turn: 't1' }, enter(human('这期口播开头怎么改')));
+  await runtime.preStep({ agent: a2, signal: sig, turn: 't1' }, enter(human('这期口播开头怎么改')));
+  assert.match(runtime.text(a1, sig), /口播开头/);
+  assert.match(runtime.text(a2, sig), /口播开头/);
+  toggle(scope, false);
+  assert.equal(runtime.text(a1, sig), '');
+  assert.equal(runtime.text(a2, sig), '');
+  assert.equal(runtime.debug.preparedOf(a1).text, '');
+  assert.equal(runtime.debug.preparedOf(a2).text, '');
+}
+
 console.log('control.test.mjs: all passed');
