@@ -1361,7 +1361,7 @@ export function apply(ctx, config) {
 
   ctx.effect(() => tools.register({
     name: 'memory_save',
-    description: `保存一条记忆。只在会改变以后判断时才存；先搜已有条目，能更新就不要新建。保存前先蒸馏：标题是结论，正文只写原则与触发条件，不抄原始输出里的具体数值。用户明确说「记住」时直接调用；用户自己的话已经是长期规则（「以后都这样」「别再 X」）时也直接调用，不要先问。更新同一件事时带 id：身份只看标题、旧标题和前置条件，像不像不授权覆盖。文本相近但标题不同时先不写，返回 needsResolution 与 1–2 条相近条目：确实是同一条就用那个 id 更新，确实是另一条才带 resolution="distinct" 再存。带 id 更新时没给的字段保持原值，正文整段替换，旧正文只留作内部撤回，不展示也不参与检索。条数到硬上限时把同层最久没被读的一条移进归档，结果里写明动了哪条，不拒绝新记忆；单条正文超限只报错、不截断。前置条件不同的同一标题是两条。${NOTES}`,
+    description: `保存一条记忆。只在会改变以后判断时才存；先搜已有条目，能更新就不要新建。保存前先蒸馏：标题是结论，正文只写原则与触发条件，通常 2–4 句；路径、字段表、完整命令、版本号、尺寸数值不要抄进正文，改成文档或 skill 的指针。用户明确说「记住」时直接调用；用户自己的话已经是长期规则（「以后都这样」「别再 X」）时也直接调用，不要先问。更新同一件事时带 id：身份只看标题、旧标题和前置条件，像不像不授权覆盖。文本相近但标题不同时先不写，返回 needsResolution 与 1–2 条相近条目：确实是同一条就用那个 id 更新，确实是另一条才带 resolution="distinct" 再存。带 id 更新时没给的字段保持原值，正文整段替换，旧正文只留作内部撤回，不展示也不参与检索。条数到硬上限时把同层最久没被读的一条移进归档，结果里写明动了哪条，不拒绝新记忆；单条正文超限只报错、不截断。前置条件不同的同一标题是两条。${NOTES}`,
     parameters: SAVE_PARAMS,
     output: {
       presentationMeta: (_args, value) => ({
@@ -2250,7 +2250,7 @@ export function apply(ctx, config) {
       if (sawTool) throw new Error('整理返回了工具调用');
       /** 运行期间用户又给了新反馈：旧结果不能覆盖新纠正，直接作废，等排队的下一次整理。 */
       if ((feedbackRevisions.get(scope.key) || 0) !== candidate.feedbackRevision) {
-        throw new Error('反馈已更新，这次整理作废');
+        throw new Error('反馈已更新，这轮结果没采用');
       }
       const parsed = learning.parseOutput(text, { finish, refs: input.refs, rules: input.rules, ranges });
       if (!parsed.ok) throw new Error(parsed.reason);

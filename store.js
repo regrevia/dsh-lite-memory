@@ -2546,7 +2546,7 @@ export function commitLearning(scope, batch = {}) {
         if (!episode) throw new Error('作品已经失效，这次整理作废');
         if (batch.sessionId) {
           const focus = evolution.tasks?.sessions?.[batch.sessionId];
-          if (!focus || focus.episodeId !== episodeId) throw new Error('这期已经换到别的作品，这次整理作废');
+          if (!focus || focus.episodeId !== episodeId) throw new Error('这期已经换到别的作品，这轮结果没采用');
         }
         if (batch.episodeUpdatedAt && episode.updatedAt !== batch.episodeUpdatedAt) throw new Error('用户又改过这期，这次整理作废');
         const prepared = new Map((Array.isArray(batch.preparedTargets) ? batch.preparedTargets : []).map((row) => [row.id, row]));

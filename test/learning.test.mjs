@@ -433,7 +433,7 @@ test('P06 作品版本变了旧整理整批作废', () => {
   store.saveTaskState(scope, later.tasks, { operationId: 'tasks_later' });
   const stale = commitNew(scope, grown, started, NEW_CHANGE, { now: Date.now() + 2000 });
   assert.equal(stale.ok, false);
-  assert.match(stale.reason, /换到别的作品|改过这期|失效/);
+  assert.match(stale.reason, /换到别的作品|改过这期|失效|没采用/);
   assert.equal(ruleRows(scope).length, 0);
 });
 

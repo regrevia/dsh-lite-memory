@@ -686,8 +686,10 @@ window.__ModuleLoader__.load({
       const primaryKind = props.primaryKind || 'memory';
       const graph = React.useMemo(() => (props.graphOf || graphOf)(props.records), [props.records, props.graphOf]);
       const [zoom, setZoom] = React.useState(1);
+      const [hoveredId, setHoveredId] = React.useState('');
       const selectedId = props.selectedId;
-      const labelSet = graph.people <= 10;
+      const labelSet = graph.people <= 40;
+      const pickHub = props.onPickHub;
       const stepZoom = (delta) => setZoom((value) => Math.min(2.5, Math.max(0.75, Math.round((value + delta) * 100) / 100)));
       const frame = React.useMemo(() => {
         const list = graph.nodes;
@@ -765,26 +767,48 @@ window.__ModuleLoader__.load({
         h('g', null, graph.nodes.map((node) => {
           const isPrimary = node.kind === primaryKind;
           const active = node.id === selectedId;
+          const hovered = node.id === hoveredId;
+          const pick = isPrimary ? props.onPick : (pickHub || undefined);
           const fill = !isPrimary ? 'var(--dsw-alias-label-secondary)'
             : node.state ? (STAGE_TONE[node.state] || 'var(--dsw-alias-brand-primary)')
               : node.experimental ? 'var(--dsw-alias-state-warn-primary)' : 'var(--dsw-alias-brand-primary)';
-          const showLabel = active || (isPrimary && labelSet) || !isPrimary;
+          const showLabel = active || hovered || (isPrimary && labelSet) || !isPrimary;
+          const nameChars = active || hovered ? 14 : isPrimary ? 7 : 10;
           return h('g', {
             key: node.id,
             transform: `translate(${node.x} ${node.y})`,
-            onClick: isPrimary ? () => props.onPick(node) : undefined,
-            style: { cursor: isPrimary ? 'pointer' : 'default' },
+            onClick: pick ? () => pick(node) : undefined,
+            onMouseEnter: () => setHoveredId(node.id),
+            onMouseLeave: () => setHoveredId((value) => (value === node.id ? '' : value)),
+            style: { cursor: pick ? 'pointer' : 'default' },
           },
+          h('circle', { r: Math.max(12, node.radius + 6), fill: 'transparent' }),
           active ? h('circle', { r: node.radius + 5, fill: 'none', stroke: 'var(--dsw-alias-brand-primary)', strokeWidth: 1.4, opacity: 0.5 }) : null,
-          h('circle', { r: node.radius, fill, opacity: isPrimary ? 0.9 : 0.5 }),
+          h('circle', {
+            r: node.radius, fill,
+            opacity: active ? 1 : isPrimary ? 0.9 : 0.5,
+            stroke: hovered ? 'var(--dsw-alias-brand-primary)' : 'none',
+            strokeWidth: hovered ? 1.2 : 0,
+          }),
           showLabel ? h('text', {
             y: node.radius + 12, textAnchor: 'middle',
             fill: active ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-secondary)',
-            fontSize: isPrimary ? 10 : 8.5, opacity: active ? 0.95 : 0.68,
-          }, SHORT(node.label, isPrimary ? 9 : 10)) : null,
+            fontSize: isPrimary ? 9.5 : 8.5, opacity: active ? 0.95 : 0.72,
+            paintOrder: 'stroke', stroke: 'var(--dsw-alias-bg-layer-1)', strokeWidth: 3,
+            strokeLinejoin: 'round',
+          }, SHORT(node.label, nameChars)) : null,
           h('title', null, node.title || node.label),
           );
         }))),
+        h('div', {
+          style: {
+            position: 'absolute', left: '10px', bottom: '8px', zIndex: 1,
+            maxWidth: 'calc(100% - 60px)', padding: '2px 6px', borderRadius: '6px',
+            background: 'var(--dsw-alias-bg-layer-1)',
+            color: 'var(--dsw-alias-label-secondary)', fontSize: '11px', lineHeight: '1.5',
+            pointerEvents: 'none',
+          },
+        }, props.legend || '圆点 记忆 · 小点 标签/主题 · 虚线 关联'),
       );
     };
 
@@ -1126,6 +1150,11 @@ window.__ModuleLoader__.load({
       const changedCount = activity && typeof activity === 'object' && Number.isInteger(activity.changed)
         ? activity.changed
         : (Number.isInteger(activity && activity.count) ? activity.count : null);
+      const activityReason = activity && typeof activity === 'object' && typeof activity.reason === 'string'
+        ? activity.reason
+        : (latestReceipt && typeof latestReceipt.reason === 'string' ? latestReceipt.reason : '');
+      const staleLearning = /没采用|作废|已更新|换到别的作品/.test(activityReason);
+      const activityReasonText = staleLearning ? '整理过程中反馈或作品变了，这轮结果没采用。' : activityReason;
       let activityText = '';
       if (!evolution && memoryOn) {
         activityText = '读不到自进化状态';
@@ -1142,7 +1171,7 @@ window.__ModuleLoader__.load({
       } else if (activityCode === 'quota' || activityCode === 'exhausted') {
         activityText = '本轮整理额度已用完';
       } else if (activityCode === 'failed' || activityCode === 'error') {
-        activityText = '最近整理失败，可查看原因';
+        activityText = staleLearning ? '这轮整理没采用' : '最近整理失败，可查看原因';
       } else if (activityCode === 'waiting' || activityCode === 'idle' || activityCode === 'empty') {
         activityText = '等待可学习的反馈';
       }
@@ -1155,16 +1184,12 @@ window.__ModuleLoader__.load({
         else if (rules.length === 0) activityText = countsUnknown ? '等待可学习的反馈' : '还没有整理出经验';
         else activityText = '暂无整理记录';
       }
-      const activityReason = activity && typeof activity === 'object' && typeof activity.reason === 'string'
-        ? activity.reason
-        : (latestReceipt && typeof latestReceipt.reason === 'string' ? latestReceipt.reason : '');
-
       const filtered = React.useMemo(() => {
         const needle = query.trim().toLowerCase();
         if (!needle) return records;
         return records.filter((record) => {
           const tags = Array.isArray(record.tags) ? record.tags.join(' ') : '';
-          return `${record.title} ${record.summary} ${tags} ${KIND_LABEL[record.kind] || ''}`.toLowerCase().includes(needle);
+          return `${record.title} ${record.summary} ${tags} ${record.topicKey || ''} ${KIND_LABEL[record.kind] || ''}`.toLowerCase().includes(needle);
         });
       }, [records, query]);
       const filteredRules = React.useMemo(() => {
@@ -1355,7 +1380,15 @@ window.__ModuleLoader__.load({
       const memoryGraphPane = h('div', {
         style: { ...PANEL_CARD, padding: 0, minHeight: 0, overflow: 'hidden', display: 'flex' },
       },
-      h(MemoryGraph, { records: filtered, selectedId: selectedMemory, onPick: onPickNode, emptyText: query ? '没有匹配的记忆' : '还没有记忆', ariaLabel: '记忆关系图' }));
+      h(MemoryGraph, {
+        records: filtered, selectedId: selectedMemory, onPick: onPickNode,
+        onPickHub: (node) => {
+          setQuery(node.kind === 'tag' ? node.label.replace(/^#/, '') : node.label);
+          setMemoryView('list');
+        },
+        emptyText: query ? '没有匹配的记忆' : '还没有记忆', ariaLabel: '记忆关系图',
+        legend: '圆点 记忆 · 小点 标签/主题 · 虚线 关联 · 点任意点筛选或查看',
+      }));
       const memoryTab = h('div', { role: 'tabpanel', 'aria-label': '记忆', style: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: '9px' } },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flex: '0 0 auto' } },
           h('input', {
@@ -1452,6 +1485,7 @@ window.__ModuleLoader__.load({
         records: filteredRules, graphOf: ruleGraphOf, primaryKind: 'rule',
         selectedId: selectedRule, onPick: onPickRuleNode,
         emptyText: evolutionEmptyText, ariaLabel: '经验关系图',
+        legend: '圆点 经验 · 小点 条件 · 虚线 共用条件 · 点圆点查看',
       }));
       const evolutionTab = evolutionFailed ? evolutionFailed : h('div', { role: 'tabpanel', 'aria-label': '自进化', style: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: '9px' } },
         h('div', { style: { ...PANEL_CARD, padding: '9px 11px', display: 'flex', alignItems: 'flex-start', gap: '8px', flex: '0 0 auto' } },
@@ -1459,9 +1493,9 @@ window.__ModuleLoader__.load({
           h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 } },
             h('div', { style: { fontSize: '12px', lineHeight: '1.55' } }, activityText || (rules.length === 0 ? '还没有整理出经验' : '暂无整理记录')),
             countsUnknown ? h('div', { style: PANEL_MUTED }, '数量未知') : null,
-            activityReason
+            activityReasonText
               ? (showReason
-                ? h('div', { style: { ...PANEL_MUTED, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, activityReason)
+                ? h('div', { style: { ...PANEL_MUTED, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, activityReasonText)
                 : h(Action, { onClick: () => setShowReason(true) }, '查看原因'))
               : null,
           ),
