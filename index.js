@@ -2377,7 +2377,9 @@ export function apply(ctx, config) {
       /** 用户已经把要求说成长期规则，模型仍返回空时至少留一条规则，不让这条反馈无声消失。 */
       const changes = parsed.changes.length
         ? parsed.changes
-        : (candidate.cue?.explicitLongTerm ? [learning.pendingChangeFrom(candidate)].filter(Boolean) : []);
+        : (candidate.cue?.explicitLongTerm && candidate.cue?.type === 'spec_change'
+          ? [learning.pendingChangeFrom(candidate)].filter(Boolean)
+          : []);
       const commit = commitLearning(scope, {
         operationId,
         epoch: begin.epoch,
