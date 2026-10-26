@@ -45,9 +45,9 @@ Writes land in one of two layers: the current project by default, or the global 
 
 ## 每轮引用条 / Per-turn references
 
-每次回复末尾、在「已编辑 N 个文件」下面，按这一轮实际发生的工具结果留几行：`本轮参考 N 条` 和 `本轮更新 N 条`。点开是记忆名，再点一条就地展开当前正文；名字、版本都说当前值——改过名显示新名字，改过版本显示「当前第 N 版」，归档的标「已归档」，删掉的显示「已删除」。同一轮同一版本只出现一次；没读过也没写过就整段不出现。切换会话不丢，每轮只按自己的工具结果重建。本轮有更新时另有 `准备续聊摘要`，只列这一轮的记忆 id、名字和版本，可复制。
+每次回复末尾、在「已编辑 N 个文件」下面，按这一轮实际发生的工具结果留几行：`本轮参考 N 条` 和 `本轮更新 N 条`。点开是记忆名，再点一条就地展开当前正文；名字、版本都说当前值——改过名显示新名字，改过版本显示「当前第 N 版」，归档的标「已归档」，删掉的显示「已删除」。同一轮同一版本只出现一次；没读过也没写过就整段不出现。切换会话不丢，每轮只按自己的工具结果重建。
 
-Each completed turn keeps a few lines under 「已编辑 N 个文件」, built from that turn's own tool results: `本轮参考 N 条` and `本轮更新 N 条`. A line expands to memory names, a name expands to the body as it is now — current title, current version, archived marked, deleted said outright. One row per version per turn; nothing read or written, nothing shown. Switching conversations keeps them, because each turn is rebuilt from its own tool results only. A turn that changed memory also offers `准备续聊摘要`, listing just that turn's ids, names and versions, ready to copy.
+Each completed turn keeps a few lines under 「已编辑 N 个文件」, built from that turn's own tool results: `本轮参考 N 条` and `本轮更新 N 条`. A line expands to memory names, a name expands to the body as it is now — current title, current version, archived marked, deleted said outright. One row per version per turn; nothing read or written, nothing shown. Switching conversations keeps them, because each turn is rebuilt from its own tool results only.
 
 ## 为什么轻 / Why it stays light
 

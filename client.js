@@ -411,46 +411,7 @@ window.__ModuleLoader__.load({
       );
     };
 
-    /** 续聊摘要：只列这一轮落定的记忆，不猜任务内容。 */
-    const Handoff = (props) => {
-      const items = Array.isArray(props.items) ? props.items : EMPTY;
-      const [open, setOpen] = React.useState(false);
-      const [note, setNote] = React.useState('');
-      if (items.length === 0) return null;
-      const text = ['本轮记忆', ...items.map((item) => `- ${item.scope === 'global' ? '【全局】' : ''}${item.id}「${item.title || item.id}」第 ${item.revision} 版`)].join('\n');
-      const copy = () => {
-        setNote('');
-        const done = () => setNote('已复制');
-        const fail = () => setNote('复制失败，手动选中');
-        try {
-          const clipboard = typeof navigator === 'object' && navigator !== null ? navigator.clipboard : null;
-          if (clipboard && typeof clipboard.writeText === 'function') {
-            clipboard.writeText(text).then(done, fail);
-            return;
-          }
-        } catch {
-          /* fall through */
-        }
-        fail();
-      };
-      return h('div', { style: DOCK },
-        h('button', {
-          type: 'button',
-          onClick: () => { setOpen(!open); setNote(''); },
-          'aria-expanded': open,
-          style: CHIP,
-        }, '准备续聊摘要'),
-        open ? h('div', { style: BODY },
-          text,
-          h('div', null,
-            h('button', { type: 'button', onClick: copy, style: KEEP_ON }, '复制摘要'),
-            note ? h('span', { style: { marginLeft: '8px' } }, note) : null,
-          ),
-        ) : null,
-      );
-    };
-
-    const EVO_BUTTON = { flex: '0 0 auto', border: '1px solid currentColor', background: 'transparent', color: 'inherit', borderRadius: '999px', padding: '0 8px', fontSize: '12px', lineHeight: '18px', opacity: 0.7, cursor: 'pointer', whiteSpace: 'nowrap' };
+    const EVO_BUTTON = { flex: '0 0 auto', width: '28px', height: '28px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', border: 'none', background: 'transparent', color: 'inherit', borderRadius: '999px', padding: 0, cursor: 'pointer' };
     const EVO_WRAP = { position: 'relative', display: 'flex', alignItems: 'center' };
     const EVO_PANEL = {
       position: 'absolute', right: 0, top: 'calc(100% + 6px)', zIndex: 30, width: '280px', maxHeight: '420px', overflowY: 'auto',
@@ -460,6 +421,16 @@ window.__ModuleLoader__.load({
     };
     const EVO_MUTED = { opacity: 0.65 };
     const EVO_ACTION = { ...KEEP_ON, alignSelf: 'flex-start' };
+
+    /** 大脑：两瓣轮廓加一条中线，状态只靠透明度和面板文字。 */
+    const BrainIcon = () => h('svg', {
+      width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none',
+      stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round',
+      'aria-hidden': 'true', focusable: 'false',
+    },
+    h('path', { d: 'M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z' }),
+    h('path', { d: 'M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z' }),
+    h('path', { d: 'M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4' }));
 
     const EVO_STATE = { pending: '候选', trial: '试用', active: '生效', paused: '暂停' };
     const EVO_DATE = (value) => (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : '');
@@ -561,9 +532,10 @@ window.__ModuleLoader__.load({
           onClick: () => { setOpen(!open); if (!open) load(); },
           'aria-expanded': open,
           'aria-pressed': enabled,
-          title: '项目自进化',
-          style: { ...EVO_BUTTON, opacity: enabled ? 0.9 : 0.6 },
-        }, enabled ? '自进化 · 开' : '自进化'),
+          'aria-label': '项目自进化',
+          title: enabled ? '项目自进化 · 已开启' : '项目自进化',
+          style: { ...EVO_BUTTON, opacity: enabled ? 0.9 : 0.55 },
+        }, h(BrainIcon)),
         open ? h('div', { style: EVO_PANEL },
           h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
             h('span', null, '项目自进化'),
@@ -609,7 +581,6 @@ window.__ModuleLoader__.load({
       return h('div', { style: TAIL },
         h(RefSection, { label: '本轮参考', items: groups.reference, sessionId, turnKey: turn }),
         h(RefSection, { label: '本轮更新', items: groups.update, sessionId, turnKey: turn }),
-        h(Handoff, { items: groups.update }),
       );
     };
 
