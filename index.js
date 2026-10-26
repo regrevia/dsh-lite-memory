@@ -1660,6 +1660,7 @@ export function apply(ctx, config) {
           text: { type: 'string' },
           status: { type: 'string', enum: ['ok', 'budget_exhausted', 'memory_disabled', 'needs_context'] },
           reasonCode: { type: 'string' },
+          noTriggerReason: { type: 'string' },
           refs: {
             type: 'array',
             items: {

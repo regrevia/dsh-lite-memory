@@ -87,6 +87,8 @@ assert.equal(JSON.stringify(saveParams.applicability.enum), JSON.stringify(['all
 assert.deepEqual(saveParams.resolution.enum, ['distinct']);
 /** 一次检索最多回 4 条：列表是给下一步取正文用的，不是索引。 */
 assert.equal(defs.get('memory_search').parameters.properties.limit.maximum, 4);
+/** 空检索结果会带 noTriggerReason，输出 schema 必须声明它，否则宿主校验直接报错。 */
+assert.equal(defs.get('memory_search').output.schema.properties.noTriggerReason.type, 'string');
 assert.equal(saveParams.id.type, 'string');
 assert.deepEqual(saveParams.scope.enum, ['auto', 'project', 'global']);
 assert.equal(saveParams.memoryClass.type, 'string');
@@ -152,6 +154,7 @@ assert.doesNotMatch(hitText, /第 .* 版/);
 /** 「发版当天」这类自由文本条件没有可信上下文，不能当成适用条目塞给模型。 */
 const miss = await exec('memory_search', { query: '完全没有出现过的主题' });
 assert.equal(miss.count, 0);
+assert.equal(typeof miss.noTriggerReason, 'string');
 assert.equal(render('memory_search', {}, miss), 'memory · 没有命中');
 
 const read = await exec('memory_read', { id: saved.id });
