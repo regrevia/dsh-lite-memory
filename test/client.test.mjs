@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 
 let seen = null;
 let plugin = null;
-const fakeReact = { createElement: () => null, useRef: (value) => ({ current: value }), useState: (value) => [value, () => {}], useEffect: () => {}, useMemo: (fn) => fn() };
+const makeNode = (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity) });
+const fakeReact = { createElement: makeNode, useRef: (value) => ({ current: value }), useState: (value) => [value, () => {}], useEffect: () => {}, useMemo: (fn) => fn() };
 globalThis.window = { __ModuleLoader__: { load: (definition) => { plugin = definition.factory((name) => (name === 'react' ? fakeReact : null)); } } };
 globalThis.__LITE_MEMORY_TEST__ = (helpers) => { seen = helpers; };
 await import('../client.js');
@@ -26,7 +27,8 @@ assert.ok(panel, '记忆面板没有注册');
 assert.equal(panel.name, 'shell.overlay');
 assert.equal(panel.order, 30);
 
-const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf } = seen;
+const EMPTY_CHILDREN = [];
+const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf } = seen;
 
 // 图谱只按真实数据画：共享标签成枢纽，显式关联成边，位置由 id 决定。
 const graph = graphOf([
@@ -166,4 +168,62 @@ assert.equal(big.total, 65);
 assert.equal(big.nodes.filter((node) => node.kind === 'memory').length, 60);
 assert.equal(ruleGraphOf(Array.from({ length: 65 }, (_, index) => ({ id: `ev_${String(index).padStart(8, '0')}`, title: `R${index}`, conditions: [] }))).total, 65);
 
-console.log('client.test.mjs: 14 passed');
+// 显示设置只决定画不画；按项目 key 分开存，默认都关。
+const memoryStore = new Map();
+globalThis.localStorage = { getItem: (key) => (memoryStore.has(key) ? memoryStore.get(key) : null), setItem: (key, value) => memoryStore.set(key, String(value)) };
+assert.equal(displayKeyOf('project:/a'), 'lite-memory:display:project:/a');
+assert.notEqual(displayKeyOf('project:/a'), displayKeyOf('project:/b'));
+assert.deepEqual(readDisplaySettings('project:/a'), { graph: false, palace: false });
+writeDisplaySettings('project:/a', { graph: true, palace: false });
+assert.deepEqual(readDisplaySettings('project:/a'), { graph: true, palace: false });
+assert.deepEqual(readDisplaySettings('project:/b'), { graph: false, palace: false });
+memoryStore.set(displayKeyOf('project:/c'), '{oops');
+assert.deepEqual(readDisplaySettings('project:/c'), { graph: false, palace: false });
+assert.equal(graphViewOf(false, 'graph'), 'list');
+assert.equal(graphViewOf(true, 'graph'), 'graph');
+assert.equal(graphViewOf(undefined, 'graph'), 'list');
+
+// 点标签/主题按精确值筛，不把「发布」发散成「发布会」。
+const tagged = [
+  { id: 'mem_aaaaaaaa', title: '发布记录', tags: ['发布'], topicKey: '上线' },
+  { id: 'mem_bbbbbbbb', title: '发布会记录', tags: ['发布会'], topicKey: '上线复盘' },
+];
+assert.deepEqual(filterRecords(tagged, '', { kind: 'tag', value: '发布' }).map((row) => row.id), ['mem_aaaaaaaa']);
+assert.deepEqual(filterRecords(tagged, '', { kind: 'topic', value: '上线' }).map((row) => row.id), ['mem_aaaaaaaa']);
+assert.deepEqual(filterRecords(tagged, '发布会', null).map((row) => row.id), ['mem_bbbbbbbb']);
+
+// 60 条投影外也要保住当前选中项，不能点开就消失。
+const long = Array.from({ length: 65 }, (_, index) => ({ id: `mem_${String(index).padStart(8, '0')}`, title: `T${index}` }));
+const kept = projectionOf(long, long[64].id);
+assert.equal(kept.length, 60);
+assert.equal(kept[59].id, long[64].id);
+assert.equal(graphOf(long, long[64].id).nodes.some((node) => node.id === long[64].id), true);
+assert.equal(graphOf(long).nodes.some((node) => node.id === long[64].id), false);
+
+// 失败分当前和过去：只有最近一次失败才提示现有经验没更新。
+assert.equal(failureStateOf({ economy: { recent: [{ status: 'failed' }, { status: 'applied' }] } }), 'current');
+assert.equal(failureStateOf({ economy: { recent: [{ status: 'applied' }, { status: 'failed' }] } }), 'past');
+assert.equal(failureStateOf({ economy: { recent: [{ status: 'applied' }] } }), '');
+assert.equal(failureStateOf(null), '');
+
+// 学习依据读真实摘录与样例元数据，不再拿「样例」占位。
+assert.equal(evidenceTextOf({ sourceExcerpt: '用户说别用渐变' }), '用户说别用渐变');
+assert.equal(evidenceTextOf({ excerpt: '原文' }), '原文');
+assert.equal(evidenceTextOf({ note: '备注' }), '备注');
+assert.equal(evidenceTextOf({ feedbackType: 'negative' }), '');
+assert.equal(evidenceMetaOf({ artifactVersion: 2, dimension: '排版', verified: true, at: '2026-03-04T00:00:00Z' }), '第 2 版 · 排版 · 已核对 · 2026-03-04');
+assert.equal(evidenceMetaOf({ verified: false }), '未核对');
+
+// 显示设置默认关闭：面板首帧只出列表，不挂载图谱组件。
+const nodeTypes = (node, out = []) => {
+  if (!node || typeof node !== 'object') return out;
+  if (node.type) out.push(node.type);
+  for (const child of node.children || EMPTY_CHILDREN) nodeTypes(child, out);
+  return out;
+};
+const firstPaint = MemoryPanel({ sessionId: 'demo', onClose: () => {} });
+assert.ok(firstPaint, '面板首帧应渲染');
+assert.equal(nodeTypes(firstPaint).includes(MemoryGraph), false);
+assert.equal(JSON.stringify(nodeTypes(firstPaint)).includes('MemoryGraph'), false);
+
+console.log('client.test.mjs: 19 passed');

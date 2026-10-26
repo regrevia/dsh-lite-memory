@@ -666,6 +666,86 @@ window.__ModuleLoader__.load({
       const text = typeof value === 'string' ? value : '';
       return text.length > size ? `${text.slice(0, size)}…` : text;
     };
+
+    /** 显示设置只决定画不画，不改学习状态；按项目 key 存在本机。 */
+    const DISPLAY_DEFAULTS = Object.freeze({ graph: false, palace: false });
+    const displayKeyOf = (projectKey) => `lite-memory:display:${projectKey || 'default'}`;
+    const displayStoreOf = () => {
+      try {
+        const store = globalThis.localStorage;
+        return store && typeof store.getItem === 'function' ? store : null;
+      } catch {
+        return null;
+      }
+    };
+    const readDisplaySettings = (projectKey) => {
+      const store = displayStoreOf();
+      const next = { ...DISPLAY_DEFAULTS };
+      if (!store) return next;
+      try {
+        const raw = store.getItem(displayKeyOf(projectKey));
+        if (!raw) return next;
+        const saved = JSON.parse(raw);
+        if (saved && typeof saved === 'object') {
+          next.graph = saved.graph === true;
+          next.palace = saved.palace === true;
+        }
+      } catch {
+        return next;
+      }
+      return next;
+    };
+    const writeDisplaySettings = (projectKey, next) => {
+      const store = displayStoreOf();
+      if (!store) return false;
+      try {
+        store.setItem(displayKeyOf(projectKey), JSON.stringify({
+          graph: next && next.graph === true,
+          palace: next && next.palace === true,
+        }));
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    /** 功能关闭时视图统一回列表，不保留一个画不出来的页签。 */
+    const graphViewOf = (enabled, view) => (enabled === true && view === 'graph' ? 'graph' : 'list');
+    const reduceMotionOf = () => {
+      try {
+        const query = globalThis.matchMedia && globalThis.matchMedia('(prefers-reduced-motion: reduce)');
+        return Boolean(query && query.matches === true);
+      } catch {
+        return false;
+      }
+    };
+
+    /** 标签/话题按精确值筛选；只有自由搜索才用包含匹配。 */
+    const filterRecords = (records, query, hub) => {
+      const rows = Array.isArray(records) ? records : EMPTY;
+      const kind = hub && typeof hub.kind === 'string' ? hub.kind : '';
+      const value = hub && typeof hub.value === 'string' ? hub.value : '';
+      if (kind === 'tag' && value) {
+        return rows.filter((record) => Array.isArray(record.tags) && record.tags.includes(value));
+      }
+      if (kind === 'topic' && value) {
+        return rows.filter((record) => record.topicKey === value);
+      }
+      const needle = typeof query === 'string' ? query.trim().toLowerCase() : '';
+      if (!needle) return rows;
+      return rows.filter((record) => {
+        const tags = Array.isArray(record.tags) ? record.tags.join(' ') : '';
+        return `${record.title || ''} ${record.summary || ''} ${tags} ${record.topicKey || ''} ${KIND_LABEL[record.kind] || ''}`.toLowerCase().includes(needle);
+      });
+    };
+
+    /** 失败回执分「当前」和「过去」：当前失败要修，过去的只说明发生过。 */
+    const failureStateOf = (evolution) => {
+      const rows = evolution && evolution.economy && Array.isArray(evolution.economy.recent) ? evolution.economy.recent : EMPTY;
+      if (rows.length === 0) return '';
+      if (rows[0] && rows[0].status === 'failed') return 'current';
+      return rows.slice(1).some((row) => row && row.status === 'failed') ? 'past' : '';
+    };
+
     /** 面板开关。 */
     const panelUi = { open: false, sessionId: '' };
     const panelListeners = new Set();
@@ -855,9 +935,19 @@ window.__ModuleLoader__.load({
       };
     };
 
-    const graphOf = (records) => {
-      const all = Array.isArray(records) ? records : EMPTY;
+    /** 60 条投影之外也要保留当前选中项，点开的节点不能从图里消失。 */
+    const projectionOf = (all, selectedId) => {
       const rows = all.slice(0, 60);
+      if (selectedId && !rows.some((row) => row.id === selectedId)) {
+        const selected = all.find((row) => row.id === selectedId);
+        if (selected) rows[rows.length - 1] = selected;
+      }
+      return rows;
+    };
+
+    const graphOf = (records, selectedId) => {
+      const all = Array.isArray(records) ? records : EMPTY;
+      const rows = projectionOf(all, selectedId);
       const byId = new Map(rows.map((record) => [record.id, record]));
       const tagCount = new Map();
       const topicCount = new Map();
@@ -901,9 +991,9 @@ window.__ModuleLoader__.load({
     };
 
     /** 经验图谱只连共享条件。 */
-    const ruleGraphOf = (rules) => {
+    const ruleGraphOf = (rules, selectedId) => {
       const all = Array.isArray(rules) ? rules : EMPTY;
-      const rows = all.slice(0, 60);
+      const rows = projectionOf(all, selectedId);
       const conditionCount = new Map();
       for (const rule of rows) {
         const seen = new Set();
@@ -950,15 +1040,16 @@ window.__ModuleLoader__.load({
     /** 关系图只画真实关系；节点沿用原始 id，位置由 id 决定。 */
     const MemoryGraph = (props) => {
       const primaryKind = props.primaryKind || 'memory';
-      const graph = React.useMemo(() => (props.graphOf || graphOf)(props.records), [props.records, props.graphOf]);
+      const selectedId = props.selectedId;
+      const graph = React.useMemo(() => (props.graphOf || graphOf)(props.records, selectedId), [props.records, props.graphOf, selectedId]);
       const [zoom, setZoom] = React.useState(1);
       const [pan, setPan] = React.useState({ x: 0, y: 0 });
       const [dragging, setDragging] = React.useState(false);
       const [hoveredId, setHoveredId] = React.useState('');
       const svgRef = React.useRef(null);
       const dragRef = React.useRef(null);
-      const selectedId = props.selectedId;
       const labelSet = graph.people <= 40;
+      const hubCount = graph.nodes.length - graph.people;
       const shownCount = Number.isInteger(graph.shown) ? graph.shown : graph.people;
       const totalCount = Number.isInteger(props.total) && props.total >= shownCount
         ? props.total
@@ -1036,7 +1127,7 @@ window.__ModuleLoader__.load({
         if (list.length === 0) return { x: 0, y: 0, width: 640, height: 472 };
         let minX = Infinity; let maxX = -Infinity; let minY = Infinity; let maxY = -Infinity;
         for (const node of list) {
-          const wide = node.kind === primaryKind && (graph.people <= 12 || node.id === selectedId);
+          const wide = node.kind === primaryKind && (graph.people <= 12 || hubCount === 0 || node.id === selectedId);
           const half = node.kind === primaryKind ? (wide ? 62 : 10) : 38;
           minX = Math.min(minX, node.x - half);
           maxX = Math.max(maxX, node.x + half);
@@ -1128,8 +1219,9 @@ window.__ModuleLoader__.load({
             : node.state ? (STAGE_TONE[node.state] || 'var(--dsw-alias-brand-primary)')
               : node.experimental ? 'var(--dsw-alias-state-warn-primary)' : 'var(--dsw-alias-brand-primary)';
           const busy = graph.people > 12;
-          const showLabel = active || hovered || near || !isPrimary || (isPrimary && labelSet && !busy);
-          const nameChars = active || hovered ? 15 : isPrimary ? 8 : 12;
+          /** 没有标签/主题 hub 时不能因为条目多就把名称全藏掉。 */
+          const showLabel = active || hovered || near || !isPrimary || (isPrimary && labelSet && (!busy || hubCount === 0));
+          const nameChars = active || hovered ? 15 : isPrimary ? (busy && hubCount === 0 ? 10 : 8) : 12;
           return h('g', {
             key: node.id,
             'data-node': 'true',
@@ -1165,8 +1257,6 @@ window.__ModuleLoader__.load({
             fontSize: isPrimary ? 8.5 : 10.5,
             fontWeight: isPrimary ? 400 : 600,
             opacity: active ? 0.95 : isPrimary ? 0.7 : 0.82,
-            paintOrder: 'stroke', stroke: 'var(--dsw-alias-bg-layer-1)', strokeWidth: 3,
-            strokeLinejoin: 'round',
           }, SHORT(node.label, nameChars)) : null,
           h('title', null, node.title || node.label),
           );
@@ -1205,7 +1295,7 @@ window.__ModuleLoader__.load({
       style: {
         position: 'absolute', top: '2px', left: props.on ? '18px' : '2px', width: '16px', height: '16px',
         borderRadius: '999px', background: props.on ? 'var(--dsw-alias-bg-base)' : 'var(--dsw-alias-label-secondary)',
-        transition: 'left 120ms ease',
+        transition: reduceMotionOf() ? 'none' : 'left 120ms ease',
       },
     }));
 
@@ -1275,7 +1365,22 @@ window.__ModuleLoader__.load({
     const evidenceTextOf = (row) => {
       if (typeof row === 'string') return row;
       if (!row || typeof row !== 'object') return '';
-      return typeof row.text === 'string' ? row.text : (typeof row.note === 'string' ? row.note : '');
+      for (const key of ['sourceExcerpt', 'excerpt', 'text', 'note']) {
+        if (typeof row[key] === 'string' && row[key].trim()) return row[key];
+      }
+      return '';
+    };
+    /** 样例和证据都带版本/核对信息，不拿「样例」二字占位。 */
+    const evidenceMetaOf = (row) => {
+      if (!row || typeof row !== 'object') return '';
+      const bits = [];
+      if (Number.isInteger(row.artifactVersion)) bits.push(`第 ${row.artifactVersion} 版`);
+      else if (typeof row.artifactVersion === 'string' && row.artifactVersion) bits.push(`第 ${row.artifactVersion} 版`);
+      if (typeof row.dimension === 'string' && row.dimension) bits.push(row.dimension);
+      if (row.verified === true) bits.push('已核对');
+      else if (row.verified === false) bits.push('未核对');
+      if (row.at) bits.push(EVO_DATE(row.at));
+      return bits.join(' · ');
     };
 
     const MemoryRow = (props) => {
@@ -1320,8 +1425,12 @@ window.__ModuleLoader__.load({
       const versions = Array.isArray(rule.learning?.versions) ? rule.learning.versions : EMPTY;
       const history = [
         ...checkpoints.map((row) => ({ at: row.at || row.updated || '', text: typeof row.text === 'string' ? row.text : '' })),
-        ...versions.map((row) => ({ at: row.at || row.updated || '', text: typeof row.title === 'string' ? row.title : '修改' })),
+        ...versions.map((row, index) => ({
+          at: row.at || row.updated || '',
+          text: `第 ${versions.length - index} 版${row.body ? ` ${SHORT(row.body, 42)}` : row.digest ? ` ${SHORT(String(row.digest), 16)}` : ''}`,
+        })),
       ].filter((row) => row.text).sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, 6);
+      const failureState = failureStateOf(props.evolution);
       const canManage = props.canManage && !props.busy;
       const act = (name, extra) => { if (canManage) props.onManage(name, extra || {}); };
       const actions = props.canManage
@@ -1373,8 +1482,24 @@ window.__ModuleLoader__.load({
           evidence.length === 0 && samples.length === 0
             ? '暂无学习依据'
             : [
-              ...evidence.slice(0, 3).map((row, index) => h('div', { key: `e${index}` }, evidenceTextOf(row))),
-              ...samples.slice(0, 2).map((row, index) => h('div', { key: `s${index}` }, evidenceTextOf(row) || '样例')),
+              ...evidence.slice(0, 3).map((row, index) => {
+                const text = evidenceTextOf(row);
+                const meta = evidenceMetaOf(row);
+                return text
+                  ? h('div', { key: `e${index}`, style: { display: 'flex', flexDirection: 'column', gap: '1px' } },
+                    h('span', { style: { color: 'var(--dsw-alias-label-primary)', opacity: 0.8, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, text),
+                    meta ? h('span', null, meta) : null)
+                  : null;
+              }),
+              ...samples.slice(0, 2).map((row, index) => {
+                const text = evidenceTextOf(row);
+                const meta = evidenceMetaOf(row);
+                return text || meta
+                  ? h('div', { key: `s${index}`, style: { display: 'flex', flexDirection: 'column', gap: '1px' } },
+                    text ? h('span', { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, text) : null,
+                    meta ? h('span', null, meta) : null)
+                  : null;
+              }),
             ].filter(Boolean))
         : null;
       const historyPane = open === 'history'
@@ -1402,6 +1527,10 @@ window.__ModuleLoader__.load({
             h(StagePill, { state: rule.state }),
           ),
           h('div', { style: { fontSize: '12px', lineHeight: '1.55', opacity: 0.82 } }, usabilityOf(rule, props.evolution, props.memoryOn)),
+          failureState
+            ? h('div', { style: { ...PANEL_MUTED, color: failureState === 'current' ? 'var(--dsw-alias-state-warn-primary)' : undefined } },
+              failureState === 'current' ? '最近一次整理失败，现有经验未更新' : '以前有整理失败，最近一次已完成')
+            : null,
           actions,
         ),
         editor,
@@ -1431,9 +1560,14 @@ window.__ModuleLoader__.load({
       const [detailNote, setDetailNote] = React.useState('');
       const [busy, setBusy] = React.useState(false);
       const [showReason, setShowReason] = React.useState(false);
+      const [showSettings, setShowSettings] = React.useState(false);
+      const [display, setDisplay] = React.useState({ ...DISPLAY_DEFAULTS });
+      const [hubFilter, setHubFilter] = React.useState(null);
       const alive = React.useRef(true);
       const generation = React.useRef(0);
       const scopeRef = React.useRef('');
+      /** 先算出当前范围键，显示设置的读取/落盘都按它来，不能等后面的派生变量。 */
+      const selectedKey = data && data.selected && data.selected.key ? data.selected.key : '';
       React.useEffect(() => {
         alive.current = true;
         return () => { alive.current = false; };
@@ -1470,6 +1604,23 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => { load(); }, [sessionId]);
 
+      /** 显示设置跟着当前项目走；换项目或换范围时重新读。 */
+      React.useEffect(() => {
+        setDisplay(readDisplaySettings(selectedKey));
+        setShowSettings(false);
+        setHubFilter(null);
+      }, [selectedKey]);
+      React.useEffect(() => {
+        if (display.graph) return;
+        setMemoryView('list');
+        setEvolutionView('list');
+      }, [display.graph]);
+      const setDisplayFlag = (name, value) => {
+        const next = { ...display, [name]: value === true };
+        setDisplay(next);
+        writeDisplaySettings(selectedKey, next);
+      };
+
       React.useEffect(() => {
         if (typeof window === 'undefined') return undefined;
         const onKey = (event) => { if (event.key === 'Escape') { event.stopPropagation(); props.onClose(); } };
@@ -1502,7 +1653,6 @@ window.__ModuleLoader__.load({
       const records = selected && Array.isArray(selected.records) ? selected.records : EMPTY;
       const total = selected && selected.stats && Number.isInteger(selected.stats.total) ? selected.stats.total : records.length;
       const currentKey = current ? current.key : '';
-      const selectedKey = selected ? selected.key : '';
       const control = selected && selected.control
         ? selected.control
         : (current && selected && selected.key === current.key && current.control ? current.control : { enabled: true });
@@ -1564,14 +1714,7 @@ window.__ModuleLoader__.load({
         else if (rules.length === 0) activityText = countsUnknown ? '等待可学习的反馈' : '还没有整理出经验';
         else activityText = '暂无整理记录';
       }
-      const filtered = React.useMemo(() => {
-        const needle = query.trim().toLowerCase();
-        if (!needle) return records;
-        return records.filter((record) => {
-          const tags = Array.isArray(record.tags) ? record.tags.join(' ') : '';
-          return `${record.title} ${record.summary} ${tags} ${record.topicKey || ''} ${KIND_LABEL[record.kind] || ''}`.toLowerCase().includes(needle);
-        });
-      }, [records, query]);
+      const filtered = React.useMemo(() => filterRecords(records, query, hubFilter), [records, query, hubFilter]);
       const filteredRules = React.useMemo(() => {
         if (stage === 'all') return rules;
         return rules.filter((rule) => rule.state === stage);
@@ -1583,6 +1726,19 @@ window.__ModuleLoader__.load({
         if (node.kind !== 'memory') return;
         setSelectedMemory(node.id);
         setSelectedRule('');
+      };
+      /** 点 hub 用精确值筛选，标签不发散成子串匹配。 */
+      const onPickHub = (node) => {
+        if (!node || typeof node.id !== 'string') return;
+        const cut = node.id.indexOf(':');
+        const kind = cut > 0 ? node.id.slice(0, cut) : '';
+        const value = cut > 0 ? node.id.slice(cut + 1) : '';
+        if ((kind !== 'tag' && kind !== 'topic') || !value) return;
+        setHubFilter({ kind, value, display: kind === 'tag' ? `#${value}` : value });
+        setQuery('');
+        setSelectedMemory('');
+        setSelectedRule('');
+        setMemoryView('list');
       };
       const onPickRuleNode = (node) => {
         if (node.kind !== 'rule') return;
@@ -1655,9 +1811,34 @@ window.__ModuleLoader__.load({
           style: { height: '30px', maxWidth: '190px', padding: '0 8px', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '8px', background: 'var(--dsw-alias-bg-layer-2)', color: 'inherit', fontSize: '12px' },
         },
         data && Array.isArray(data.scopes) ? data.scopes.map((scope) => h('option', { key: scope.key, value: scope.key }, scope.kind === 'global' ? '全局' : scope.label)) : null) : null,
+        h('button', {
+          type: 'button', 'aria-expanded': showSettings, 'aria-label': '显示设置',
+          onClick: () => setShowSettings((value) => !value),
+          style: {
+            ...PANEL_LINK, height: '30px', padding: '0 9px', borderRadius: '8px',
+            border: '1px solid var(--dsw-alias-border-l1)',
+            background: showSettings ? 'var(--dsw-alias-bg-layer-2)' : 'transparent',
+            opacity: showSettings ? 0.92 : 0.68,
+          },
+        }, '显示设置'),
         closeButton,
       ),
       );
+
+      const displayToggleRow = (label, key) => h('div', {
+        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', minHeight: '32px' },
+      },
+      h('span', { style: { fontSize: '12px', lineHeight: '1.4' } }, label),
+      h(Toggle, {
+        ariaLabel: label, on: display[key] === true, busy: !selectedKey,
+        onClick: selectedKey ? () => setDisplayFlag(key, display[key] !== true) : undefined,
+      }));
+      const displayBar = showSettings
+        ? h('div', {
+          role: 'group', 'aria-label': '显示设置',
+          style: { display: 'flex', flexDirection: 'column', padding: '4px 18px 8px', borderBottom: '1px solid var(--dsw-alias-border-l1)', flex: '0 0 auto' },
+        }, displayToggleRow('启用图谱', 'graph'), displayToggleRow('启用记忆宫殿', 'palace'))
+        : null;
 
       const memorySwitch = h('div', { style: { ...PANEL_CARD, flex: '1 1 300px', display: 'flex', flexDirection: 'column', gap: '4px', padding: '9px 11px' } },
         h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' } },
@@ -1706,7 +1887,7 @@ window.__ModuleLoader__.load({
       const memoryList = loading
         ? h('div', { style: { ...PANEL_MUTED, padding: '12px 4px' } }, '读取中…')
         : filtered.length === 0
-          ? h('div', { style: { ...PANEL_MUTED, padding: '12px 4px' } }, query ? '没有匹配的记忆' : '还没有记忆')
+          ? h('div', { style: { ...PANEL_MUTED, padding: '12px 4px' } }, query || hubFilter ? '没有匹配的记忆' : '还没有记忆')
           : filtered.map((record) => h(MemoryRow, {
             key: record.id, record, active: record.id === selectedMemory,
             onClick: () => { setSelectedMemory(record.id); setSelectedRule(''); },
@@ -1752,7 +1933,9 @@ window.__ModuleLoader__.load({
           },
         }, button('list', '列表'), button('graph', '图谱'));
       };
-      const memoryToggle = viewToggleOf(memoryView, setMemoryView, '记忆视图');
+      const memoryToggle = display.graph ? viewToggleOf(memoryView, setMemoryView, '记忆视图') : null;
+      const memoryViewActive = graphViewOf(display.graph, memoryView);
+      const evolutionViewActive = graphViewOf(display.graph, evolutionView);
 
       const memoryListPane = h('div', {
         style: {
@@ -1763,21 +1946,17 @@ window.__ModuleLoader__.load({
         style: { ...PANEL_CARD, padding: 0, minHeight: 0, overflow: 'hidden', display: 'flex' },
       },
       h(MemoryGraph, {
-        records: filtered, total: query ? filtered.length : total,
+        records: filtered, total: hubFilter ? filtered.length : total,
         selectedId: selectedMemory, onPick: onPickNode,
-        onPickHub: (node) => {
-          setSelectedMemory('');
-          setSelectedRule('');
-          setQuery(node.kind === 'tag' ? node.label.replace(/^#/, '') : node.label);
-          setMemoryView('list');
-        },
-        emptyText: query ? '没有匹配的记忆' : '还没有记忆', ariaLabel: '记忆关系图',
+        onPickHub,
+        emptyText: query || hubFilter ? '没有匹配的记忆' : '还没有记忆', ariaLabel: '记忆关系图',
         legend: '大点 标签/主题 · 小点 记忆 · 虚线 关联 · 点标签筛选，点记忆看正文',
       }));
       const memoryTab = h('div', { role: 'tabpanel', 'aria-label': '记忆', style: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: '9px' } },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flex: '0 0 auto' } },
           h('input', {
-            value: query, onChange: (event) => setQuery(event.target.value),
+            value: hubFilter ? hubFilter.display : query,
+            onChange: (event) => { setHubFilter(null); setQuery(event.target.value); },
             placeholder: '搜索标题或标签', 'aria-label': '搜索记忆',
             style: { ...PANEL_INPUT, width: 'auto', flex: '1 1 0', minWidth: 0 },
           }),
@@ -1789,7 +1968,7 @@ window.__ModuleLoader__.load({
             gridTemplateColumns: selectedMemory ? 'minmax(0, 1fr) minmax(280px, 340px)' : 'minmax(0, 1fr)',
           },
         },
-        memoryView === 'graph' ? memoryGraphPane : memoryListPane,
+        memoryViewActive === 'graph' ? memoryGraphPane : memoryListPane,
         memoryDetail),
       );
 
@@ -1815,7 +1994,7 @@ window.__ModuleLoader__.load({
             fontVariantNumeric: 'tabular-nums',
           },
         }, `${label} ${countText(key)}`)),
-        h('span', { style: { marginLeft: 'auto' } }, viewToggleOf(evolutionView, setEvolutionView, '自进化视图')),
+        h('span', { style: { marginLeft: 'auto' } }, display.graph ? viewToggleOf(evolutionView, setEvolutionView, '自进化视图') : null),
       );
 
       const stageLabel = (stageFilters.find(([key]) => key === stage) || ['all', '全部'])[1];
@@ -1892,7 +2071,7 @@ window.__ModuleLoader__.load({
             gridTemplateColumns: selectedRuleRow ? 'minmax(0, 1fr) minmax(280px, 340px)' : 'minmax(0, 1fr)',
           },
         },
-        evolutionView === 'graph' ? evolutionGraphPane : evolutionListPane,
+        evolutionViewActive === 'graph' ? evolutionGraphPane : evolutionListPane,
         evolutionDetailPane),
       );
 
@@ -1914,6 +2093,7 @@ window.__ModuleLoader__.load({
       if (!data) {
         return shell([
           header,
+          displayBar,
           h('div', { style: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '10px', color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' } },
             h('span', null, loading ? '读取中…' : '读不到记忆'),
             loading || !note ? null : h(Action, { onClick: () => load() }, '重试'),
@@ -1922,7 +2102,7 @@ window.__ModuleLoader__.load({
         ]);
       }
 
-      return shell([header, switchBar, content]);
+      return shell([header, displayBar, switchBar, content]);
     };
 
     /** 面板浮层。 */
@@ -1972,7 +2152,7 @@ window.__ModuleLoader__.load({
 
     // 测试缝：Node 里验引用投影，浏览器里没有任何副作用。
     if (typeof globalThis.__LITE_MEMORY_TEST__ === 'function') {
-      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph });
+      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf });
     }
 
     return {
