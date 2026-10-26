@@ -9,9 +9,36 @@ export const ANCHOR_STATUSES = ['unbound', 'proposed', 'active', 'continuable', 
 export const TASK_LIMITS = { sessions: 8, episodes: 12, sourceMessages: 8, idleMs: 7 * 24 * 60 * 60 * 1000, indexBytes: 600 };
 
 const SWITCH_WORDS = /(改做|改为|改到|改成|换个|换一个|换成|转到|现在做|接下来做|新做|另做|开始做|去做)/;
-const CONTINUE_WORDS = /(再做一期|下一期|再来一期|再开一期|续一集|再拍一期)/;
+const CONTINUE_WORDS = /(继续|再做一期|下一期|再来一期|再开一期|续一集|再拍一期)/;
 const REVISE_WORDS = /(再改一下|改一版|再改改|调整一下|这版再|继续改)/;
 const THANKS_WORDS = /^(谢谢|多谢|谢了|辛苦了|thanks|thank\s*you)[!！。.～~\s]*$/i;
+const REFERENCE_WORDS = /(这个|这条|这次|上次|之前|刚才|上面|前面|它|这里|继续|接着|还是|同样|再改)/;
+const TASK_STOP = new Set(['一个','一下','这个','那个','我们','你们','他们','什么','怎么','可以','需要','帮我','帮忙','请问','然后','现在','还是','就是','没有','不是','以及','关于','进行','使用','问题','任务','内容','时候','已经','如果','因为','所以','但是','而且','或者','这些','那些','这样','那样','一下','一点','一些']);
+function taskTerms(value) {
+  const plain = text(value, 200).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  const terms = new Set();
+  for (const word of plain.match(/[a-z][a-z0-9_-]{2,}/g) || []) terms.add(word);
+  const runs = plain.match(/[\u4e00-\u9fff]+/g) || [];
+  for (const run of runs) {
+    if (TASK_STOP.has(run)) continue;
+    for (let i = 0; i + 2 <= run.length; i += 1) {
+      const gram = run.slice(i, i + 2);
+      if (!TASK_STOP.has(gram)) terms.add(gram);
+    }
+  }
+  return terms;
+}
+/** 继承旧任务要有正面证据：新要求与本轮任务没有实质词交集时，先按新任务处理。 */
+export function looksLikeNewTask(query, previousText) {
+  const current = text(query, 200);
+  if (!current || isThanks(current) || isContinuation(current) || isRevision(current)) return false;
+  if (REFERENCE_WORDS.test(current)) return false;
+  const next = taskTerms(current);
+  const previous = taskTerms(previousText);
+  if (!next.size || !previous.size) return false;
+  for (const term of next) if (previous.has(term)) return false;
+  return true;
+}
 
 export function emptyTasks() {
   return { revision: 0, defaults: null, sessions: {}, episodes: {} };
@@ -115,6 +142,7 @@ export function normalizeTasks(raw) {
       status: ANCHOR_STATUSES.includes(episode.status) ? episode.status : 'unbound',
       transitionId: text(episode.transitionId, 80),
       previousEpisodeId: text(episode.previousEpisodeId, 80),
+      ...(text(episode.taskText, 200) ? { taskText: text(episode.taskText, 200) } : {}),
       createdAt: text(episode.createdAt, 40),
       updatedAt: text(episode.updatedAt, 40),
     };
@@ -173,7 +201,7 @@ function anchorOf(episode, { sessionId, batchKey, messageIds, status, bindingRev
   };
 }
 
-function createEpisode(tasks, { taskKind, seriesId, phase, status, transitionId, previousEpisodeId, now }) {
+function createEpisode(tasks, { taskKind, seriesId, phase, status, transitionId, previousEpisodeId, taskText, now }) {
   const episodeId = episodeIdFor(transitionId);
   const at = new Date(now).toISOString();
   const episode = {
@@ -184,6 +212,7 @@ function createEpisode(tasks, { taskKind, seriesId, phase, status, transitionId,
     status,
     transitionId,
     ...(previousEpisodeId ? { previousEpisodeId } : {}),
+    ...(text(taskText, 200) ? { taskText: text(taskText, 200) } : {}),
     createdAt: at,
     updatedAt: at,
   };
@@ -256,6 +285,7 @@ export function routeTask(tasksInput, input = {}) {
         phase: input.selection.phase || 'brief',
         status: 'proposed',
         transitionId,
+        taskText: query,
         now,
       });
     }
@@ -283,6 +313,7 @@ export function routeTask(tasksInput, input = {}) {
       status,
       transitionId,
       previousEpisodeId: currentEpisode.episodeId,
+      taskText: query,
       now,
     });
     const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status, bindingRevision: tasks.revision, now });
@@ -310,6 +341,7 @@ export function routeTask(tasksInput, input = {}) {
       phase: 'brief',
       transitionId,
       previousEpisodeId: currentEpisode ? currentEpisode.episodeId : '',
+      taskText: query,
       now,
     });
     const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status, bindingRevision: tasks.revision, now });
@@ -327,6 +359,7 @@ export function routeTask(tasksInput, input = {}) {
       status: 'active',
       phase: 'brief',
       transitionId,
+      taskText: query,
       now,
     });
     const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status: 'active', bindingRevision: tasks.revision, now });
@@ -335,6 +368,28 @@ export function routeTask(tasksInput, input = {}) {
   }
 
   if (current && currentEpisode) {
+    /** 没有切换词也不等于同一任务：与上一轮要求没有实质交集时，撤销旧范围。 */
+    if (currentEpisode.status !== 'unbound' && looksLikeNewTask(query, currentEpisode.taskText || '')) {
+      const transitionId = transitionIdFor(batchKey, tasks.revision);
+      const existing = Object.values(tasks.episodes).find((episode) => episode.transitionId === transitionId);
+      const episode = existing || createEpisode(tasks, {
+        status: 'unbound',
+        phase: 'brief',
+        transitionId,
+        previousEpisodeId: currentEpisode.episodeId,
+        taskText: query,
+        now,
+      });
+      const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status: 'unbound', bindingRevision: tasks.revision, now });
+      tasks.sessions[sessionId] = anchor;
+      return { tasks, anchor, episode, decision: { kind: 'unbound', anchor, reason: 'new_task' }, changed: true };
+    }
+    /** 任务文本只作后续「是否换任务」的比对材料，不改锚点时间，免得把正在整理的这期作废。 */
+    const nextTaskText = text(query, 200);
+    if (nextTaskText && currentEpisode.taskText !== nextTaskText) {
+      currentEpisode.taskText = nextTaskText;
+      tasks.episodes[currentEpisode.episodeId] = currentEpisode;
+    }
     const anchor = anchorOf(currentEpisode, {
       sessionId, batchKey, messageIds,
       status: currentEpisode.status,
@@ -355,6 +410,7 @@ export function routeTask(tasksInput, input = {}) {
       phase: 'brief',
       status: 'active',
       transitionId,
+      taskText: query,
       now,
     });
     const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status: 'active', bindingRevision: tasks.revision, now });
@@ -365,7 +421,7 @@ export function routeTask(tasksInput, input = {}) {
   /** 新会话/新任务、无法确定栏目：只建无正文作品壳，不猜 taskKind/seriesId。 */
   const transitionId = transitionIdFor(batchKey, tasks.revision);
   const existing = Object.values(tasks.episodes).find((episode) => episode.transitionId === transitionId);
-  const episode = existing || createEpisode(tasks, { status: 'unbound', phase: 'brief', transitionId, now });
+  const episode = existing || createEpisode(tasks, { status: 'unbound', phase: 'brief', transitionId, taskText: query, now });
   const anchor = anchorOf(episode, { sessionId, batchKey, messageIds, status: 'unbound', bindingRevision: tasks.revision, now });
   tasks.sessions[sessionId] = anchor;
   return { tasks, anchor, episode, decision: { kind: 'unbound', anchor }, changed: true };
@@ -392,7 +448,7 @@ export function decideRead(input = {}) {
     const ranges = (Array.isArray(input.ranges) ? input.ranges : []).filter(Boolean).slice(0, 3);
     return ranges.length
       ? { kind: 'index', ranges, reason: 'unbound' }
-      : { kind: 'clarify', reason: 'no_range' };
+      : { kind: 'none', reason: 'no_range' };
   }
   if (anchor.status === 'ambiguous') {
     const ranges = (Array.isArray(input.ranges) ? input.ranges : []).filter(Boolean).slice(0, 3);

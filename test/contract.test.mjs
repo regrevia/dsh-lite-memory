@@ -148,15 +148,19 @@ assert.ok(hits.count >= 1);
 assert.ok(hits.chars > 0);
 const hitText = render('memory_search', {}, hits);
 assert.match(hitText, new RegExp(`^memory · 命中 ${hits.count} 条 · 引用 ${hits.chars} 字\\n- mem_`));
-assert.match(hitText, /第 3 版/);
+assert.match(hitText, /第 1 版/);
+/** 「发版当天」这类自由文本条件没有可信上下文，不能当成适用条目塞给模型。 */
 const miss = await exec('memory_search', { query: '完全没有出现过的主题' });
 assert.equal(miss.count, 0);
 assert.equal(render('memory_search', {}, miss), 'memory · 没有命中');
 
 const read = await exec('memory_read', { id: saved.id });
-assert.equal(read.body, '第一步\n第二步');
-assert.equal(read.revision, 3);
-assert.match(render('memory_read', {}, read), new RegExp(`^memory · 「发布顺序」（发版当天） · ${saved.id} · 第 3 版`));
+assert.equal(read.status, 'needs_context');
+assert.equal(read.body, '');
+const plain = await exec('memory_read', { id: distinct.id });
+assert.equal(plain.body, '另一条');
+assert.equal(plain.revision, 1);
+assert.match(render('memory_read', {}, plain), new RegExp(`^memory · 「发布顺序是啥」 · ${distinct.id} · 第 1 版`));
 
 // 没点明归档还是彻底忘掉时不动盘，先返回待确认
 const undecided = await exec('memory_forget', { id: distinct.id });

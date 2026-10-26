@@ -213,3 +213,72 @@ test('R18 自由措辞不能把未注册栏目变成已绑定', () => {
   assert.equal(routed.anchor.status, 'unbound');
   assert.equal(routed.anchor.seriesId, undefined);
 });
+
+test('R12 无切换词的新任务撤销旧作品绑定，不继承栏目和规则', () => {
+  const sessionId = 'sess-r12';
+  let tasks = anchor.emptyTasks();
+  const first = anchor.routeTask(tasks, {
+    sessionId,
+    batchKey: 'rb_first',
+    messageIds: ['m1'],
+    query: '帮我把这期口播视频的开头改一下',
+    selection: { seriesId: '口播', taskKind: '口播视频' },
+    now: 1000,
+  });
+  assert.equal(first.anchor.status, 'proposed');
+  const bound = anchor.applySelection(first.tasks, { sessionId, selection: { seriesId: '口播' }, batchKey: 'rb_first', messageIds: ['m1'], now: 1500 });
+  assert.equal(bound.anchor.status, 'proposed');
+  const active = bound.tasks.sessions[sessionId];
+  active.status = 'active';
+  tasks = bound.tasks;
+  const next = anchor.routeTask(tasks, {
+    sessionId,
+    batchKey: 'rb_next',
+    messageIds: ['m2'],
+    query: '帮我排查 PostgreSQL 连接超时',
+    registeredSeries: ['口播'],
+    now: 2000,
+  });
+  assert.equal(next.anchor.status, 'unbound');
+  assert.equal(next.decision.kind, 'unbound');
+  assert.equal(next.decision.reason, 'new_task');
+  assert.ok(next.episode.previousEpisodeId);
+
+  /** 新任务已撤销旧绑定：旧栏目规则不能再自动进入这一步。 */
+  const read = anchor.decideRead({
+    enabled: true,
+    identityConfirmed: true,
+    anchor: next.anchor,
+    ranges: [{ seriesId: '口播', taskKind: '口播视频', reason: '旧任务' }],
+  });
+  assert.equal(read.kind, 'index');
+  assert.equal(read.rules, undefined);
+});
+
+test('R13 继续改/接着做仍继承同一任务', () => {
+  let tasks = anchor.emptyTasks();
+  const first = anchor.routeTask(tasks, {
+    sessionId: 'sess-r13',
+    batchKey: 'rb_a',
+    messageIds: ['m1'],
+    query: '帮我把这期口播视频的开头改一下',
+    selection: { seriesId: '口播' },
+    now: 1000,
+  });
+  tasks = first.tasks;
+  const next = anchor.routeTask(tasks, {
+    sessionId: 'sess-r13',
+    batchKey: 'rb_b',
+    messageIds: ['m2'],
+    query: '继续改，节奏再快一点',
+    now: 2000,
+  });
+  assert.equal(next.anchor.status, 'continuable');
+  assert.equal(next.decision.kind, 'continuation');
+});
+
+test('R14 无候选栏目时返回 none，不再要求选栏目', () => {
+  const read = anchor.decideRead({ enabled: true, identityConfirmed: true, anchor: null, ranges: [] });
+  assert.equal(read.kind, 'none');
+  assert.equal(read.reason, 'no_range');
+});

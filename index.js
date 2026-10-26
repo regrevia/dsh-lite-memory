@@ -90,6 +90,9 @@ function memoryEnabledFor(execution) {
   return memoryEnabled(scopeOf(cwdOf(execution)));
 }
 
+/** 总开关关掉时这组工具对模型不可见，也不接受执行。 */
+const MEMORY_TOOLS = ['memory_save', 'memory_suggest', 'memory_search', 'memory_read', 'memory_forget'];
+
 const REMOTE_PATH = '/lite-memory';
 
 /** 引用的归属会话：界面上那句「N 条记忆引用」按它分开存。 */
@@ -770,6 +773,29 @@ function renderRecallCard(card) {
 export function apply(ctx, config) {
   const tools = ctx.tools;
   const getService = (name) => (typeof ctx.get === 'function' ? ctx.get(name) : undefined);
+
+  /** 关掉记忆的会话看不到这组工具；每次进入新步骤前按当前开关同步一次。 */
+  const hiddenTools = new WeakMap();
+  const memoryOnForAgent = (agent) => {
+    try {
+      return memoryEnabled(scopeOf(cwdOf({ agent })));
+    } catch {
+      return true;
+    }
+  };
+  const syncMemoryTools = (agent) => {
+    const scoped = agent?.ctx?.tools;
+    if (!scoped) return;
+    const dispose = hiddenTools.get(agent);
+    if (memoryOnForAgent(agent)) {
+      if (!dispose) return;
+      hiddenTools.delete(agent);
+      try { dispose(); } catch { /* scope already gone */ }
+      return;
+    }
+    if (dispose) return;
+    try { hiddenTools.set(agent, scoped.restrict({ deny: MEMORY_TOOLS })); } catch { /* no global tools to mask */ }
+  };
 
   /* ---------------- 自动召回：策略、冻结快照、任务窗口与请求预算 ---------------- */
 
@@ -1485,11 +1511,14 @@ export function apply(ctx, config) {
       }
       const scope = resolved.scope;
       const context = resolved.context;
-      const hits = search(scope, args.query, args.limit ?? 3, {
+      /** 检索只列当前任务真能用的条目；条件未知或不适用就只留状态，不给索引行。 */
+      const hits = search(scope, args.query, (args.limit ?? 3) + 3, {
         context,
         history: args.history === true,
         allowExperimental: resolved.experimental === true,
-      });
+      }).filter((item) => (item.archived || item.status === 'ok')
+        && (!item.ownerProjectId || item.ownerProjectId === scope.key))
+        .slice(0, args.limit ?? 3);
       const shown = hits.map((item) => view.toModelView(item, 'search', { status: item.status || (item.archived ? 'archived' : 'ok') }));
       const valueOf = (kept) => {
         const rendered = renderIndex(shown.slice(0, kept));
@@ -1578,7 +1607,18 @@ export function apply(ctx, config) {
       if (args.view === 'links') {
         const found = readLinks(scope, args.id, { context, allowExperimental });
         if (!found) throw new Error(`没有 ${args.id} 这条记忆`);
-        const rows = found.links.map((link) => (link.status === 'invalid'
+        if (found.status !== 'ok') {
+          const withheld = { id: found.id, scope: found.scope, status: found.status, links: '' };
+          if (win) {
+            const bytes = jsonBytes(withheld);
+            if (!affordable(win, bytes)) return { id: '', scope: '', status: 'budget_exhausted' };
+            win.bytes += bytes;
+            win.reads += 1;
+          }
+          return withheld;
+        }
+        const rows = found.links.filter((link) => link.status === 'invalid' || link.status === 'ok')
+          .map((link) => (link.status === 'invalid'
           ? `- ${link.id} · 已失效`
           : `- 「${link.title}」${link.scope === 'global' ? ' [全局]' : ''} · ${link.id} · 第 ${link.revision} 版`));
         const text = rows.join('\n') || '(无)';
@@ -1607,7 +1647,8 @@ export function apply(ctx, config) {
       if (record.origin === 'project_evolution' && (learningState.state === 'paused' || learningState.blockedReason)) {
         return { id: record.id, title: record.title, when: record.when || '', revision: record.revision || 1, scope: record.scope, status: 'needs_context', body: '' };
       }
-      if (record.origin === 'project_evolution' && record.status !== 'ok') {
+      /** 条件未知或不适用的条目只报状态：正文绝不能绕过自动召回的门槛。 */
+      if (record.status !== 'ok') {
         return { id: record.id, title: record.title, when: record.when || '', revision: record.revision || 1, scope: record.scope, status: record.status === 'needs_context' ? 'needs_context' : 'not_applicable', body: '' };
       }
       const revision = record.revision || 1;
@@ -1758,9 +1799,23 @@ export function apply(ctx, config) {
     }), 'lite-memory: recall context');
   }
 
+  /** 执行入口再拦一次：工具若已出现在旧快照里，调用时也不放行。 */
+  if (typeof ctx.on === 'function') ctx.on('agent/created', (payload) => {
+    const agent = payload?.agent;
+    if (!agent?.ctx?.tools) return;
+    try {
+      agent.ctx.effect(() => agent.ctx.tools.guard((execution) => {
+        if (!MEMORY_TOOLS.includes(execution?.name)) return undefined;
+        return memoryOnForAgent(agent) ? undefined : '本项目记忆已关闭，先在面板打开';
+      }), 'lite-memory: tool guard');
+    } catch { /* older host without guards */ }
+    syncMemoryTools(agent);
+  });
+
   if (typeof ctx.on === 'function') ctx.on('agent/pre-step', async (payload, next) => {
     const startedAt = Date.now();
     const agent = payload?.agent;
+    syncMemoryTools(agent);
     let decision;
     try {
       decision = await next();

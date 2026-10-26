@@ -210,6 +210,27 @@ test('S02 符号链接、非 Git 目录、嵌套仓库各归各的', () => {
   assert.notEqual(scopeOf(nested).key, scopeOf(repo).key);
 });
 
+test('S03 配置的项目根只覆盖自己的子树，不吞别的目录', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-state-config-'));
+  dirs.push(root);
+  const sub = path.join(root, 'packages', 'app');
+  fs.mkdirSync(sub, { recursive: true });
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-state-outside-'));
+  dirs.push(outside);
+  const config = path.join(memoryRoot(), 'config.json');
+  fs.mkdirSync(path.dirname(config), { recursive: true });
+  fs.writeFileSync(config, JSON.stringify({ projectRoot: root }));
+  try {
+    assert.equal(resolveRoot(sub).root, fs.realpathSync(root));
+    assert.equal(resolveRoot(sub).source, 'configured');
+    assert.equal(scopeOf(sub).key, scopeOf(root).key);
+    assert.notEqual(resolveRoot(outside).source, 'configured');
+    assert.notEqual(scopeOf(outside).key, scopeOf(root).key);
+  } finally {
+    fs.rmSync(config, { force: true });
+  }
+});
+
 test('P04 Git 查询失败不冒充已确认工程，不用 cwd 兜底学习', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-state-gitfail-'));
   dirs.push(dir);
