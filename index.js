@@ -1081,6 +1081,7 @@ export function apply(ctx, config) {
 
   /** 读决策 → 一段短提示：未绑定只给栏目索引，已绑定才给规则正文。 */
   function renderExperiment(scope, decision, context, held, win) {
+    if (held && typeof held === 'object') held.validUntil = '';
     if (!experimentStillCurrent(scope, held)) return '';
     if (!decision || decision.kind === 'none') return '';
     if (decision.kind === 'conflict') {
@@ -1099,6 +1100,7 @@ export function apply(ctx, config) {
     const unknown = [];
     const byTopic = new Map();
     let conflict = false;
+    let earliestTrial = 0;
     for (const record of index.entries) {
       if (record.origin !== 'project_evolution') continue;
       if (record.ownerProjectId && record.ownerProjectId !== scope.key) continue;
@@ -1107,6 +1109,10 @@ export function apply(ctx, config) {
       if (learning.state !== 'active' && learning.state !== 'trial') continue;
       /** 试用到期、暂停或身份失效：自动注入与检索、读取用同一档可用性，不能各判各的。 */
       if (!view.experimentalUsable(record, Date.now())) continue;
+      if (learning.state === 'trial') {
+        const until = Date.parse(String(learning.trialUntil || ''));
+        if (Number.isFinite(until) && (!earliestTrial || until < earliestTrial)) earliestTrial = until;
+      }
       const status = view.statusOf(record, context);
       if (status === 'needs_context') { unknown.push(record); continue; }
       if (status !== 'ok') continue;
@@ -1144,6 +1150,8 @@ export function apply(ctx, config) {
       return chargeExperiment(win, `有些实验规则的适用条件还没确认，先别当成本轮依据：\n${nameLine}`);
     }
     if (!lines.length) return '';
+    /** 本轮输出带上了哪条试用规则，就把最早到期时间一起冻结；请求中途到期也要停。 */
+    if (held && earliestTrial) held.validUntil = new Date(earliestTrial).toISOString();
     const tail = held && held.contextId ? `\ncontextId=${held.contextId}` : '';
     return chargeExperiment(win, `${EXPERIMENT_RULES_HEADER}\n${lines.join('\n')}${tail}`);
   }
@@ -1252,7 +1260,7 @@ export function apply(ctx, config) {
     const contextId = anchor.contextIdFor(scope.key, batchKey, crypto.randomUUID().slice(0, 8));
     const created = {
       contextId, projectKey: scope.key, sessionId: win.sessionId, batchKey,
-      messageIds: win.messageIds.slice(), context: view.trustedContext(scope, {}),
+      messageIds: win.messageIds.slice(), query: trustedQueryOf(win), context: view.trustedContext(scope, {}),
       anchor: null, ranges: rangesOf(scope), decision: { kind: 'none' }, epoch: status.epoch, at: Date.now(),
     };
     win.experiment = created;
@@ -1260,9 +1268,17 @@ export function apply(ctx, config) {
     return contextId;
   }
 
+  /** 本轮真人消息是唯一可信的任务依据；模型自己写的 query 只用于检索词，不能拿来建绑定。 */
+  function trustedQueryOf(win) {
+    return win && typeof win.query === 'string' ? win.query : '';
+  }
+
   /** 前台绑定只升到 proposed：真正执行链还没发生，不冒充 active。 */
-  function bindSelection(execution, resolved, query) {
+  function bindSelection(execution, resolved) {
     const held = resolved.held;
+    if (!held || typeof held !== 'object') return { ok: false, status: 'needs_context', reason: '本轮还没有可核对的用户消息，先重新问一次当前任务' };
+    const query = held.query || trustedQueryOf(resolved.win);
+    if (!query) return { ok: false, status: 'needs_context', reason: '本轮还没有可核对的用户消息，先重新问一次当前任务' };
     const ranges = held.ranges || { series: [], taskKinds: [] };
     const hits = [];
     for (const value of ranges.series || []) if (query.includes(value)) hits.push({ seriesId: value });
@@ -1288,7 +1304,10 @@ export function apply(ctx, config) {
     resolved.context = held.context;
     const text = renderExperiment(resolved.scope, held.decision, held.context, held, resolved.win);
     const preparedState = prepared.get(execution && execution.agent);
-    if (preparedState) preparedState.experimentText = text;
+    if (preparedState) {
+      preparedState.experimentText = text;
+      preparedState.validUntil = held.validUntil || '';
+    }
     return { ok: true };
   }
 
@@ -1317,6 +1336,8 @@ export function apply(ctx, config) {
         if (!evolution || evolution.enabled !== true || evolution.compatible === false
           || (state.evolutionEpoch && String(evolution.epoch || '') !== state.evolutionEpoch)) evolutionText = '';
       }
+      /** 准备时还在试用期、请求中途到期：同一请求也不能再输出旧正文。 */
+      if (evolutionText && state.validUntil && Date.now() > Date.parse(String(state.validUntil))) evolutionText = '';
       return [evolutionText, state.text].filter(Boolean).join('\n\n');
     } catch {
       return '';
@@ -1348,6 +1369,8 @@ export function apply(ctx, config) {
           title: { type: 'string' },
           summary: { type: 'string' },
           when: { type: 'string' },
+          summaryShortened: { type: 'boolean' },
+          fullTextInBody: { type: 'boolean' },
           revision: { type: 'integer' },
           merged: { type: 'boolean' },
           changed: { type: 'boolean' },
@@ -1381,7 +1404,7 @@ export function apply(ctx, config) {
           ? `memory · 需要确认：「${value.title}」与已有条目相近${value.crossLayer ? '（在另一层）' : ''}${value.sameTopic ? '（同一主题槽位）' : ''}\n${value.similar}\n要更新它，用 id 重存；确实是另一条，加 resolution="distinct"`
           : value.changed === false
             ? `memory · unchanged ${withTag(value, `"${value.title}"`)} · ${value.id}`
-            : `memory · ${value.merged ? 'merged' : 'saved'} ${withTag(value, `"${value.title}"`)}${value.when ? `（${value.when}）` : ''} · ${value.id}${value.similar ? ` · 相近：${value.similar}` : ''}${value.archived ? ` · 已归档「${value.archived}」腾位` : ''}`,
+            : `memory · ${value.merged ? 'merged' : 'saved'} ${withTag(value, `"${value.title}"`)}${value.when ? `（${value.when}）` : ''} · ${value.id}${value.similar ? ` · 相近：${value.similar}` : ''}${value.archived ? ` · 已归档「${value.archived}」腾位` : ''}${value.fullTextInBody ? ' · 摘要超过 60 字，完整原句已存进正文' : ''}`,
       }],
     },
     execute: async (args, execution) => {
@@ -1459,6 +1482,8 @@ export function apply(ctx, config) {
         title: saved.record.title,
         summary: saved.record.summary,
         when: saved.record.when || '',
+        summaryShortened: Boolean(saved.draft?.summaryShortened),
+        fullTextInBody: Boolean(saved.draft?.fullTextInBody),
         revision: saved.record.revision || 1,
         merged: saved.merged,
         changed: !saved.noop,
@@ -1574,7 +1599,7 @@ export function apply(ctx, config) {
       const resolved = resolveRequestContext(execution, contextId);
       if (!resolved.ok) return { count: 0, chars: 0, text: resolved.reason, status: resolved.status || 'needs_context', refs: [] };
       if (wantsBind) {
-        const bound = bindSelection(execution, resolved, String(args.query || ''));
+        const bound = bindSelection(execution, resolved);
         if (!bound.ok) return { count: 0, chars: 0, text: bound.reason, status: bound.status || 'needs_context', refs: [] };
       }
       const scope = resolved.scope;
@@ -1597,18 +1622,17 @@ export function apply(ctx, config) {
         const rendered = renderIndex(shown.slice(0, kept));
         return { count: kept, chars: rendered.chars, text: rendered.text, status: 'ok', refs: refsOf(hits.slice(0, kept)) };
       };
-      /** 有匹配但适用条件未确认：明确说清为什么暂时不能用，不要伪装成「没有这条记忆」。 */
+      /** 有匹配但当前用不上：只说状态，不把标题、编号或旧规则递给模型，避免它被这些字面带偏。 */
       if (!hits.length && withheld.length) {
-        const lines = withheld.slice(0, 3).map((item) => {
-          const why = item.status === 'needs_context' ? '适用条件还没确认' : '当前任务不适用';
-          return `- 「${item.title}」 · ${item.id}：${why}`;
-        });
+        const unresolved = withheld.some((item) => item.status === 'needs_context');
         const value = {
           count: 0,
           chars: 0,
-          text: lines.join('\n'),
-          status: 'needs_context',
-          reasonCode: 'applicability_unresolved',
+          text: unresolved
+            ? '有相关的项目记忆，但适用条件还没确认。先说明当前任务，或确认这条记忆的适用范围。'
+            : '有相关的项目记忆，但当前任务明确不适用。',
+          status: unresolved ? 'needs_context' : 'ok',
+          reasonCode: unresolved ? 'applicability_unresolved' : 'not_applicable',
           refs: [],
         };
         if (win) {
@@ -1980,6 +2004,7 @@ export function apply(ctx, config) {
               previous.text = snapshot ? snapshot.text : '';
               previous.cards = snapshot ? snapshot.cards : [];
               previous.experimentText = experimentText;
+              previous.validUntil = win && win.experiment ? (win.experiment.validUntil || '') : '';
               previous.fingerprint = fingerprint;
             } else {
               clearPrepared(agent);
@@ -1992,13 +2017,15 @@ export function apply(ctx, config) {
       /** 工具模式也要开额度窗口：只是不自动注入，工具调用同样受每请求预算约束。 */
       const ids = fresh.map((message) => String(message?.id ?? '')).filter(Boolean).sort();
       const win = openWindow(agent, { sessionId, turn, messageIds: ids });
+      /** 工具模式也要记下本轮真人原话：只用于核对绑定，不自动注入。 */
+      const query = view.newestUserQuery(fresh).slice(0, RECALL_QUERY_CHARS);
+      if (win && query) win.query = query;
 
       if (recallMode() !== 'adaptive') {
         clearPrepared(agent);
         return decision;
       }
 
-      const query = view.newestUserQuery(fresh).slice(0, RECALL_QUERY_CHARS);
       if (!query) {
         clearPrepared(agent);
         return decision;
@@ -2044,6 +2071,7 @@ export function apply(ctx, config) {
       const state = {
         text: snapshot ? snapshot.text : '',
         experimentText: experiment ? experiment.text : '',
+        validUntil: experiment && experiment.held ? (experiment.held.validUntil || '') : '',
         cards: snapshot ? snapshot.cards : [],
         query,
         sessionId,

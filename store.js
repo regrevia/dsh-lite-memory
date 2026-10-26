@@ -297,21 +297,28 @@ export function normalizeDraft(source, options = {}) {
   const mayOmitTitle = Boolean(id);
   if (!title && !mayOmitTitle) throw new Error('标题为空');
   let summary = '';
+  let summaryShortened = false;
   const rawSummary = String(draft.summary ?? '').replace(/\s+/g, ' ').trim();
   if (rawSummary) {
     const check = validSummary(rawSummary);
     if (!check.ok) throw new Error(check.reason);
     summary = check.text;
+    summaryShortened = summary.length < rawSummary.length;
   } else if (has('summary')) {
     throw new Error('摘要为空');
   }
   /** 更新（带 id）与候选草稿允许省略摘要；省略表示保持原值，不拿标题补。 */
   const mayOmitSummary = options.requireSummary === false || Boolean(id);
   if (!summary && !mayOmitSummary) throw new Error('摘要为空');
-  const body = String(draft.body ?? '').trim();
+  /** 摘要只是索引行；首存时摘要放不下，就把完整原句存进正文，不能截掉一半还说保存成功。 */
+  let body = String(draft.body ?? '').trim();
+  const fullTextInBody = !id && !body && summaryShortened;
+  if (fullTextInBody) body = rawSummary;
   const bodyBytes = Buffer.byteLength(body);
   if (bodyBytes > LIMITS.entryBytes) {
-    throw new Error(`正文 ${bodyBytes} 字节，超过单条 ${LIMITS.entryBytes} 字节；只留原则、判断规则和触发条件`);
+    throw new Error(fullTextInBody
+      ? `摘要 ${rawSummary.length} 字，超过单条 ${LIMITS.entryBytes} 字节；先拆成两条写，别丢后半段`
+      : `正文 ${bodyBytes} 字节，超过单条 ${LIMITS.entryBytes} 字节；只留原则、判断规则和触发条件`);
   }
   const kind = has('kind') ? textField(draft.kind, 20, '类型') : 'note';
   if (kind && !KINDS.includes(kind)) throw new Error(`类型只能是 ${KINDS.join(' / ')}`);
@@ -334,6 +341,8 @@ export function normalizeDraft(source, options = {}) {
     summary,
     when,
     body,
+    summaryShortened,
+    fullTextInBody,
     kind: kind || 'note',
     tags,
     triggers,
@@ -346,7 +355,7 @@ export function normalizeDraft(source, options = {}) {
       title: has('title') && Boolean(title),
       summary: has('summary'),
       when: has('when'),
-      body: has('body'),
+      body: has('body') || fullTextInBody,
       kind: has('kind'),
       tags: has('tags'),
       triggers: triggers !== undefined,
@@ -802,8 +811,9 @@ function applyDraft(scope, index, source, now, options = {}) {
  * 结果经 index.__archived 回填，调用方在工具结果里点名。
  */
 function assertFits(scope, index, record) {
-  if (record.bytes > LIMITS.entryBytes) {
-    throw new Error(`这一条 ${record.bytes} 字节，超过单条 ${LIMITS.entryBytes} 字节；先精简正文`);
+  const bodyBytes = Buffer.byteLength(record.body || '');
+  if (bodyBytes > LIMITS.entryBytes) {
+    throw new Error(`正文 ${bodyBytes} 字节，超过单条 ${LIMITS.entryBytes} 字节；先精简正文`);
   }
   const size = recordSize(record);
   if (size > LIMITS.recordBytes) {
@@ -1058,8 +1068,11 @@ export function search(scope, query, limit = 4, options = {}) {
       const group = resolved.get(view.topicSlot(item));
       return Boolean(group && group.status === 'ok' && group.record && group.record.id !== item.id);
     };
-    const visible = rows.filter((row) => row.archived || !shadowed(row.item));
-    visible.sort((a, b) => b.score - a.score
+    const visible = rows.filter((row) => row.archived || !shadowed(row.item))
+      .map((row) => ({ ...row, usable: row.archived || view.statusOf(row.item, options.context || {}) === 'ok' }));
+    /** 先按「本轮能不能用」分组再按相关度：高相关但当前不适用的条目不能挤掉后面真正能用的。 */
+    visible.sort((a, b) => Number(b.usable) - Number(a.usable)
+      || b.score - a.score
       || Number(a.archived) - Number(b.archived)
       || String(b.item.lastUsed).localeCompare(String(a.item.lastUsed)));
     const chosen = visible.slice(0, limit);

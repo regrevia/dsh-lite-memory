@@ -296,7 +296,7 @@ const scopeOf = (dir) => store.scopeOf(dir);
   assert.equal((value.refs || []).some((ref) => ref.id === id), false);
 }
 
-/* L11：带本请求 contextId 才能绑定；绑定后只升到 proposed。 */
+/* L11：真人原话点名栏目就直接生效；工具绑定仍只认这句原话。 */
 {
   const dir = mkdir('bind');
   const scope = scopeOf(dir);
@@ -305,7 +305,7 @@ const scopeOf = (dir) => store.scopeOf(dir);
   const runtime = boot();
   const agent = makeAgent('a-bind', dir);
   const sig = signal();
-  await runtime.preStep({ agent, signal: sig, turn: 't1' }, enter(human('这期怎么开头')));
+  await runtime.preStep({ agent, signal: sig, turn: 't1' }, enter(human('这期口播怎么开头')));
   const held = runtime.debug.windowOf(agent).experiment;
   assert.ok(held && held.contextId, 'context leaked');
   const value = await runtime.exec('memory_search', { query: '口播', contextId: held.contextId, bindForRequest: true }, agent);
@@ -313,8 +313,28 @@ const scopeOf = (dir) => store.scopeOf(dir);
   assert.ok((value.text || '').includes('口播'));
   const episodes = Object.values(store.taskState(scope).episodes);
   assert.equal(episodes.length, 1);
-  assert.equal(episodes[0].status, 'proposed');
+  assert.equal(episodes[0].status, 'active');
   assert.match(runtime.text(agent, sig), /开场三句内给结论/);
+}
+
+/* L11b：模型自己写 query 不能建绑定；只认本轮真人原话。 */
+{
+  const dir = mkdir('bind-model');
+  const scope = scopeOf(dir);
+  seedRule(scope, { title: '口播开头', body: '开场三句内给结论。', conditions: [{ key: 'seriesId', value: '口播' }] });
+  enable(scope);
+  const runtime = boot();
+  const agent = makeAgent('a-bind-model', dir);
+  const sig = signal();
+  await runtime.preStep({ agent, signal: sig, turn: 't1' }, enter(human('这期怎么开头')));
+  const held = runtime.debug.windowOf(agent).experiment;
+  const value = await runtime.exec('memory_search', { query: '口播', contextId: held.contextId, bindForRequest: true }, agent);
+  assert.equal(value.status, 'needs_context');
+  assert.equal((value.text || '').includes('口播'), false);
+  assert.equal((value.text || '').includes('开场三句内给结论'), false);
+  const episodes = Object.values(store.taskState(scope).episodes);
+  assert.equal(episodes.some((episode) => episode.status === 'proposed'), false);
+  assert.equal(runtime.text(agent, sig).includes('开场三句内给结论'), false);
 }
 
 /* L12：跨项目上下文直接拒绝。 */
@@ -466,6 +486,26 @@ const scopeOf = (dir) => store.scopeOf(dir);
   assert.deepEqual(held ? held.injectedIds : [], []);
 }
 
+/* L19b：准备时还在试用期、请求中途到期，同一请求也不能再输出正文。 */
+{
+  const dir = mkdir('trial-expiring');
+  const scope = scopeOf(dir);
+  seedRule(scope, {
+    title: '快到期口播规则',
+    body: '这条试用马上到期，过期后同一请求也不能再出现。',
+    conditions: [{ key: 'seriesId', value: '口播' }],
+    learning: { state: 'trial', trialUntil: new Date(Date.now() + 700).toISOString() },
+  });
+  enable(scope, { seriesId: '口播' });
+  const runtime = boot();
+  const agent = makeAgent('a-trial-expiring', dir);
+  const sig = signal();
+  await runtime.preStep({ agent, signal: sig, turn: 't1' }, enter(human('这期口播怎么做')));
+  assert.match(runtime.text(agent, sig), /马上到期/);
+  await new Promise((resolve) => setTimeout(resolve, 900));
+  assert.equal(runtime.text(agent, sig), '');
+}
+
 /* L20：自进化关掉后，已经准备好的实验正文立刻不再输出；重开也不复活。 */
 {
   const dir = mkdir('off-after-prepare');
@@ -483,7 +523,7 @@ const scopeOf = (dir) => store.scopeOf(dir);
   assert.equal(runtime.text(agent, sig), '');
 }
 
-/* L21：检索没有可用命中、但有条件未确认的候选时，说清楚而不是回空结果。 */
+/* L21：检索没有可用命中、但有条件未确认的候选时，只说状态，不把标题递给模型。 */
 {
   const dir = mkdir('search-withheld');
   const scope = scopeOf(dir);
@@ -499,7 +539,8 @@ const scopeOf = (dir) => store.scopeOf(dir);
   assert.equal(value.count, 0);
   assert.equal(value.status, 'needs_context');
   assert.equal(value.reasonCode, 'applicability_unresolved');
-  assert.match(value.text, /发布前检查清单/);
+  assert.equal(value.text.includes('发布前检查清单'), false);
+  assert.match(value.text, /适用条件还没确认/);
 }
 
 console.log('evolution-read.test.mjs: all passed');

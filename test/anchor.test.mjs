@@ -477,3 +477,26 @@ test('R31 带「继续改」但明确指向新对象动作时撤销旧范围', (
   assert.equal(next.decision.kind, 'unbound');
   assert.equal(next.decision.reason, 'new_task');
 });
+
+/** 复核复现：句首带「继续」不能成为沿用旧正文的通行证。 */
+for (const [label, query] of [
+  ['R32 继续改数据库连接池配置', '继续改数据库连接池配置'],
+  ['R33 继续优化数据库连接池', '继续优化数据库连接池'],
+  ['R34 继续写数据库故障报告', '继续写数据库故障报告'],
+  ['R35 这个数据库连接池配置怎么改', '这个数据库连接池配置怎么改'],
+]) {
+  test(`${label}：与旧任务没有对象交集时不继承旧范围`, () => {
+    const tasks = activeVideoSession();
+    const next = anchor.routeTask(tasks, {
+      sessionId: 'sess-switch',
+      batchKey: `rb_${label.slice(0, 3)}_db`,
+      messageIds: ['m2'],
+      query,
+      registeredSeries: ['口播'],
+      now: 2000,
+    });
+    assert.equal(next.decision.kind, 'unbound');
+    assert.equal(next.decision.reason, 'new_task');
+    assert.equal(next.anchor.seriesId, undefined);
+  });
+}

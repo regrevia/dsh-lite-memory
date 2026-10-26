@@ -58,6 +58,15 @@ test('a 500-character body is accepted', () => {
   assert.equal(saved.record.body.length, 500);
 });
 
+test('正文正好到 4096 字节可以存，元数据不算进正文上限', () => {
+  const scope = fresh('body-cap');
+  const body = `${'测'.repeat(1365)}a`;
+  const saved = upsert(scope, { title: '正文到顶', summary: '正文刚好到上限', body });
+  assert.equal(saved.record.body, body);
+  assert.ok(saved.record.bytes > LIMITS.entryBytes);
+  assert.throws(() => upsert(scope, { title: '超一点', summary: '正文超一点', body: `${body}a` }), /正文 4097 字节/);
+});
+
 test('create then same title merges with full old body kept', () => {
   const scope = fresh('create');
   const first = upsert(scope, { title: '发布顺序', summary: '发版前要按顺序做的事', body: '第一步\n- 跑测试' });
@@ -144,11 +153,15 @@ test('oversized body is rejected, old data untouched', () => {
   assert.equal(loadIndex(scope).entries[0].revision, 1);
 });
 
-test('over-long title is an error; over-long summary is truncated instead', () => {
+test('over-long title is an error; over-long summary is truncated but the full text is saved', () => {
   const scope = fresh('length');
   assert.throws(() => upsert(scope, { title: 't'.repeat(LIMITS.titleChars + 1), summary: '写得短一点' }), /标题超过/);
-  const saved = upsert(scope, { title: '长摘要', summary: '长'.repeat(LIMITS.summaryChars + 1) });
+  const long = '长'.repeat(LIMITS.summaryChars + 1);
+  const saved = upsert(scope, { title: '长摘要', summary: long });
   assert.equal(saved.record.summary.length, LIMITS.summaryChars);
+  assert.equal(readEntry(scope, saved.record.id).body, long);
+  assert.equal(saved.draft.fullTextInBody, true);
+  assert.equal(saved.draft.summaryShortened, true);
 });
 
 test('imperative summary is kept; credentials are still rejected', () => {
@@ -812,6 +825,27 @@ test('实验策略版本不认时保持关闭，开关拒绝改动且盘上不�
   assert.equal(refused.ok, false);
   assert.equal(refused.compatible, false);
   assert.equal(fs.readFileSync(path.join(scope.dir, 'state.json'), 'utf8'), before);
+});
+
+test('当前不适用的高相关条目不挤掉后面真能用的条目', () => {
+  const scope = fresh('usable-rank');
+  for (let index = 0; index < 40; index += 1) {
+    upsert(scope, {
+      title: `旧规则${index}`,
+      summary: `旧规则${index}`,
+      body: `口播检查项${index}的正文`,
+      applicability: 'unresolved',
+    });
+  }
+  const usable = upsert(scope, {
+    title: '口播检查项可用',
+    summary: '口播检查项可用',
+    body: '口播检查项的可用正文',
+    applicability: 'all_in_scope',
+  });
+  const usableId = usable.record?.id ?? usable.id;
+  const hits = search(scope, '口播检查项', 3);
+  assert.equal(hits.some((row) => row.id === usableId), true);
 });
 
 for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });

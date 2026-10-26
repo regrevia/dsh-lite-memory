@@ -16,12 +16,16 @@ const REFERENCE_WORDS = /(这个|这条|这次|上次|之前|刚才|上面|前�
 const TASK_STOP = new Set(['一个','一下','这个','那个','我们','你们','他们','什么','怎么','可以','需要','帮我','帮忙','请问','然后','现在','还是','就是','没有','不是','以及','关于','进行','使用','问题','任务','内容','时候','已经','如果','因为','所以','但是','而且','或者','这些','那些','这样','那样','一下','一点','一些']);
 /** 判断任务是否换了对象时，这些词只表示动作或指代，不算对象证据。 */
 const TASK_NOISE = /(继续|再做一期|下一期|再来一期|再开一期|续一集|再拍一期|接着|然后|接下来|现在|帮我|帮忙|这个|这条|这次|上次|之前|刚才|上面|前面|下面|后面|这里|还是|同样|再改|排查|处理|检查|看看|看一下|看下|修复|解决|优化|调整|修改|分析|研究|对比|评估|调研|测试|设计|实现|开发|搭建|部署|定位|复现|查一下|找一下|问题|任务|内容|一下)/g;
-const NEW_OBJECT_VERB = /(排查|检查|看看|看一下|看下|分析|研究|对比|评估|调研|测试|设计|实现|开发|搭建|部署|修复|解决|处理|定位|复现|查一下|找一下)/;
-const NEW_TASK_MARKER = /(现在|接下来|然后|下面|新任务|另一个|重新|改做|换个|换一个)/;
 /** 续接词后面还得跟一个动作，才算真正在改旧稿；单说「继续 / 这个 / 之前」不构成复用依据。 */
 const CONTINUATION_ACTION = /(继续|接着|然后|再|还是|同样)\s*(做|改|调|弄|看|写|处理|优化|调整|检查|完成)/;
+/** 明确指向刚才那一版作品的说法，是沿用旧范围的正面证据。 */
+const OLD_WORK_REFERENCE = /(刚才那版|之前那版|上一版|这版|那版|原稿|旧稿)/;
+/** 这些词描述的是旧稿的某个方面，不是新对象；不该因为它们出现就撤销旧范围。 */
+const ASPECT_NOISE = /(节奏|速度|风格|语气|口吻|结构|长度|时长|篇幅|配色|字号|字体|标题|文案|措辞|逻辑|细节|开头|结尾|过渡|画面|镜头|音乐|音效|字幕|参数|格式|排版)/g;
+/** 程度、指代和虚词组成的二字片段不是对象证据。 */
+const GENERIC_CHARS = /[再更稍很太挺点些快慢多少好坏大小高低长短早晚新旧一二三四五六七八九十百千万个把的得地了着过吗呢吧啊]/;
 function taskTerms(value) {
-  const plain = text(value, 200).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').replace(TASK_NOISE, ' ').replace(/\s+/g, ' ').trim();
+  const plain = text(value, 200).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').replace(ASPECT_NOISE, ' ').replace(TASK_NOISE, ' ').replace(/\s+/g, ' ').trim();
   const terms = new Set();
   for (const word of plain.match(/[a-z][a-z0-9_-]{2,}/g) || []) terms.add(word);
   const runs = plain.match(/[\u4e00-\u9fff]+/g) || [];
@@ -29,7 +33,8 @@ function taskTerms(value) {
     if (TASK_STOP.has(run)) continue;
     for (let i = 0; i + 2 <= run.length; i += 1) {
       const gram = run.slice(i, i + 2);
-      if (!TASK_STOP.has(gram)) terms.add(gram);
+      if (TASK_STOP.has(gram) || GENERIC_CHARS.test(gram)) continue;
+      terms.add(gram);
     }
   }
   return terms;
@@ -45,11 +50,14 @@ export function looksLikeNewTask(query, previousText) {
   if (!next.size) return cue ? !CONTINUATION_ACTION.test(current) : false;
   if (!previous.size) return false;
   for (const term of next) if (previous.has(term)) return false;
-  /** 只有指代或「继续」时，还要有明确的新对象动作、转向词或新英文对象才换任务。 */
-  if (!cue) return true;
-  if (NEW_OBJECT_VERB.test(current) || NEW_TASK_MARKER.test(current)) return true;
-  for (const term of next) if (/^[a-z]/.test(term)) return true;
-  return false;
+  /** 明确指向旧稿（「刚才那版脚本」）是继承的正面证据，即便同时提到新的局部方面。 */
+  if (OLD_WORK_REFERENCE.test(current)) return false;
+  /**
+   * 有实质对象词却跟旧任务没有任何交集：这就是新任务，不因为句首带了
+   * 「继续」「这个」就把旧范围连同正文一起搬过来。继承只认对象交集、
+   * 明确的旧稿指代，或者除动作/指代外没有新对象（上面两条）。
+   */
+  return true;
 }
 
 export function emptyTasks() {
@@ -311,9 +319,10 @@ export function routeTask(tasksInput, input = {}) {
     return { tasks, anchor: current, episode: currentEpisode, decision: { kind: 'none', reason: 'thanks', pointer: true }, changed: false };
   }
 
-  /** 先认新对象，再认续作：带「继续 / 这个」但换了对象，也必须撤销旧范围。 */
+  /** 先认新对象，再认续作：带「继续 / 这个」但换了对象，也必须撤销旧范围。
+   *  本句点名了已登记栏目（「再做一期口播」）就是明确的对象证据，不算换任务。 */
   if (current && currentEpisode && currentEpisode.status !== 'unbound'
-    && !SWITCH_WORDS.test(query) && !changedSeries
+    && !SWITCH_WORDS.test(query) && !changedSeries && !namedSeries
     && looksLikeNewTask(query, currentEpisode.taskText || '')) {
     const transitionId = transitionIdFor(batchKey, tasks.revision);
     const existing = Object.values(tasks.episodes).find((episode) => episode.transitionId === transitionId);
