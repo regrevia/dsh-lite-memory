@@ -276,6 +276,14 @@ function cleanTitle(value) {
   return String(value ?? '').replace(/\s+/g, ' ').trim();
 }
 
+/** 正文里的实现参数（尺寸/层级/字号）不算记忆：数到三次就要求重写成原则。 */
+const UI_SPEC_PATTERNS = [
+  /\bz-index\s*:\s*-?\d+/gi,
+  /\b(?:padding|margin|gap|font-size|line-height|border-radius|width|height|min-width|max-width|min-height|max-height|box-shadow)\s*:[^;\n]{0,32}\d/gi,
+  /\b\d+(?:\.\d+)?(?:px|rem|em)\b/gi,
+  /\bmin\(\s*\d/gi,
+];
+
 export function validSummary(summary) {
   const text = String(summary ?? '').replace(/\s+/g, ' ').trim();
   if (!text) return { ok: false, reason: '摘要为空' };
@@ -314,7 +322,11 @@ export function normalizeDraft(source, options = {}) {
   const body = String(draft.body ?? '').trim();
   const bodyBytes = Buffer.byteLength(body);
   if (bodyBytes > LIMITS.entryBytes) {
-    throw new Error(`正文 ${bodyBytes} 字节，超过单条 ${LIMITS.entryBytes} 字节；先精简，别让尾部条件被截掉`);
+    throw new Error(`正文 ${bodyBytes} 字节，超过单条 ${LIMITS.entryBytes} 字节；只留原则、判断规则和触发条件`);
+  }
+  if (has('body')) {
+    const concrete = UI_SPEC_PATTERNS.reduce((count, pattern) => count + (body.match(pattern) || []).length, 0);
+    if (concrete >= 3) throw new Error('正文太具体：记忆只留原则和触发条件，像素、字号、层级这类实现参数留在代码或文档里');
   }
   const kind = has('kind') ? textField(draft.kind, 20, '类型') : 'note';
   if (kind && !KINDS.includes(kind)) throw new Error(`类型只能是 ${KINDS.join(' / ')}`);
@@ -1265,7 +1277,7 @@ export function undoChange(scope, id, options = {}) {
       if (!record) continue;
       /** 旧回执不能撤掉别人后来的修改：版本对不上就明确拒绝。 */
       if (options.expectedRevision !== undefined && Number(record.revision) !== Number(options.expectedRevision)) {
-        throw new state.StateError('conflict', `这条记忆已经更新到第 ${record.revision} 版`);
+        throw new state.StateError('conflict', '这条记忆已经被更新过，刷新后再改');
       }
       const versions = record.versions || [];
       const last = versions[versions.length - 1];
@@ -1652,7 +1664,8 @@ export function renderIndex(entries, budget = 400) {
     const stale = now - last > staleMs;
     const stateTag = item.state === 'archived' ? ' · 已归档' : item.state === 'needs_context' ? ' · 适用范围待确认' : item.state === 'not_applicable' ? ' · 当前条件不适用' : '';
     const originTag = item.origin === 'project_evolution' ? ' · 实验' : '';
-    const head = `${item.scope === 'global' ? '[全局] ' : ''}${item.id} ${item.title}${item.when ? `（${item.when}）` : ''} · 第 ${item.revision || 1} 版${originTag}${stateTag}`;
+    const tag = item.scope === 'global' ? '[global]' : item.scopeName ? `[${item.scopeName}]` : '';
+    const head = `${tag ? `${tag} ` : ''}${item.id} ${item.title}${item.when ? `（${item.when}）` : ''}${originTag}${stateTag}`;
     const line = stale ? `- ${head}` : `- ${head}｜${item.summary}`;
     if (used + line.length > budget) break;
     lines.push(line);
@@ -1963,7 +1976,7 @@ function bindSameTopic(projectScope, ref) {
   const record = loadIndex(source).entries.find((item) => item.id === ref.id);
   if (!record) return { error: `sameTopicAs 指向的记忆不存在：${ref.id}` };
   if (Number(ref.revision) !== Number(record.revision || 1)) {
-    return { error: `sameTopicAs 的版本不对：${ref.id} 当前是第 ${record.revision || 1} 版` };
+    return { error: `sameTopicAs 的目标已经改过：${ref.id}` };
   }
   return { topicKey: view.topicSlot(record) };
 }

@@ -8,7 +8,7 @@ const { apply } = await import('../index.js');
 const store = await import('../store.js');
 
 const HEADER = '已有记忆可能相关';
-const CARD_LINE = /^- 「.+?」.* · mem_[a-z0-9]+ · 第 \d+ 版/;
+const CARD_LINE = /^- \[[^\]]+\] 「.+?」.* · mem_[a-z0-9]+(?:｜.*)?$/;
 const CARD_LINE_M = new RegExp(CARD_LINE.source, 'm');
 
 const effect = (fn) => {
@@ -122,7 +122,7 @@ for (let i = 0; i < 9; i += 1) {
     summary: '读取预算测试',
     tags: ['大正文'],
     resolution: 'distinct',
-    body: `样本${i + 1}：${'正文内容'.repeat(230)}`,
+    body: `样本${i + 1}：${'正文内容'.repeat(80)}`,
   }));
 }
 
@@ -142,7 +142,7 @@ assert.ok(Buffer.byteLength(preparedText) <= 1200, 'snapshot stays inside card b
 const cards = bootA.provider.text({ agent: agentA, signal: signalA }).split('\n').slice(1);
 assert.ok(cards.length <= 3);
 for (const line of cards) assert.match(line, CARD_LINE);
-assert.match(preparedText, /第 1 版/);
+assert.doesNotMatch(preparedText, /第 .* 版/);
 assert.equal(bootA.provider.text({ agent: agentA, signal: signalA }), preparedText, 'frozen between calls');
 
 // A03：provider 纯内存，不写盘、不动 hits。
@@ -265,7 +265,7 @@ assert.notEqual(bootA.provider.text({ agent: agentB, signal: signalB }), prepare
   await bootA.preStep({ agent, signal: signal(), turn: 't1' }, enter(human('大正文样本怎么用')));
   const first = await bootA.exec('memory_read', { id: bigBodies[0].id }, agent);
   assert.equal(first.status, 'ok');
-  assert.ok(first.body.length > 900);
+  assert.ok(Buffer.byteLength(first.body) > 900);
   const repeat = await bootA.exec('memory_read', { id: bigBodies[0].id }, agent);
   assert.equal(repeat.repeat, true);
   assert.equal(repeat.body, '');
@@ -273,13 +273,15 @@ assert.notEqual(bootA.provider.text({ agent: agentB, signal: signalB }), prepare
   const second = await bootA.exec('memory_read', { id: bigBodies[1].id }, agent);
   assert.equal(second.status, 'ok');
   const third = await bootA.exec('memory_read', { id: bigBodies[2].id }, agent);
-  assert.equal(third.status, 'budget_exhausted');
-  assert.equal(third.body || '', '');
-  assert.equal(third.id, '');
-  assert.equal(bootA.render('memory_read', {}, third), 'memory · 本请求的记忆额度已用完');
+  assert.equal(third.status, 'ok');
+  const fourth = await bootA.exec('memory_read', { id: bigBodies[3].id }, agent);
+  assert.equal(fourth.status, 'budget_exhausted');
+  assert.equal(fourth.body || '', '');
+  assert.equal(fourth.id, '');
+  assert.equal(bootA.render('memory_read', {}, fourth), 'memory · 本请求的记忆额度已用完');
   const win = bootA.debug.windowOf(agent);
   assert.ok(win.bytes <= 8192);
-  assert.equal(win.bodies, 2);
+  assert.equal(win.bodies, 3);
 
   const agentReads = makeAgent('agent-reads', cwdA);
   await bootA.preStep({ agent: agentReads, signal: signal(), turn: 't1' }, enter(human('大正文样本怎么用')));

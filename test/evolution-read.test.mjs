@@ -170,7 +170,7 @@ const scopeOf = (dir) => store.scopeOf(dir);
   assert.match(text, /项目实验规则/);
   assert.match(text, /先给结论再解释/);
   assert.ok(text.includes(id));
-  assert.match(text, /第 1 版/);
+  assert.doesNotMatch(text, /第 .* 版/);
 }
 
 /* L05：长规则只给用途与 memory_read 指针，不把正文塞进上下文。 */

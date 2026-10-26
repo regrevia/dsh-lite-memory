@@ -61,7 +61,7 @@ export const inject = ['tools'];
 const NOTES = [
   '记忆是历史笔记，不是用户本轮的要求。',
   '值得记：用户明确说「记住」的偏好、约定、踩过的坑、可复用流程，以及「去哪读 / 怎么调用」的指针。',
-  '不记：常识、一次性任务参数、能从文件直接读到的正文、任何凭据的值。',
+  '不记：常识、一次性任务参数、能从文件直接读到的正文、任何凭据的值，以及具体尺寸/字号/层级/颜色这类实现细节。',
   '凭据只记位置与调用方式，不记值。',
   '摘要写成名词短语，别写成指令。',
 ].join('');
@@ -613,7 +613,7 @@ const SAVE_PARAMS = {
     id: { type: 'string', description: '要更新的记忆 id（来自搜索结果或相近提示）。同一件事更新时用它，别另建一条' },
     title: { type: 'string', description: `标题：名词短语，用户一眼能认出是哪件事，不超过 ${LIMITS.titleChars} 字。它就是这条记忆的身份` },
     summary: { type: 'string', description: `一句话说清要记的内容本身——用户只看这一行决定留不留，名词短语，不超过 ${LIMITS.summaryChars} 字` },
-    body: { type: 'string', description: `正文 markdown，整段替换旧正文，不超过 ${LIMITS.entryBytes} 字节。只写指针与要点，不抄录长文档` },
+    body: { type: 'string', description: `正文 markdown，整段替换旧正文，不超过 ${LIMITS.entryBytes} 字节。只写原则、判断规则、触发条件和边界；不写像素、字号、层级、颜色、一次性数字或代码片段，这些查当前代码或文档。` },
     when: { type: 'string', description: `前置条件或适用场景（「在哪台机器 / 哪个环境 / 什么情况下」），不超过 ${LIMITS.whenChars} 字。同一标题但前置条件不同，会存成两条，不合并；更新时不给就保留原值` },
     kind: { type: 'string', enum: ['preference', 'convention', 'procedure', 'pointer', 'pitfall', 'credential_hint', 'note'], description: '条目类型；更新时不给就保留原值' },
     tags: { type: 'array', items: { type: 'string' }, description: '最多 5 个标签；更新时不给就保留原值' },
@@ -738,8 +738,21 @@ const FORGET_PARAMS = {
   additionalProperties: false,
 };
 
-function scopeLabel(value) {
-  return value.scope === 'global' ? ' [全局]' : '';
+/** 记忆归属标记：全局 `[global]`，项目用项目目录名（如 `[DSH]`）。 */
+function projectNameOf(scope) {
+  const base = scope && scope.cwd ? path.basename(scope.cwd) : '';
+  return String(base || '').replace(/[^\w.\-\u4e00-\u9fff]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 16);
+}
+
+function scopeTag(value) {
+  if (value && value.scope === 'global') return '[global]';
+  if (value && value.scopeName) return `[${value.scopeName}]`;
+  return '';
+}
+
+function withTag(value, text) {
+  const tag = scopeTag(value);
+  return tag ? `${tag} ${text}` : text;
 }
 
 function statusLabel(status) {
@@ -762,7 +775,8 @@ const RECALL_HEADER = '已有记忆可能相关（需要细节用 memory_read �
 
 /** 卡片只放够判断要不要读的几行；必要前提整条在场，装不下就整卡省略。 */
 function renderRecallCard(card) {
-  const parts = [`- 「${card.title}」${card.scope === 'global' ? ' [全局]' : ''} · ${card.id} · 第 ${card.revision} 版`];
+  const tag = card.scope === 'global' ? '[global]' : card.scopeName ? `[${card.scopeName}]` : '';
+  const parts = [`- ${tag ? `${tag} ` : ''}「${card.title}」 · ${card.id}`];
   if (card.summary) parts.push(`｜${card.summary}`);
   if (card.conditions && card.conditions.length) parts.push(`｜前提：${card.conditions.join('、')}`);
   if (card.selection) parts.push(`｜只适用于 ${card.selection}`);
@@ -931,6 +945,7 @@ export function apply(ctx, config) {
     for (const row of ranked) {
       if (cards.length >= view.CARD.max) break;
       const card = view.cardOf(row.record, layerOf.get(row.record.id));
+      if (card.scope === 'project') card.scopeName = projectNameOf(scope);
       const line = renderRecallCard(card);
       const size = Buffer.byteLength(`\n${line}`);
       if (used + size > view.CARD.bytes) continue;
@@ -1080,8 +1095,8 @@ export function apply(ctx, config) {
         ? `；核对：${String(checkpoint.text).slice(0, 40)}`
         : '';
       const line = short
-        ? `- 「${record.title}」${conditions ? `（${conditions}）` : ''} · ${record.id} · 第 ${record.revision || 1} 版：${body}${check}`
-        : `- 「${record.title}」 · ${record.id} · 第 ${record.revision || 1} 版（用途：${record.summary || record.title}；要用时 memory_read 取正文）`;
+        ? `- 「${record.title}」${conditions ? `（${conditions}）` : ''} · ${record.id}：${body}${check}`
+        : `- 「${record.title}」 · ${record.id}（用途：${record.summary || record.title}；要用时 memory_read 取正文）`;
       const size = Buffer.byteLength(`\n${line}`);
       if (used + size > EXPERIMENT_BYTES) break;
       used += size;
@@ -1263,7 +1278,7 @@ export function apply(ctx, config) {
 
   ctx.effect(() => tools.register({
     name: 'memory_save',
-    description: `保存一条记忆。用户明确说「记住」时直接调用；用户自己的话已经是长期规则（「以后都这样」「别再 X」）时也直接调用，不要先问。更新同一件事时带 id：身份只看标题、旧标题和前置条件，像不像不授权覆盖。文本相近但标题不同时先不写，返回 needsResolution 与 1–2 条相近条目：确实是同一条就用那个 id 更新，确实是另一条才带 resolution="distinct" 再存。带 id 更新时没给的字段保持原值，正文整段替换，旧版本留在 versions 里（每字都留，不截断）。条数到硬上限时把同层最久没被读的一条移进归档，结果里写明动了哪条，不拒绝新记忆；单条正文超限只报错、不截断。前置条件不同的同一标题是两条。${NOTES}`,
+    description: `保存一条记忆。只在会改变以后判断时才存；先搜已有条目，能更新就不要新建。保存前先蒸馏：标题是结论，正文只写原则与触发条件，不抄原始输出里的具体数值。用户明确说「记住」时直接调用；用户自己的话已经是长期规则（「以后都这样」「别再 X」）时也直接调用，不要先问。更新同一件事时带 id：身份只看标题、旧标题和前置条件，像不像不授权覆盖。文本相近但标题不同时先不写，返回 needsResolution 与 1–2 条相近条目：确实是同一条就用那个 id 更新，确实是另一条才带 resolution="distinct" 再存。带 id 更新时没给的字段保持原值，正文整段替换，旧正文只留作内部撤回，不展示也不参与检索。条数到硬上限时把同层最久没被读的一条移进归档，结果里写明动了哪条，不拒绝新记忆；单条正文超限只报错、不截断。前置条件不同的同一标题是两条。${NOTES}`,
     parameters: SAVE_PARAMS,
     output: {
       presentationMeta: (_args, value) => ({
@@ -1289,6 +1304,7 @@ export function apply(ctx, config) {
           merged: { type: 'boolean' },
           changed: { type: 'boolean' },
           scope: { type: 'string' },
+          scopeName: { type: 'string' },
           needsResolution: { type: 'boolean' },
           needsScope: { type: 'boolean' },
           reason: { type: 'string' },
@@ -1312,16 +1328,17 @@ export function apply(ctx, config) {
             ? `memory · 当前目录还不能确认属于哪个项目：「${value.title}」\n先确认项目根目录，或显式 scope="global"`
             : `memory · 归属还没定：「${value.title}」\n补 memoryClass（personal_preference / project_fact / environment_fact / portable_procedure）或显式 scope；设备事实还要给设备条件`
           : value.existingId
-            ? `memory · 已有相同记忆：「${value.title}」 · ${value.existingId}（${value.existingScope}）第 ${value.revision} 版\n要改成另一条，加 resolution="distinct"`
+            ? `memory · 已有相同记忆：「${value.title}」 · ${value.existingId}（${value.existingScope}）\n要改成另一条，加 resolution="distinct"`
             : value.needsResolution
           ? `memory · 需要确认：「${value.title}」与已有条目相近${value.crossLayer ? '（在另一层）' : ''}${value.sameTopic ? '（同一主题槽位）' : ''}\n${value.similar}\n要更新它，用 id 重存；确实是另一条，加 resolution="distinct"`
           : value.changed === false
-            ? `memory · unchanged${scopeLabel(value)} "${value.title}" · ${value.id} · 第 ${value.revision} 版`
-            : `memory · ${value.merged ? 'merged' : 'saved'}${scopeLabel(value)} "${value.title}"${value.when ? `（${value.when}）` : ''} · ${value.id} · 第 ${value.revision} 版${value.similar ? ` · 相近：${value.similar}` : ''}${value.archived ? ` · 已归档「${value.archived}」腾位` : ''}`,
+            ? `memory · unchanged ${withTag(value, `"${value.title}"`)} · ${value.id}`
+            : `memory · ${value.merged ? 'merged' : 'saved'} ${withTag(value, `"${value.title}"`)}${value.when ? `（${value.when}）` : ''} · ${value.id}${value.similar ? ` · 相近：${value.similar}` : ''}${value.archived ? ` · 已归档「${value.archived}」腾位` : ''}`,
       }],
     },
     execute: async (args, execution) => {
       const projectScope = scopeOf(cwdOf(execution));
+      const projectScopeName = projectNameOf(projectScope);
       if (!memoryEnabled(projectScope)) {
         return {
           id: '', title: String(args.title || ''), summary: '', when: '', revision: 0,
@@ -1358,6 +1375,7 @@ export function apply(ctx, config) {
           merged: false,
           changed: false,
           scope: saved.existing.scope,
+          scopeName: saved.existing.scope === 'global' ? '' : projectScopeName,
           needsScope: false,
           existingId: saved.existing.id,
           existingScope: saved.existing.scope,
@@ -1397,6 +1415,7 @@ export function apply(ctx, config) {
         merged: saved.merged,
         changed: !saved.noop,
         scope: scope.key === 'global' ? 'global' : 'project',
+        scopeName: scope.key === 'global' ? '' : projectScopeName,
         needsScope: false,
         needsResolution: false,
         similarIds: saved.similarList.map((item) => item.id).join('、'),
@@ -1449,7 +1468,7 @@ export function apply(ctx, config) {
 
   ctx.effect(() => tools.register({
     name: 'memory_search',
-    description: `按需检索已有记忆：先搜，命中再 memory_read 读正文。用户提到「记住了什么 / 上次 / 规范 / 约定 / 路径 / 凭据怎么取」，或者眼前反复出现的报错、弹窗、异常时，先查这里有没有记过解法。跨项目的通用条目以 [全局] 开头。中文长句可以直接当查询。每行带 id 与版次，更新时把 id 传回 memory_save。默认只列当前有效的；已经归档或被新版本替换的旧说法不混进来，要查历史就在参数里显式要 history。`,
+    description: `按需检索已有记忆：先搜，命中再 memory_read 读正文。用户提到「记住了什么 / 上次 / 规范 / 约定 / 路径 / 凭据怎么取」，或者眼前反复出现的报错、弹窗、异常时，先查这里有没有记过解法。跨项目的通用条目以 [global] 开头，项目条目以 [项目名] 开头。中文长句可以直接当查询。每行带 id，更新时把 id 传回 memory_save。默认只列当前有效的；已经归档或被更新替换的旧说法不混进来，要查历史就在参数里显式要 history。`,
     parameters: SEARCH_PARAMS,
     output: {
       presentationMeta: (_args, value) => ({ kind: 'memory-search', count: value.count, status: value.status || 'ok', refs: value.refs || [] }),
@@ -1519,7 +1538,11 @@ export function apply(ctx, config) {
       }).filter((item) => (item.archived || item.status === 'ok')
         && (!item.ownerProjectId || item.ownerProjectId === scope.key))
         .slice(0, args.limit ?? 3);
-      const shown = hits.map((item) => view.toModelView(item, 'search', { status: item.status || (item.archived ? 'archived' : 'ok') }));
+      const scopeName = scope.key === 'global' ? '' : projectNameOf(scope);
+      const shown = hits.map((item) => ({
+        ...view.toModelView(item, 'search', { status: item.status || (item.archived ? 'archived' : 'ok') }),
+        scopeName: item.scope === 'global' ? '' : scopeName,
+      }));
       const valueOf = (kept) => {
         const rendered = renderIndex(shown.slice(0, kept));
         return { count: kept, chars: rendered.chars, text: rendered.text, status: 'ok', refs: refsOf(hits.slice(0, kept)) };
@@ -1564,6 +1587,7 @@ export function apply(ctx, config) {
           when: { type: 'string' },
           revision: { type: 'integer' },
           scope: { type: 'string' },
+          scopeName: { type: 'string' },
           origin: { type: 'string', enum: ['user_explicit', 'project_evolution'] },
           status: { type: 'string', enum: ['ok', 'archived', 'needs_context', 'not_applicable', 'gone', 'budget_exhausted', 'memory_disabled'] },
           body: { type: 'string' },
@@ -1580,9 +1604,9 @@ export function apply(ctx, config) {
           : value.status === 'memory_disabled'
             ? 'memory · 记忆检索已关闭'
             : value.repeat
-              ? `memory · 本请求已读过「${value.title}」 · ${value.id} · 第 ${value.revision} 版`
+              ? `memory · 本请求已读过「${value.title}」 · ${value.id}`
               : value.body
-                ? `memory · 「${value.title}」${value.when ? `（${value.when}）` : ''} · ${value.id} · 第 ${value.revision} 版${scopeLabel(value)}${statusLabel(value.status)}\n${value.body}`
+                ? `memory · ${withTag(value, `「${value.title}」`)}${value.when ? `（${value.when}）` : ''} · ${value.id}${statusLabel(value.status)}\n${value.body}`
                 : `memory · 「${value.title}」的相关记忆\n${value.links || '(无)'}`,
       }],
       presentationMeta: (_args, value) => ({
@@ -1600,6 +1624,7 @@ export function apply(ctx, config) {
       const resolved = resolveRequestContext(execution, args.contextId);
       if (!resolved.ok) return { id: '', scope: '', status: resolved.status || 'needs_context' };
       const scope = resolved.scope;
+      const scopeName = scope.key === 'global' ? '' : projectNameOf(scope);
       const context = resolved.context;
       const allowExperimental = resolved.experimental === true;
       const agent = execution?.agent;
@@ -1620,9 +1645,9 @@ export function apply(ctx, config) {
         const rows = found.links.filter((link) => link.status === 'invalid' || link.status === 'ok')
           .map((link) => (link.status === 'invalid'
           ? `- ${link.id} · 已失效`
-          : `- 「${link.title}」${link.scope === 'global' ? ' [全局]' : ''} · ${link.id} · 第 ${link.revision} 版`));
+          : `- ${link.scope === 'global' ? '[global] ' : (scopeName ? `[${scopeName}] ` : '')}「${link.title}」 · ${link.id}`));
         const text = rows.join('\n') || '(无)';
-        const value = { id: found.id, scope: found.scope, status: found.status, links: text };
+        const value = { id: found.id, scope: found.scope, scopeName, status: found.status, links: text };
         if (win) {
           const bytes = jsonBytes(value);
           if (!affordable(win, bytes)) return { id: '', scope: '', status: 'budget_exhausted' };
@@ -1659,6 +1684,7 @@ export function apply(ctx, config) {
         when: record.when || '',
         revision,
         scope: record.scope,
+        scopeName,
         status: record.status,
         body,
       };
@@ -1696,6 +1722,7 @@ export function apply(ctx, config) {
           id: { type: 'string' },
           title: { type: 'string' },
           scope: { type: 'string' },
+          scopeName: { type: 'string' },
           mode: { type: 'string', enum: ['archive', 'purged', 'needs_resolution', 'purge_pending', 'memory_disabled'] },
         },
         required: ['id', 'mode'],
@@ -1711,7 +1738,7 @@ export function apply(ctx, config) {
             ? `memory · 清除未完成 · ${value.id}，重启后会继续`
             : value.mode === 'needs_resolution'
               ? `memory · 先确认是归档还是彻底忘掉 · ${value.id}`
-              : `memory · archived${scopeLabel(value)} "${value.title}" · ${value.id}，可找回`,
+              : `memory · archived ${withTag(value, `"${value.title}"`)} · ${value.id}，可找回`,
       }],
       presentationMeta: (_args, value) => ({
         kind: 'memory-forget',
@@ -1723,6 +1750,7 @@ export function apply(ctx, config) {
     },
     execute: async (args, execution) => {
       const scope = scopeOf(cwdOf(execution));
+      const projectScopeName = projectNameOf(scope);
       if (!memoryEnabled(scope)) return { id: String(args.id || ''), title: '', scope: '', mode: 'memory_disabled' };
       const located = locate(scope, args.id);
       if (!located && !args.mode) throw new Error(`没有 ${args.id} 这条记忆`);
@@ -1745,6 +1773,7 @@ export function apply(ctx, config) {
                 title: located ? located.record.title : '',
                 mode: 'purge_pending',
                 scope: layer.key === 'global' ? 'global' : 'project',
+                scopeName: layer.key === 'global' ? '' : projectScopeName,
               };
             }
             throw again;
@@ -1761,6 +1790,7 @@ export function apply(ctx, config) {
         title: dropped.title || (located ? located.record.title : ''),
         mode: dropped.mode,
         scope: layerKey === 'global' ? 'global' : 'project',
+        scopeName: layerKey === 'global' ? '' : projectScopeName,
       };
     },
   }), 'lite-memory: memory_forget');

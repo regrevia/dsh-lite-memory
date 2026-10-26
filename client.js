@@ -310,9 +310,8 @@ window.__ModuleLoader__.load({
 
     const versionLine = (shown) => {
       const scope = shown.scopeLabel || (shown.scope === 'global' ? '全局' : '项目');
-      const version = shown.current === false ? `第 ${shown.revision} 版` : `当前第 ${shown.revision} 版`;
       const archived = shown.status === 'archived' ? ' · 已归档' : '';
-      return `${version} · ${scope}${archived}`;
+      return `${scope}${archived}`;
     };
 
     /** 一段引用：点开是名字，再点是当前正文。 */
@@ -746,7 +745,7 @@ window.__ModuleLoader__.load({
         : h('div', { style: { ...PANEL_MUTED, paddingTop: '2px' } }, '只读');
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '5px' } },
         h('div', { style: { fontSize: '12px', lineHeight: '1.45', fontWeight: 600 } }, rule.title),
-        h('div', { style: PANEL_MUTED }, `第 ${rule.revision} 版 · ${EVO_STATE[rule.state] || rule.state}`),
+        h('div', { style: PANEL_MUTED }, EVO_STATE[rule.state] || rule.state),
         h('div', { style: PANEL_MUTED }, scopeLine),
         h('div', { style: { fontSize: '12px', lineHeight: '1.65', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '150px', overflowY: 'auto', opacity: 0.88 } }, rule.body || '没有正文'),
         h('div', { style: PANEL_MUTED }, `来源 ${Array.isArray(rule.learning?.evidence) ? rule.learning.evidence.length : 0} 条`),
@@ -1017,7 +1016,6 @@ window.__ModuleLoader__.load({
             h('span', { style: { fontSize: '12px', lineHeight: '1.45', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: 0.92 } }, rule.title),
             h('span', { style: { ...PANEL_MUTED, display: 'flex', gap: '5px' } },
               h('span', null, EVO_STATE[rule.state] || rule.state),
-              h('span', { style: { marginLeft: 'auto' } }, `第 ${rule.revision} 版`),
             ))))
           : (archived.length === 0
             ? h('div', { style: { ...PANEL_MUTED, padding: '12px 4px' } }, '没有归档')
@@ -1034,7 +1032,7 @@ window.__ModuleLoader__.load({
             h('span', { style: { fontSize: '12px', lineHeight: '1.45', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: 0.78 } }, record.title || record.id),
             h('span', { style: { ...PANEL_MUTED, display: 'flex', gap: '5px' } },
               h('span', null, '已归档'),
-              h('span', { style: { marginLeft: 'auto', fontVariantNumeric: 'tabular-nums' } }, `${EVO_DATE(record.updated)} · 第 ${record.revision} 版`),
+              h('span', { style: { marginLeft: 'auto', fontVariantNumeric: 'tabular-nums' } }, EVO_DATE(record.updated)),
             ))));
 
       const detailPane = selectedMemory
@@ -1042,7 +1040,7 @@ window.__ModuleLoader__.load({
           detail
             ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '5px' } },
               h('div', { style: { fontSize: '12px', lineHeight: '1.45', fontWeight: 600 } }, detail.title),
-              h('div', { style: PANEL_MUTED }, `${detail.status === 'archived' ? '已归档' : (KIND_LABEL[detailRecord?.kind] || '记忆')} · 第 ${detail.revision} 版 · ${detail.scopeLabel || ''}`),
+              h('div', { style: PANEL_MUTED }, `${detail.status === 'archived' ? '已归档' : (KIND_LABEL[detailRecord?.kind] || '记忆')} · ${detail.scopeLabel || ''}`),
               Array.isArray(detailRecord?.tags) && detailRecord.tags.length
                 ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '4px' } },
                   detailRecord.tags.slice(0, 6).map((tag) => h('span', { key: tag, style: { ...PANEL_MUTED, padding: '0 6px', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '999px' } }, `#${tag}`))) : null,

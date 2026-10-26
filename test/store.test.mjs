@@ -40,6 +40,26 @@ const rawState = (scope) => fs.readFileSync(path.join(scope.dir, 'state.json'), 
 const countOf = (scope) => loadIndex(scope).entries.length;
 const suggestionsOf = (scope) => loadIndex(scope).suggestions;
 
+test('over-specific body is rejected instead of becoming a constraint', () => {
+  const scope = fresh('specific');
+  assert.throws(
+    () => upsert(scope, {
+      title: '自绘菜单',
+      summary: '菜单用应用自绘，不用系统原生',
+      body: '菜单 z-index: 1100；宽度 min(264px, 100vw - 24px)；字号 12px；内边距 10px；圆角 8px。',
+    }),
+    /正文太具体/,
+  );
+});
+
+test('body over the distilled budget is rejected', () => {
+  const scope = fresh('toolong');
+  assert.throws(
+    () => upsert(scope, { title: '长正文', summary: '太长就不存', body: '记'.repeat(500) }),
+    /超过单条 1200 字节/,
+  );
+});
+
 test('create then same title merges with full old body kept', () => {
   const scope = fresh('create');
   const first = upsert(scope, { title: '发布顺序', summary: '发版前要按顺序做的事', body: '第一步\n- 跑测试' });
@@ -185,7 +205,8 @@ test('search finds Chinese queries, when clauses and reports counts', () => {
   assert.ok(when.some((item) => item.title === '文案检查'));
   const rendered = renderIndex(hits);
   assert.match(rendered.text, /^- mem_[a-z0-9]+ 发布顺序/);
-  assert.match(rendered.text, /第 1 版/);
+  assert.match(rendered.text, /mem_[a-z0-9]+ 发布顺序/);
+  assert.doesNotMatch(rendered.text, /第 .* 版/);
   assert.ok(rendered.chars <= 400);
   assert.deepEqual(search(scope, '完全无关的主题词'), []);
 });
@@ -448,7 +469,7 @@ test('projects and the global layer stay separate', () => {
   assert.equal(global.length, 1);
   assert.equal(global[0].scope, 'global');
   const rendered = renderIndex(global);
-  assert.match(rendered.text, /^- \[全局\] mem_/);
+  assert.match(rendered.text, /^- \[global\] mem_/);
   const removed = forget(b, 'mem_000000000000', { mode: 'archive' });
   assert.equal(removed, null);
 });

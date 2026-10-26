@@ -108,13 +108,13 @@ assert.equal(phrased.scope, 'project');
 assert.equal(store.loadIndex(store.globalScope()).entries.some((item) => item.title === '以后都用这个一次性脚本'), false);
 
 assert.equal(typeof saved.id, 'string');
-assert.match(render('memory_save', {}, saved), /^memory · saved "发布顺序" · mem_[a-z0-9]+ · 第 1 版$/);
+assert.match(render('memory_save', {}, saved), /^memory · saved \[[^\]]+\] "发布顺序" · mem_[a-z0-9]+$/);
 
 const merged = await exec('memory_save', { title: '发布顺序', summary: '发版前要按顺序做的事', body: '第一步\n第二步' });
 assert.equal(merged.merged, true);
 assert.equal(merged.id, saved.id);
 assert.equal(merged.revision, 2);
-assert.match(render('memory_save', {}, merged), /^memory · merged "发布顺序" · mem_[a-z0-9]+ · 第 2 版$/);
+assert.match(render('memory_save', {}, merged), /^memory · merged \[[^\]]+\] "发布顺序" · mem_[a-z0-9]+$/);
 
 const patch = await exec('memory_save', { id: saved.id, title: '发布顺序', summary: '发版前要按顺序做的事', when: '发版当天' });
 assert.equal(patch.when, '发版当天');
@@ -125,7 +125,7 @@ const again = await exec('memory_save', { title: '发布顺序', summary: '发�
 assert.equal(again.changed, false);
 assert.equal(again.id, saved.id);
 assert.equal(again.revision, 3);
-assert.match(render('memory_save', {}, again), /^memory · unchanged "发布顺序" · mem_[a-z0-9]+ · 第 3 版$/);
+assert.match(render('memory_save', {}, again), /^memory · unchanged \[[^\]]+\] "发布顺序" · mem_[a-z0-9]+$/);
 
 // ── similar title asks before overwriting ────────────────────────────────────
 const probe = await exec('memory_save', { title: '发布顺序是啥', summary: '发版前要按顺序做的事', body: '另一条' });
@@ -147,8 +147,8 @@ const hits = await exec('memory_search', { query: '发布流程' });
 assert.ok(hits.count >= 1);
 assert.ok(hits.chars > 0);
 const hitText = render('memory_search', {}, hits);
-assert.match(hitText, new RegExp(`^memory · 命中 ${hits.count} 条 · 引用 ${hits.chars} 字\\n- mem_`));
-assert.match(hitText, /第 1 版/);
+assert.match(hitText, new RegExp(`^memory · 命中 ${hits.count} 条 · 引用 ${hits.chars} 字\\n- \\[[^\\]]+\\] mem_`));
+assert.doesNotMatch(hitText, /第 .* 版/);
 /** 「发版当天」这类自由文本条件没有可信上下文，不能当成适用条目塞给模型。 */
 const miss = await exec('memory_search', { query: '完全没有出现过的主题' });
 assert.equal(miss.count, 0);
@@ -160,7 +160,7 @@ assert.equal(read.body, '');
 const plain = await exec('memory_read', { id: distinct.id });
 assert.equal(plain.body, '另一条');
 assert.equal(plain.revision, 1);
-assert.match(render('memory_read', {}, plain), new RegExp(`^memory · 「发布顺序是啥」 · ${distinct.id} · 第 1 版`));
+assert.match(render('memory_read', {}, plain), new RegExp(`^memory · \\[[^\\]]+\\] 「发布顺序是啥」 · ${distinct.id}`));
 
 // 没点明归档还是彻底忘掉时不动盘，先返回待确认
 const undecided = await exec('memory_forget', { id: distinct.id });
@@ -169,7 +169,7 @@ assert.match(render('memory_forget', {}, undecided), new RegExp(`^memory · 先�
 assert.ok(store.locate(store.scopeOf(cwd), distinct.id));
 const archived = await exec('memory_forget', { id: distinct.id, mode: 'archive' });
 assert.equal(archived.id, distinct.id);
-assert.match(render('memory_forget', {}, archived), new RegExp(`^memory · archived "发布顺序是啥" · ${distinct.id}，可找回$`));
+assert.match(render('memory_forget', {}, archived), new RegExp(`^memory · archived \\[[^\\]]+\\] "发布顺序是啥" · ${distinct.id}，可找回$`));
 assert.equal(await exec('memory_save', { title: '发布顺序是啥', summary: '发版前要按顺序做的事', body: '第三条' }).then((v) => v.merged), false);
 
 // ── suggestion → keep → replay → reject ──────────────────────────────────────
@@ -231,10 +231,10 @@ assert.equal((await call('/lite-memory/keep', {}, { method: 'GET' })).status, 40
 // ── global layer ─────────────────────────────────────────────────────────────
 const global = await exec('memory_save', { title: '回复用中文', summary: '用户要求回复用中文', scope: 'global' });
 assert.equal(global.scope, 'global');
-assert.match(render('memory_save', {}, global), /^memory · saved \[全局\] "回复用中文" · mem_[a-z0-9]+ · 第 1 版$/);
+assert.match(render('memory_save', {}, global), /^memory · saved \[global\] "回复用中文" · mem_[a-z0-9]+$/);
 const globalSearch = await exec('memory_search', { query: '回复用中文' });
 assert.equal(globalSearch.count, 1);
-assert.match(render('memory_search', {}, globalSearch), /\[全局\] mem_/);
+assert.match(render('memory_search', {}, globalSearch), /\[global\] mem_/);
 assert.equal(typeof globalThis.__liteMemoryStats, 'function');
 const stats = globalThis.__liteMemoryStats(cwd);
 assert.ok(stats.count >= 1);

@@ -182,7 +182,7 @@ export const LIMITS = {
   entries: 200,
   globalEntries: 200,
   hardEntries: 1000,
-  entryBytes: 4096,
+  entryBytes: 1200,
   recordBytes: 10 * 1024,
   totalBytes: 512 * 1024,
   historyBytes: 512 * 1024,
