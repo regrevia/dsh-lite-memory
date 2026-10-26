@@ -131,7 +131,7 @@ window.__ModuleLoader__.load({
       return out;
     };
 
-    /** 同一轮里同层同 id 同用途只留一条，位置取首次出现、内容取最后一次。 */
+    /** 同轮同 id 同用途去重：位置取首次，内容取最后。 */
     const dedupe = (items) => {
       const seen = new Map();
       const out = [];
