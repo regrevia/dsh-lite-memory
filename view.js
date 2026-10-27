@@ -322,6 +322,26 @@ export const wordIn = (pool, word) => new RegExp(`(^|[^a-z0-9])${word.replace(/[
 
 const WEIGHT = { title: 3, keywords: 4, summary: 1.5, when: 1 };
 
+/** 最长公共连续片段：四个字以上连着重合，是「在说同一件事」的强证据。 */
+function longestRun(text, raw) {
+  /** 只比前 120 个字：够判断「是不是同一句话」，也把每次比对的代价压在常数级。 */
+  const left = plain(text, 120).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+  const right = plain(raw, 120).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+  if (!left || !right) return 0;
+  let best = 0;
+  let prev = new Array(right.length + 1).fill(0);
+  for (let i = 1; i <= left.length; i += 1) {
+    const row = new Array(right.length + 1).fill(0);
+    for (let j = 1; j <= right.length; j += 1) {
+      if (left[i - 1] !== right[j - 1]) continue;
+      row[j] = prev[j - 1] + 1;
+      if (row[j] > best) best = row[j];
+    }
+    prev = row;
+  }
+  return best;
+}
+
 /**
  * 轻量匹配：标题 / 旧标题 / 关键词 / 摘要各算各的分，先过阈值再排序。
  * 排序固定用 id 兜底，同一批数据每次顺序一致。
@@ -381,6 +401,15 @@ export function matchScore(record, query) {
   }
   if (!keywordWordHit && titleWordHit) { score += WEIGHT.title; hints.push('title'); }
   if (keywordWordHit) { score += WEIGHT.keywords; hints.push('keyword'); }
+  /** 四字以上的连续重合直接算强命中：句子换了说法但词还连着，就该被想起。 */
+  /** 分已经够的就不必算连续片段；这一步只是补「换了说法但词连着」的情况。 */
+  const run = score >= MATCH_FLOOR ? 0 : Math.max(0, ...[record.title, (record.aliases || []).join(' '), record.summary, record.when]
+    .filter(Boolean)
+    .map((text) => longestRun(text, raw)));
+  if (run >= 4) {
+    score += WEIGHT.title;
+    hints.push('phrase');
+  }
   const summaryScore = hit(record.summary, WEIGHT.summary);
   if (summaryScore > 0) {
     score += summaryScore;

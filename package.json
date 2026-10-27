@@ -1,6 +1,6 @@
 {
   "name": "dsh-lite-memory",
-  "version": "0.18.6",
+  "version": "0.18.7",
   "description": "On-demand memory for the DeepSeek Harness: nothing resident, at most three small cards on a real hit, bodies read on demand.",
   "type": "module",
   "main": "index.js",
@@ -8,7 +8,7 @@
     "dsh": ">=0.1.5"
   },
   "scripts": {
-    "test": "node test/store.test.mjs && node test/state.test.mjs && node test/view.test.mjs && node test/anchor.test.mjs && node test/recall.test.mjs && node test/evolution-read.test.mjs && node test/lexical.test.mjs && node test/control.test.mjs && node test/learning.test.mjs && node test/scenario.test.mjs && node test/crossing.test.mjs && node test/runtime-context.test.mjs && node test/client.test.mjs && node test/palace.test.mjs && node test/contract.test.mjs && node test/safety.test.mjs && node test/ha.test.mjs && node test/record.test.mjs",
+    "test": "node test/store.test.mjs && node test/state.test.mjs && node test/view.test.mjs && node test/anchor.test.mjs && node test/recall.test.mjs && node test/evolution-read.test.mjs && node test/lexical.test.mjs && node test/control.test.mjs && node test/learning.test.mjs && node test/scenario.test.mjs && node test/crossing.test.mjs && node test/runtime-context.test.mjs && node test/client.test.mjs && node test/palace.test.mjs && node test/contract.test.mjs && node test/safety.test.mjs && node test/ha.test.mjs && node test/record.test.mjs && node test/eval-seed.test.mjs",
     "bench": "node bench/bench.mjs",
     "bench:evolution": "node bench/evolution.mjs"
   },
