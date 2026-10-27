@@ -965,6 +965,10 @@ test('L03b 明确长期要求整理为空时也留下规则', () => {
 test('L03c 兜底不把没说范围的要求抬成全项目规则', () => {
   const vague = learning.pendingChangeFrom({ text: '以后口播开头先给结论。', cue: { explicitLongTerm: true } });
   assert.equal(vague.applicability, 'unresolved');
+  const allLines = learning.pendingChangeFrom({ text: '以后所有口播都先给结论。', cue: { explicitLongTerm: true } });
+  assert.equal(allLines.applicability, 'all_in_scope', '「所有口播」按项目层全范围收集');
+  const always = learning.pendingChangeFrom({ text: '以后一律先给结论。', cue: { explicitLongTerm: true } });
+  assert.equal(always.applicability, 'all_in_scope', '「一律」按项目层全范围收集');
   assert.deepEqual(vague.conditions, []);
   const scoped = learning.pendingChangeFrom({ text: '以后口播开头先给结论。', cue: { explicitLongTerm: true, taskKind: 'video' } });
   assert.equal(scoped.applicability, 'conditional');
@@ -972,6 +976,70 @@ test('L03c 兜底不把没说范围的要求抬成全项目规则', () => {
   const global = learning.pendingChangeFrom({ text: '以后这个项目默认用 pnpm。', cue: { explicitLongTerm: true } });
   assert.equal(global.applicability, 'all_in_scope');
   assert.deepEqual(global.conditions, []);
+});
+
+test('L03d 作用域在收集时固定，整理只能沿用或收窄', () => {
+  const human = (id, text) => ({ id, source: { kind: 'user' }, content: [{ type: 'text', text }] });
+  const anchor = { episodeId: 'ep_x', status: 'unbound', updatedAt: '2026-01-01T00:00:00.000Z' };
+  const narrow = learning.candidateFrom({ messages: [human('m1', '以后开头先给结论')], anchor, projectId: 'p' });
+  assert.equal(narrow.expectedTarget.applicability, 'unresolved');
+  const wide = learning.candidateFrom({ messages: [human('m2', '以后这个项目默认用 pnpm')], anchor, projectId: 'p' });
+  assert.equal(wide.expectedTarget.applicability, 'all_in_scope');
+
+  const refs = { feedback: { u0: 'm1' }, rules: {} };
+  const base = { target: 'new', feedbackType: 'spec_change', topicKey: '开头', currentText: '开头先给结论', evidence: ['u0'] };
+  const needsScope = learning.validateChange({ ...base, applicability: 'all_in_scope' }, { refs, rules: [], ranges: RANGES, expectedTarget: narrow.expectedTarget });
+  assert.equal(needsScope.ok, false);
+  assert.match(needsScope.reason, /不能.*全项目/);
+  assert.equal(learning.validateChange({ ...base, applicability: 'unresolved' }, { refs, rules: [], ranges: RANGES, expectedTarget: narrow.expectedTarget }).ok, true);
+  assert.equal(learning.validateChange({ ...base, applicability: 'all_in_scope' }, { refs, rules: [], ranges: RANGES, expectedTarget: wide.expectedTarget }).ok, true);
+
+  const video = { scope: 'episode', episodeId: 'ep_x', taskKind: 'video' };
+  const episodeWide = learning.validateChange({ ...base, applicability: 'all_in_scope' }, { refs, rules: [], ranges: RANGES, expectedTarget: video });
+  assert.equal(episodeWide.ok, false, '作品规则不能抬成全项目');
+  const droppedKind = learning.validateChange({ ...base, applicability: 'conditional', conditions: [{ key: 'phase', value: 'script' }] }, { refs, rules: [], ranges: RANGES, expectedTarget: video });
+  assert.equal(droppedKind.ok, false, '不能删掉收集时的任务范围');
+  const keptKind = learning.validateChange({ ...base, applicability: 'conditional', conditions: [{ key: 'taskKind', value: 'video' }, { key: 'phase', value: 'script' }] }, { refs, rules: [], ranges: RANGES, expectedTarget: video });
+  assert.equal(keptKind.ok, true, keptKind.reason);
+
+  const fallback = learning.pendingChangeFrom({ text: '以后所有开头都先给结论。', cue: { explicitLongTerm: true }, expectedTarget: narrow.expectedTarget });
+  assert.equal(fallback.applicability, 'unresolved', '兜底不重新推导作用域');
+  assert.equal(learning.pendingChangeFrom({ text: '以后开头都先给结论。', cue: { explicitLongTerm: true }, expectedTarget: wide.expectedTarget }).applicability, 'all_in_scope');
+});
+
+test('L03e 先按相关性排序再截断，输入顺序不挤掉真正相关的旧规则', () => {
+  const rules = [];
+  for (let index = 0; index < 32; index += 1) {
+    rules.push({
+      id: `mem_${String(index).padStart(2, '0')}`,
+      state: 'active',
+      updated: `2026-01-${String((index % 28) + 1).padStart(2, '0')}T00:00:00.000Z`,
+      title: index === 31 ? '字幕字号' : `无关规则${index}`,
+      summary: '',
+      body: index === 31 ? '字幕固定 32 号' : '',
+      conditions: [],
+    });
+  }
+  const selected = learning.selectRules(rules, { query: '字幕太小了，改大一点', dimensions: ['字幕'], limit: 6 });
+  assert.equal(selected.length, 6);
+  assert.ok(selected.some((row) => row.id === 'mem_31'), '相关但排在最后的规则要进候选');
+  assert.equal(learning.selectRules(rules, { limit: 32 }).length, 32, '候选池上限是 32 条，不是先砍到 6 条');
+});
+
+test('L03f 整理器规则先按状态和最近使用排序再取 8 条', () => {
+  const rules = [];
+  for (let index = 0; index < 12; index += 1) {
+    rules.push({
+      id: `mem_${String(index).padStart(2, '0')}`,
+      state: index === 11 ? 'active' : index === 10 ? 'trial' : 'paused',
+      updatedAt: `2026-01-${String(index + 1).padStart(2, '0')}T00:00:00.000Z`,
+      title: `规则${index}`,
+    });
+  }
+  const ordered = learning.orderOrganizerRules(rules);
+  assert.equal(ordered.length, learning.LIMITS.organizerRules);
+  assert.equal(ordered[0].id, 'mem_11', '生效规则优先于暂停规则');
+  assert.equal(ordered[1].id, 'mem_10', '试用规则排在暂停之前');
 });
 
 test('L04 先算目标状态再查配额，过期候选可恢复', () => {

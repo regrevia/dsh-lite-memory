@@ -57,7 +57,7 @@ const seedRule = (scope, title) => {
     const row = draft.entries.find((entry) => entry.id === id);
     row.origin = 'project_evolution';
     row.current.conditions = [{ key: 'seriesId', value: '口播' }];
-    row.maintenance.learning = { state: 'active' };
+    row.maintenance.learning = { state: 'active', specDigest: 'seeded' };
     return { changed: true };
   });
   return id;

@@ -63,7 +63,7 @@ const save = (scope, fields) => {
 };
 
 /** 直接种一条实验来源条目，绕开 PR4 的整理入口。 */
-function seedRule(scope, { title, body, summary, conditions = [], learning = { state: 'active' }, topicKey, tags = [] }) {
+function seedRule(scope, { title, body, summary, conditions = [], learning = { state: 'active', specDigest: 'seeded' }, topicKey, tags = [] }) {
   const saved = save(scope, { title, body, summary, tags });
   state.transact(scope, {}, (draft) => {
     const row = draft.entries.find((entry) => entry.id === saved.id);
@@ -388,7 +388,7 @@ const scopeOf = (dir) => store.scopeOf(dir);
     title: '暂停口播规则',
     body: '这条已经暂停，不该给正文。',
     conditions: [{ key: 'seriesId', value: '口播' }],
-    learning: { state: 'paused', blockedReason: 'needs_revalidation' },
+    learning: { state: 'paused', blockedReason: 'needs_revalidation', specDigest: 'seeded' },
   });
   enable(scope, { seriesId: '口播' });
   const runtime = boot();
@@ -435,7 +435,7 @@ const scopeOf = (dir) => store.scopeOf(dir);
   const dir = mkdir('fixed');
   const scope = scopeOf(dir);
   save(scope, { title: '固定发布检查', body: '发版前跑一遍检查。', tags: ['发布'] });
-  seedRule(scope, { title: '实验发布检查', body: '实验规则：发版前先备份。', tags: ['发布'], learning: { state: 'active' } });
+  seedRule(scope, { title: '实验发布检查', body: '实验规则：发版前先备份。', tags: ['发布'], learning: { state: 'active', specDigest: 'seeded' } });
   enable(scope);
   const runtime = boot();
   const agent = makeAgent('a-fixed', dir);
@@ -473,7 +473,7 @@ const scopeOf = (dir) => store.scopeOf(dir);
     title: '过期口播规则',
     body: '这条试用已经到期，不该自动出现。',
     conditions: [{ key: 'seriesId', value: '口播' }],
-    learning: { state: 'trial', trialUntil: new Date(Date.now() - 60_000).toISOString() },
+    learning: { state: 'trial', specDigest: 'seeded', trialUntil: new Date(Date.now() - 60_000).toISOString() },
   });
   enable(scope, { seriesId: '口播' });
   const runtime = boot();
@@ -494,7 +494,7 @@ const scopeOf = (dir) => store.scopeOf(dir);
     title: '快到期口播规则',
     body: '这条试用马上到期，过期后同一请求也不能再出现。',
     conditions: [{ key: 'seriesId', value: '口播' }],
-    learning: { state: 'trial', trialUntil: new Date(Date.now() + 700).toISOString() },
+    learning: { state: 'trial', specDigest: 'seeded', trialUntil: new Date(Date.now() + 700).toISOString() },
   });
   enable(scope, { seriesId: '口播' });
   const runtime = boot();
@@ -514,14 +514,14 @@ const scopeOf = (dir) => store.scopeOf(dir);
     title: '快到期的主题规则',
     body: '这条试用马上到期。',
     conditions: [{ key: 'seriesId', value: '口播' }],
-    learning: { state: 'trial', trialUntil: new Date(Date.now() + 700).toISOString() },
+    learning: { state: 'trial', specDigest: 'seeded', trialUntil: new Date(Date.now() + 700).toISOString() },
     topicKey: 'theme',
   });
   seedRule(scope, {
     title: '长期口播开头',
     body: '开场三句内给结论。',
     conditions: [{ key: 'seriesId', value: '口播' }],
-    learning: { state: 'active' },
+    learning: { state: 'active', specDigest: 'seeded' },
     topicKey: 'opening',
   });
   enable(scope, { seriesId: '口播' });

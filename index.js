@@ -199,6 +199,7 @@ function keepHandler(webServer, cwdForSession) {
         : pathname === REMOTE_PATH + '/keep' ? 'keep'
           : pathname === REMOTE_PATH + '/citations' ? 'citations'
             : pathname === REMOTE_PATH + '/body' ? 'body'
+              : pathname === REMOTE_PATH + '/entry' ? 'entry'
               : pathname === REMOTE_PATH + '/move' ? 'move'
                 : pathname === REMOTE_PATH + '/overview' ? 'overview'
                   : pathname === REMOTE_PATH + '/control' ? 'control'
@@ -297,6 +298,52 @@ function keepHandler(webServer, cwdForSession) {
         evidenceRef: found.evidenceRef || '',
         processingStatus,
       });
+    }
+
+    /**
+     * 面板改一条普通记忆：只改当前项目里的标题与正文，别层只读。
+     * 必须带读到的版本，写前再对一次；中间被别人改过就拒绝，不覆盖。
+     */
+    if (action === 'entry') {
+      const edit = typeof body.edit === 'string' ? body.edit : '';
+      if (edit && edit !== 'save') return sendJson(res, 400, { ok: false, reason: '不认识这个操作' });
+      const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
+      if (!sessionId) return sendJson(res, 400, { ok: false, reason: '缺少 sessionId' });
+      const cwd = typeof cwdForSession === 'function' ? cwdForSession(sessionId) : '';
+      if (!cwd) return sendJson(res, 409, { ok: false, reason: '这个会话还没有项目目录' });
+      const scope = scopeOf(cwd);
+      if (!scope.confirmed) return sendJson(res, 409, { ok: false, reason: '项目根还没确认，先重新打开这个项目' });
+      const scopeKey = typeof body.scopeKey === 'string' ? body.scopeKey : '';
+      if (scopeKey && scopeKey !== scope.key) {
+        return sendJson(res, 409, { ok: false, reason: '别的项目只读，回到那个项目里再改' });
+      }
+      if (!memoryEnabled(scope)) return sendJson(res, 409, { ok: false, code: 'memory_disabled', reason: '本项目记忆已关闭' });
+      const id = typeof body.id === 'string' ? body.id : '';
+      const title = typeof body.title === 'string' ? body.title : '';
+      const text = typeof body.body === 'string' ? body.body : '';
+      const expectedRevision = Number(body.expectedRevision);
+      if (!id) return sendJson(res, 400, { ok: false, reason: '缺少这条记忆' });
+      if (!Number.isInteger(expectedRevision) || expectedRevision < 1) {
+        return sendJson(res, 409, { ok: false, reason: '这条记忆的版本不清楚，先刷新再改' });
+      }
+      if (!title.trim()) return sendJson(res, 400, { ok: false, reason: '标题不能为空' });
+      try {
+        const result = saveEntry(scope, { id, title, body: text, expectedRevision, scope: 'project', source: 'user_explicit' });
+        if (!result || !result.record) {
+          const reason = result && result.reasonCode === 'memory_disabled' ? '本项目记忆已关闭'
+            : result && result.needsResolution ? '改动和另一条太像，先去那条上改'
+              : '这次没有改动';
+          return sendJson(res, 409, { ok: false, reason });
+        }
+        return sendJson(res, 200, { ok: true, title: result.record.title, revision: result.record.revision, changed: result.noop !== true });
+      } catch (error) {
+        const conflict = error && error.code === 'conflict';
+        return sendJson(res, conflict ? 409 : 400, {
+          ok: false,
+          retry: conflict,
+          reason: error instanceof Error ? error.message : '这次没有改动',
+        });
+      }
     }
 
     /**
@@ -837,10 +884,11 @@ function refIdOf(scope, args, label = '记忆') {
   if (id) return id;
   const title = typeof args.title === 'string' ? args.title.trim() : '';
   if (!title) throw new Error(`要读或要忘一条${label}，先给标题`);
-  /** 显式指定 global 时只解析全局层：同名项目条目不会被顺手改掉。 */
-  const base = args && args.scope === 'global' ? globalScope() : scope;
+  /** 显式指定层时只解析那一层：同名条目不会被顺手改掉，项目层也不会命中全局。 */
+  const explicit = args && args.scope === 'global' ? globalScope() : args && args.scope === 'project' ? scope : null;
+  const sources = explicit ? [explicit] : runtimeLayers(scope);
   /** 运行时只解析当前项目与全局：别的项目正文不进本会话。 */
-  for (const target of runtimeLayers(base)) {
+  for (const target of sources) {
     let index;
     try { index = loadIndex(target); } catch { continue; }
     const hit = (index.entries || []).find((entry) => entry && entry.status !== 'archived'
@@ -848,7 +896,7 @@ function refIdOf(scope, args, label = '记忆') {
     if (hit) return hit.id;
   }
   /** 忘掉已归档的条目也要能按标题解析到；归档不会因此重新参与召回。 */
-  for (const target of runtimeLayers(base)) {
+  for (const target of sources) {
     let index;
     try { index = loadIndex(target); } catch { continue; }
     const hit = (index.archived || []).find((entry) => entry
@@ -2161,12 +2209,15 @@ export function apply(ctx, config) {
         return value;
       }
       const record = readEntry(readScope, refIdOf(readScope, args), {
+        layers: args.scope ? [readScope] : undefined,
         context,
         allowExperimental,
         /** 只有真正把正文交出去的读取才算用过：条件未知/被取代/过期不更新使用记录。 */
         usage: (item) => view.eligibility(item, gateRuntime, 'read').ok,
       });
       if (!record) throw new Error(`没有「${String(args.title || args.id || '').trim()}」这条记忆`);
+      /** 归档条目还能按标题找到：只回状态，不交正文，也不把它当成「不存在」。 */
+      if (record.status === 'archived') return { title: record.title, scope: record.scope, status: 'archived', body: '' };
       const gate = view.eligibility(record, gateRuntime, 'read');
       if (!gate.ok) return { scope: record.scope, status: gate.status, body: '' };
       /** 条件未知或不适用的条目只报状态：标题只能定位，不能证明适用，正文一律不先返回。 */
@@ -2256,21 +2307,22 @@ export function apply(ctx, config) {
           throw new Error(`「${forgetTitle}」在项目层和全局层各有一条：删全局加 scope="global"，删项目加 scope="project"`);
         }
       }
+      const onlyLayer = args.scope === 'global' ? globalScope() : args.scope === 'project' ? scope : null;
       const refId = refIdOf(scope, args);
-      const located = locate(scope, refId);
+      const located = locate(scope, refId, onlyLayer ? { layers: [onlyLayer] } : {});
       if (!located && !args.mode) throw new Error(`没有「${String(args.title || args.id || '').trim()}」这条记忆`);
       if (!args.mode) {
         return { title: located.record.title || '', mode: 'needs_resolution', scope: located.scope.key === 'global' ? 'global' : 'project' };
       }
       let dropped;
       try {
-        dropped = forget(scope, refId, { mode: args.mode });
+        dropped = forget(scope, refId, onlyLayer ? { mode: args.mode, layers: [onlyLayer] } : { mode: args.mode });
       } catch (error) {
         if (error && error.code === 'purge_pending') {
           const layer = located ? located.scope : scope;
           try {
             state.resumePurge(layer);
-            dropped = forget(scope, refId, { mode: args.mode });
+            dropped = forget(scope, refId, onlyLayer ? { mode: args.mode, layers: [onlyLayer] } : { mode: args.mode });
           } catch (again) {
             if (again && again.code === 'purge_pending') {
               return {
@@ -2683,7 +2735,7 @@ export function apply(ctx, config) {
       if ((feedbackRevisions.get(scope.key) || 0) !== candidate.feedbackRevision) {
         throw new Error('反馈已更新，这轮结果没采用');
       }
-      const parsed = learning.parseOutput(text, { finish, refs: input.refs, rules: input.rules, ranges });
+      const parsed = learning.parseOutput(text, { finish, refs: input.refs, rules: input.rules, ranges, expectedTarget: candidate.expectedTarget });
       if (!parsed.ok) throw new Error(parsed.reason);
       /** 用户已经把要求说成长期规则，模型仍返回空时至少留一条规则，不让这条反馈无声消失。 */
       const changes = parsed.changes.length

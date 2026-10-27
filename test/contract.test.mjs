@@ -154,6 +154,10 @@ assert.equal(distinct.needsResolution, false);
 assert.equal(distinct.merged, false);
 assert.equal(distinct.id, undefined);
 assert.notEqual(distinct.title, saved.title);
+/** 刚存完就能查回来：不是只统计条数，命中的必须是刚存的那一条。 */
+const justSaved = await exec('memory_search', { query: '发布顺序是啥' });
+assert.ok(justSaved.count >= 1);
+assert.match(render('memory_search', {}, justSaved), /「发布顺序是啥」/);
 
 // ── search / read / forget ───────────────────────────────────────────────────
 const hits = await exec('memory_search', { query: '发布流程' });
@@ -197,6 +201,10 @@ const archived = await exec('memory_forget', { title: distinct.title, mode: 'arc
 assert.equal(archived.title, distinct.title);
 assert.equal(archived.id, undefined);
 assert.match(render('memory_forget', {}, archived), /^memory · archived \[[^\]]+\] "发布顺序是啥"，可找回$/);
+const readArchived = await exec('memory_read', { title: distinct.title });
+assert.equal(readArchived.status, 'archived');
+assert.equal(readArchived.body, '');
+assert.match(render('memory_read', { title: distinct.title }, readArchived), /^memory · 这条记忆已归档$/);
 assert.equal(await exec('memory_save', { title: '发布顺序是啥', summary: '发版前要按顺序做的事', body: '第三条' }).then((v) => v.merged), false);
 
 // ── suggestion → keep → replay → reject ──────────────────────────────────────
@@ -419,7 +427,7 @@ state.transact(evoReadScope, {}, (draft) => {
   const row = draft.entries.find((entry) => entry.id === evoRow.id);
   row.origin = 'project_evolution';
   row.current.conditions = [{ key: 'seriesId', value: '口播' }];
-  row.maintenance = { ...(row.maintenance || {}), learning: { state: 'active', source: 'evolution' } };
+  row.maintenance = { ...(row.maintenance || {}), learning: { state: 'active', source: 'evolution', specDigest: 'seeded' } };
   return { changed: true };
 });
 await store.setTaskDefault(evoReadScope, { seriesId: '口播' });
@@ -477,7 +485,7 @@ state.transact(evoReadScope, {}, (draft) => {
   const row = draft.entries.find((entry) => entry.id === manageRow.id);
   row.origin = 'project_evolution';
   row.current.conditions = [{ key: 'seriesId', value: '口播' }];
-  row.maintenance = { ...(row.maintenance || {}), learning: { state: 'pending', source: 'evolution' } };
+  row.maintenance = { ...(row.maintenance || {}), learning: { state: 'pending', source: 'evolution', specDigest: 'seeded' } };
   return { changed: true };
 });
 const manageSnap = await call('/lite-memory/evolution', { sessionId: 'session-evo-read', learningAction: 'snapshot' });
@@ -529,7 +537,7 @@ assert.ok(closedRow, '关闭前的样例落在这一层');
 state.transact(closedScope, {}, (draft) => {
   const row = draft.entries.find((entry) => entry.id === closedRow.id);
   row.origin = 'project_evolution';
-  row.maintenance = { ...(row.maintenance || {}), learning: { state: 'active' } };
+  row.maintenance = { ...(row.maintenance || {}), learning: { state: 'active', specDigest: 'seeded' } };
   return { changed: true };
 });
 assert.equal((await call('/lite-memory/evolution', { sessionId: 'session-closed', enabled: true })).status, 200);
@@ -757,7 +765,7 @@ llmImpl = {
           ? { target: ref, feedbackType: 'execution_miss', currentText: '交付前先核对开头是否先给结论。', evidence: ['u0'], persistence: 'project_candidate' }
           : orgMode === 'sample'
             ? { target: ref, feedbackType: 'artifact_accept', evidence: ['u0'], persistence: 'project_candidate' }
-            : { target: 'new', feedbackType: 'spec_change', topicKey: '开头', currentText: '开头先给结论。', applicability: 'all_in_scope', conditions: [], evidence: ['u0'], persistence: 'project_candidate' };
+            : { target: 'new', feedbackType: 'spec_change', topicKey: '开头', currentText: '开头先给结论。', applicability: 'conditional', conditions: [{ key: 'taskKind', value: 'video' }, { key: 'seriesId', value: '口播' }, { key: 'phase', value: 'brief' }], evidence: ['u0'], persistence: 'project_candidate' };
         yield { type: 'text-delta', text: JSON.stringify({ changes: [change] }) };
         yield { type: 'usage', usage: { inputTokens: 12, outputTokens: 6 } };
         yield { type: 'finish', reason: { kind: 'stop' } };
@@ -899,10 +907,56 @@ assert.equal(ovGlobal.status, 200);
 assert.equal(ovGlobal.body.selected.kind, 'global');
 assert.ok(ovGlobal.body.selected.records.some((row) => row.title === '观察全局'));
 
-// 详情按服务端枚举过的 scopeKey 取；内部路径、未知键一律不放行
+// 面板改正文：只动当前项目、必须带读到的版本，冲突和改名撞车都不覆盖
+const ovRow = ov.body.selected.records.find((row) => row.title === '开场先给结论');
+const ovEntry = await call('/lite-memory/entry', {
+  sessionId: 'session-overview', scopeKey: ov.body.current.key, id: ovRow.id,
+  title: '开场先给结论', body: '开场 2 句内给结论，结尾留 3 秒；本地端口 49631。', expectedRevision: ovRow.revision,
+});
+assert.equal(ovEntry.status, 200);
+assert.equal(ovEntry.body.ok, true);
+assert.equal(ovEntry.body.title, '开场先给结论');
+assert.ok(ovEntry.body.revision > ovRow.revision, '改过就升版本');
+const ovKept = store.readEntry(store.scopeOf(ovCwd), ovRow.id);
+assert.deepEqual(ovKept.tags, ['口播', '开头'], '只改标题正文，标签等字段保持');
+assert.equal(ovKept.kind, 'note');
+const ovEditedBody = await call('/lite-memory/body', { sessionId: 'session-overview', title: '开场先给结论', scopeKey: ov.body.current.key });
+assert.equal(ovEditedBody.body.body, '开场 2 句内给结论，结尾留 3 秒；本地端口 49631。');
+const ovStale = await call('/lite-memory/entry', {
+  sessionId: 'session-overview', scopeKey: ov.body.current.key, id: ovRow.id,
+  title: '开场先给结论', body: '被旧版本覆盖。', expectedRevision: ovRow.revision,
+});
+assert.equal(ovStale.status, 409);
+assert.equal(ovStale.body.retry, true, '版本过期要明说可以重试');
+const ovAfterStale = await call('/lite-memory/body', { sessionId: 'session-overview', title: '开场先给结论', scopeKey: ov.body.current.key });
+assert.equal(ovAfterStale.body.body, '开场 2 句内给结论，结尾留 3 秒；本地端口 49631。', '旧版本写不进去');
+const ovRenameClash = await call('/lite-memory/entry', {
+  sessionId: 'session-overview', scopeKey: ov.body.current.key, id: ovRow.id,
+  title: '封面留白', body: '开场 2 句内给结论，结尾留 3 秒；本地端口 49631。', expectedRevision: ovEntry.body.revision,
+});
+assert.equal(ovRenameClash.status, 400, '改名撞上另一条要拒绝');
+assert.match(ovRenameClash.body.reason, /同名/);
+const ovOtherEdit = await call('/lite-memory/entry', {
+  sessionId: 'session-overview', scopeKey: ov.body.current.key, id: ovOther.body && ovOther.body.record ? ovOther.body.record.id : 'mem_other',
+  title: '别的项目', body: '想跨项目改。', expectedRevision: 1,
+});
+assert.equal(ovOtherEdit.status >= 400, true, '别的项目不能从这里改');
+const ovGlobalRow = ovGlobal.body.selected.records.find((row) => row.title === '观察全局');
+const ovGlobalEdit = await call('/lite-memory/entry', {
+  sessionId: 'session-overview', scopeKey: 'global', id: ovGlobalRow.id,
+  title: '观察全局', body: '想改全局。', expectedRevision: ovGlobalRow.revision,
+});
+assert.equal(ovGlobalEdit.status, 409, '全局层在项目会话里只读');
+assert.equal((await call('/lite-memory/entry', { sessionId: 'session-overview', scopeKey: ov.body.current.key, id: ovRow.id, title: '', body: 'x', expectedRevision: 1 })).status, 400);
+
+// 详情按服务端枚举过的 scopeKey 取；内部路径、未知键一律不放行。
+// 宫殿里点开一条只走这个只读入口：不改记忆、不记用量、不占额度。
+const ovStateFile = path.join(store.scopeOf(ovCwd).dir, 'state.json');
+const ovStateBefore = fs.readFileSync(ovStateFile, 'utf8');
 const ovBody = await call('/lite-memory/body', { sessionId: 'session-overview', title: '开场先给结论', scopeKey: ov.body.current.key });
 assert.equal(ovBody.status, 200);
-assert.equal(ovBody.body.body, '开场三句内给结论。');
+assert.equal(fs.readFileSync(ovStateFile, 'utf8'), ovStateBefore, '面板看正文不写状态');
+assert.equal(ovBody.body.body, '开场 2 句内给结论，结尾留 3 秒；本地端口 49631。');
 assert.equal(ovBody.body.scopeLabel, path.basename(ovCwd));
 const ovOtherBody = await call('/lite-memory/body', { sessionId: 'session-overview', title: '别的项目', scopeKey: store.scopeOf(ovOtherCwd).key });
 assert.equal(ovOtherBody.status, 200);
@@ -924,7 +978,7 @@ assert.equal(fs.existsSync(path.join(store.scopeOf(ovUnknownCwd).dir, 'state.jso
 state.transact(store.scopeOf(ovCwd), {}, (draft) => {
   const row = draft.entries.find((entry) => (entry.current || {}).title === '封面留白');
   row.origin = 'project_evolution';
-  row.maintenance = { ...(row.maintenance || {}), learning: { state: 'trial', source: 'evolution' } };
+  row.maintenance = { ...(row.maintenance || {}), learning: { state: 'trial', source: 'evolution', specDigest: 'seeded' } };
   return { changed: true };
 });
 const ovExperimental = await call('/lite-memory/overview', { sessionId: 'session-overview' });

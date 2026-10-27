@@ -817,6 +817,38 @@ test('项目实验默认关闭；打开才放行实验读取，关闭暂停试�
   assert.equal(search(scope, '实验规则', 4).some((row) => row.id === target.id), false);
 });
 
+test('旧实验规则缺作用域指纹时，打开开关只转待复核并保留正文来源', () => {
+  const scope = fresh('evolution-legacy-quarantine');
+  upsert(scope, { title: '旧实验规则', summary: '旧规则的作用域没冻结过', body: '以前留下的正文' });
+  const target = stateOf(scope).entries.find((entry) => entry.current.title === '旧实验规则');
+  assert.ok(target);
+  state.transact(scope, {}, (draft) => {
+    const row = draft.entries.find((entry) => entry.id === target.id);
+    row.origin = 'project_evolution';
+    row.maintenance.learning = { state: 'trial', trialUntil: '2099-01-01T00:00:00.000Z' };
+    row.maintenance.sourceRefs = [{ kind: 'message', id: 'msg_legacy', sessionId: 's-legacy' }];
+    return { changed: true };
+  });
+  const on = setEvolution(scope, true, { operationId: 'op-legacy-on' });
+  assert.equal(on.ok, true);
+  assert.equal(on.changed, true);
+  const row = stateOf(scope).entries.find((entry) => entry.id === target.id);
+  assert.equal(row.current.body, '以前留下的正文');
+  assert.deepEqual(row.maintenance.sourceRefs, [{ kind: 'message', id: 'msg_legacy', sessionId: 's-legacy' }]);
+  assert.equal(row.maintenance.reviewState, 'legacy_unreviewed');
+  assert.equal(row.maintenance.learning.state, 'paused');
+  assert.equal(row.maintenance.learning.blockedReason, 'needs_scope_review');
+  assert.equal(search(scope, '旧实验规则', 4).some((entry) => entry.id === target.id), false);
+  assert.equal(search(scope, '旧实验规则', 4, { allowExperimental: true }).some((entry) => entry.id === target.id), false);
+  const snap = store.learningSnapshot(scope);
+  const shown = snap.rules.find((rule) => rule.title === '旧实验规则');
+  assert.ok(shown, '待复核规则仍要出现在面板里');
+  assert.equal(shown.reviewState, 'legacy_unreviewed');
+  assert.equal(shown.state, 'paused');
+  const again = setEvolution(scope, true);
+  assert.equal(again.changed, false, '重复打开不再产生写入');
+});
+
 test('实验策略版本不认时保持关闭，开关拒绝改动且盘上不变', () => {
   const scope = fresh('evolution-policy');
   upsert(scope, { title: '普通规则', summary: '普通规则', body: '正文' });

@@ -22,6 +22,7 @@ const ctx = {
 };
 apply(ctx, { mode: 'adaptive' });
 const exec = (name, args, cwd) => defs.get(name).execute(args, { agent: { cwd } });
+const render = (name, args, value) => defs.get(name).output.render(args, value)[0].text;
 
 const dirOf = (label) => {
   const dir = path.join(os.tmpdir(), `lite-memory-layer-${label}-${Math.random().toString(16).slice(2, 8)}`);
@@ -87,8 +88,10 @@ store.saveEntry(store.scopeOf(projectB), {
 const readGlobal = await exec('memory_read', { title: '同名发布约定', scope: 'global' }, projectB);
 assert.equal(readGlobal.status, 'ok');
 assert.match(readGlobal.body, /远端已推送/, 'scope:global 必须读全局那条');
+assert.match(render('memory_read', { title: '同名发布约定', scope: 'global' }, readGlobal), /^memory · \[global\] 「同名发布约定」/, '读到的全局条目要带 [global]，不能冒充当前项目');
 const readProject = await exec('memory_read', { title: '同名发布约定' }, projectB);
 assert.match(readProject.body, /CHANGELOG/, '不指定范围时先读当前项目');
+assert.doesNotMatch(render('memory_read', { title: '同名发布约定' }, readProject), /\[global\]/, '项目条目不能被标成全局');
 
 // 同名条目跨层更新：不指定范围先报候选，指定 global 只改全局，项目条目原样。
 const ambiguous = await exec('memory_save', {
@@ -140,6 +143,28 @@ await exec('memory_forget', { title: '乙项目发布约定', mode: 'purge' }, p
 assert.equal(store.locateByTitle(store.scopeOf(projectB), '乙项目发布约定'), null, '归档后可按标题 purge');
 assert.equal(store.locateByTitle(store.scopeOf(projectB), '乙项目发布约定', { crossLayer: true }), null, '彻底删除后哪一层都查不到');
 assert.equal(store.readEntry(store.scopeOf(projectB), ownRecord.record.id), null, '正文也不在了');
+
+// 显式 scope="project" 只解析项目层：全局唯一条目不能被读，更不能被 purge 掉。
+const globalOnly = store.saveEntry(store.globalScope(), {
+  title: '全局唯一凭据入口',
+  summary: '全局：凭据只从密码管理器取',
+  body: '全局：凭据只从密码管理器取，不写进仓库。',
+  memoryClass: 'personal_preference',
+});
+assert.ok(globalOnly.record, '全局条目已写入');
+await assert.rejects(
+  () => exec('memory_read', { title: '全局唯一凭据入口', scope: 'project' }, projectB),
+  /没有「全局唯一凭据入口」这条记忆/,
+  '显式项目层不得读到全局条目',
+);
+await assert.rejects(
+  () => exec('memory_forget', { title: '全局唯一凭据入口', scope: 'project', mode: 'purge' }, projectB),
+  /没有「全局唯一凭据入口」这条记忆/,
+  '显式项目层不得彻底删除全局条目',
+);
+const globalOnlyAfter = store.locate(store.scopeOf(projectB), globalOnly.record.id, { layers: [store.globalScope()] });
+assert.ok(globalOnlyAfter, '全局条目仍在原层');
+assert.match(globalOnlyAfter.record.body || '', /密码管理器/, '正文没有被错层删除');
 
 // 相近条目在另一层时，确认提示要给出能落地的动作：更新就落到那一层，否则会另建一条。
 const globalDraft = store.saveEntry(store.scopeOf(projectB), {
@@ -196,7 +221,9 @@ const globalForget = await exec('memory_forget', { title: '同名发布约定', 
 assert.equal(globalForget.mode, 'archive');
 assert.equal(globalForget.scope, 'global');
 assert.equal((await exec('memory_read', { title: '同名发布约定' }, projectB)).status, 'ok', '项目条目没被一起归档');
-assert.equal((await exec('memory_read', { title: '同名发布约定', scope: 'global' }, projectB)).status, 'gone');
+const archivedGlobal = await exec('memory_read', { title: '同名发布约定', scope: 'global' }, projectB);
+assert.equal(archivedGlobal.status, 'archived', '归档条目按标题只报已归档');
+assert.equal(archivedGlobal.body, '');
 
 // 别的项目正在写，不影响本项目的读和写：运行时锁只覆盖当前项目和全局。
 store.saveEntry(store.scopeOf(projectB), {
@@ -231,5 +258,35 @@ const lockedSave = await exec('memory_save', { title: '锁隔离验证二', summ
 assert.equal(lockedSave.error, undefined);
 assert.equal(lockedSave.scope, 'project');
 holder.kill();
+
+// 关联清单也要标层：项目邻居与全局邻居一眼分得清，不靠标题猜。
+const globalLinkTarget = store.saveEntry(store.globalScope(), {
+  title: '全局关联目标',
+  summary: '全局层的邻居',
+  body: '全局层的邻居正文。',
+  memoryClass: 'personal_preference',
+});
+assert.ok(globalLinkTarget.record);
+const projectLinkTarget = store.saveEntry(store.scopeOf(projectB), {
+  title: '项目关联目标',
+  summary: '项目层的邻居',
+  body: '项目层的邻居正文。',
+  memoryClass: 'project_fact',
+  resolution: 'distinct',
+});
+assert.ok(projectLinkTarget.record);
+const linked = await exec('memory_save', {
+  title: '带两个邻居的条目',
+  summary: '同时关联项目与全局',
+  body: '同时关联项目与全局。',
+  memoryClass: 'project_fact',
+  links: [{ title: '项目关联目标' }, { title: '全局关联目标' }],
+}, projectB);
+assert.equal(linked.error, undefined);
+const linkView = await exec('memory_read', { title: '带两个邻居的条目', view: 'links' }, projectB);
+const linkText = render('memory_read', { title: '带两个邻居的条目', view: 'links' }, linkView);
+assert.match(linkText, /「项目关联目标」/);
+assert.match(linkText, /\[global\] 「全局关联目标」/, '全局邻居要带 [global]');
+assert.doesNotMatch(linkText, /\[global\] 「项目关联目标」/, '项目邻居不能被标成全局');
 
 console.log('layer-read ok');

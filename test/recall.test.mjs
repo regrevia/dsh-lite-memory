@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -83,6 +84,17 @@ const save = (scope, fields) => {
     ...fields,
   });
   return { ...result, id: result.record?.id ?? result.id };
+};
+
+/** 有效期这类时间不能靠等待制造：直接改热状态，并同步重算校验和。 */
+const patchState = (scope, id, patch) => {
+  const file = path.join(scope.dir, 'state.json');
+  const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const entry = raw.payload.entries.find((row) => row.id === id);
+  assert.ok(entry, `state 里没有 ${id}`);
+  Object.assign(entry, patch);
+  raw.checksum = `sha256:${crypto.createHash('sha256').update(JSON.stringify(raw.payload)).digest('hex')}`;
+  fs.writeFileSync(file, `${JSON.stringify(raw, null, 2)}\n`);
 };
 
 const cwdA = mkdir('a');
@@ -448,6 +460,38 @@ assert.notEqual(bootA.provider.text({ agent: agentB, signal: signalB }), prepare
   assert.equal(value.status, 'ok');
   assert.equal(win.bytes - before, Buffer.byteLength(JSON.stringify(value)));
   assert.ok(win.bytes <= 8192);
+}
+
+// 生命周期退出默认召回：被取代、过期的条目不再自动注入，也不再进手动检索。
+{
+  const runtime = boot();
+  const cwdLife = mkdir('lifecycle');
+  const scopeLife = store.scopeOf(cwdLife);
+  const oldDeploy = save(scopeLife, {
+    title: '旧部署目标', summary: '部署到 staging，旧流程。', body: '旧流程只发 staging。', resolution: 'distinct',
+  });
+  const newDeploy = save(scopeLife, {
+    title: '新部署目标', summary: '部署到 production，先跑测试。', body: '新流程先跑测试再发 production。', resolution: 'distinct',
+    supersedes: oldDeploy.id,
+  });
+  const stalePort = save(scopeLife, {
+    title: '临时调试端口', summary: '本地服务跑在 18080。', body: '旧端口已经不用了。', resolution: 'distinct',
+  });
+  patchState(scopeLife, stalePort.id, {
+    validFrom: new Date(Date.now() - 7200_000).toISOString(),
+    validUntil: new Date(Date.now() - 3600_000).toISOString(),
+  });
+  const agentLife = makeAgent('agent-lifecycle', cwdLife);
+  const lifeSignal = await prepare(runtime, agentLife, '部署目标怎么走，临时调试端口是多少');
+  const text = runtime.provider.text({ agent: agentLife, signal: lifeSignal });
+  assert.match(text, /新部署目标/);
+  assert.doesNotMatch(text, /旧部署目标|旧流程只发 staging/, '被取代的条目退出自动召回');
+  assert.doesNotMatch(text, /临时调试端口|旧端口已经不用了/, '过期的条目退出自动召回');
+  const found = await runtime.exec('memory_search', { query: '部署目标' }, agentLife);
+  assert.equal(found.refs.some((ref) => ref.title === '旧部署目标'), false);
+  assert.equal(found.refs.some((ref) => ref.title === '新部署目标'), true);
+  const port = await runtime.exec('memory_search', { query: '临时调试端口' }, agentLife);
+  assert.equal(port.refs.some((ref) => ref.title === '临时调试端口'), false, '过期条目也不进默认检索');
 }
 
 // A20：没有命中是正常空结果，不是额度用尽。

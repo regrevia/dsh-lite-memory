@@ -84,6 +84,34 @@ test('2 版状态可读，下一次写入升级为 4 版并保留记录', () => 
   assert.equal(parsed.payload.entries[0].current.body, '升级后的正文');
 });
 
+test('D04b 旧实验规则缺作用域指纹时转待复核，正文与来源保留', () => {
+  const scope = fresh('legacy-rules');
+  transact(scope, { expectCreate: true }, (draft) => {
+    addNote('旧规则', '旧正文')(draft);
+    const entry = draft.entries[0];
+    entry.origin = 'project_evolution';
+    entry.maintenance.sourceRefs = [{ sourceType: 'human_feedback', sourceExcerpt: '以后都这样' }];
+    entry.maintenance.learning = { state: 'trial', trialUntil: '2026-01-01T00:00:00.000Z' };
+    addNote('新规则', '新正文')(draft);
+    const freshRule = draft.entries[1];
+    freshRule.origin = 'project_evolution';
+    freshRule.maintenance.learning = { state: 'active', specDigest: 'digest' };
+    return { changed: true };
+  });
+  const first = transact(scope, {}, (draft) => state.applyEvolution(draft, true));
+  assert.equal(first.changed, true);
+  const entries = first.state.entries;
+  assert.equal(entries[0].maintenance.reviewState, 'legacy_unreviewed');
+  assert.equal(entries[0].maintenance.legacyReview.reason, 'scope_unverified');
+  assert.equal(entries[0].current.body, '旧正文');
+  assert.equal(entries[0].maintenance.sourceRefs[0].sourceExcerpt, '以后都这样');
+  assert.equal(entries[0].maintenance.learning.state, 'paused');
+  assert.equal(entries[0].maintenance.learning.blockedReason, 'needs_scope_review');
+  assert.equal(entries[1].maintenance.reviewState, 'active');
+  const second = transact(scope, {}, (draft) => state.applyEvolution(draft, true));
+  assert.equal(second.changed, false, '已复核的不再重复改写');
+});
+
 test('D04 旧程序拒绝写新格式，不抹掉实验标记', () => {
   const scope = fresh('d04-format');
   transact(scope, { expectCreate: true }, (draft) => {
@@ -598,6 +626,32 @@ test('P0-B 坏 state 且没有 prev：报错给出损坏副本与可执行的恢
   assert.ok(error.recovery && error.recovery.corruptFile, '要指出损坏副本');
   assert.equal(fs.readFileSync(error.recovery.corruptFile, 'utf8'), broken);
   assert.equal(fs.readFileSync(stateFile(scope), 'utf8'), broken);
+});
+
+test('D05 学习开关关掉再开，不重置已用次数和整理记录', () => {
+  const scope = fresh('d05-learning-budget');
+  const at = new Date().toISOString();
+  transact(scope, {}, (draft) => {
+    const evo = draft.experimental.projectEvolution;
+    evo.learning = {
+      attempts: { ep_seed: { count: 2, lastAt: at } },
+      recent: [at],
+      receipts: [{ operationId: 'op_seed', at, inputTokens: 10, outputTokens: 5 }],
+    };
+    return state.applyEvolution(draft, true);
+  });
+  const opened = load(scope).state.experimental.projectEvolution;
+  assert.equal(opened.enabled, true);
+  assert.deepEqual(opened.learning.recent, [], '打开时清掉在途观察');
+  assert.equal(opened.learning.receipts.length, 1, '打开不能清整理回执');
+  assert.equal(opened.learning.attempts.ep_seed.count, 2, '打开不能清已用次数');
+  transact(scope, {}, (draft) => state.applyEvolution(draft, false));
+  transact(scope, {}, (draft) => state.applyEvolution(draft, true));
+  const again = load(scope).state.experimental.projectEvolution;
+  assert.equal(again.enabled, true);
+  assert.equal(again.learning.receipts.length, 1, '关掉再开不重置整理回执');
+  assert.equal(again.learning.attempts.ep_seed.count, 2, '关掉再开不重置已用次数');
+  assert.deepEqual(again.learning.recent, []);
 });
 
 for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });

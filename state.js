@@ -144,13 +144,39 @@ export function applyControl(draft, enabled) {
   return { changed: true, enabled: next, epoch: config.epoch };
 }
 
+/**
+ * 旧策略生成的实验规则没记下作用域指纹，无法证明它该在哪些任务里出现。
+ * 只把它们转成待复核：正文、来源、版本原样保留，不删除也不改写内容。
+ */
+function quarantineLegacyRules(draft, now) {
+  let touched = 0;
+  for (const entry of Array.isArray(draft.entries) ? draft.entries : []) {
+    if (!entry || entry.origin !== 'project_evolution') continue;
+    const maintenance = entry.maintenance || (entry.maintenance = {});
+    if (maintenance.reviewState === 'legacy_unreviewed') continue;
+    if (maintenance.learning && maintenance.learning.specDigest) continue;
+    maintenance.reviewState = 'legacy_unreviewed';
+    maintenance.legacyReview = { reason: 'scope_unverified', at: now };
+    const learning = maintenance.learning;
+    if (learning && (learning.state === 'trial' || learning.state === 'active')) {
+      learning.state = 'paused';
+      learning.blockedReason = 'needs_scope_review';
+      learning.pausedAt = now;
+      learning.pausedBy = 'legacy_scope';
+    }
+    touched += 1;
+  }
+  return touched;
+}
+
 /** 自进化开关只停运行层：规则、候选、试用、证据和额度都保留，恢复时接着用。 */
 export function applyEvolution(draft, enabled) {
   const now = new Date().toISOString();
   const current = evolutionOf(draft);
   if (!current.compatible) throw new StateError('invalid', '实验配置版本不认，先不要改动开关');
   const next = Boolean(enabled);
-  if (current.enabled === next) return { changed: false, enabled: next };
+  const quarantined = next ? quarantineLegacyRules(draft, now) : 0;
+  if (current.enabled === next) return { changed: quarantined > 0, enabled: next, quarantined };
   const config = {
     enabled: next,
     epoch: crypto.randomUUID(),
@@ -175,7 +201,7 @@ export function applyEvolution(draft, enabled) {
       }
     }
   }
-  return { changed: true, enabled: next, epoch: config.epoch };
+  return { changed: true, enabled: next, epoch: config.epoch, quarantined };
 }
 
 /** 容量与预算都归这里管：写入路径只报「要写什么」，能不能落地由 state 决定。 */

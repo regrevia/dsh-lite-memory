@@ -1063,6 +1063,13 @@ function applyDraft(scope, index, source, now, options = {}) {
     }
   }
   const writeMode = source && source.writeMode === 'replace_current' ? 'replace_current' : 'patch';
+  /** 改名不能撞上另一条现行记忆：标题是唯一句柄，撞了以后按标题读会分不清。 */
+  if (record && draft.has.title && cleanTitle(draft.title) !== record.title) {
+    const wanted = cleanTitle(draft.title).toLowerCase();
+    const clash = live.find((item) => item.id !== record.id
+      && [item.title, ...(item.aliases || [])].some((name) => String(name || '').trim().toLowerCase() === wanted));
+    if (clash) throw new Error(`已经有同名记忆「${clash.title}」，先改那一条的标题`);
+  }
   if (record && writeMode === 'replace_current') {
     for (const key of ['title', 'summary', 'when', 'body', 'kind', 'tags']) {
       if (!draft.has[key]) throw new Error(`整份替换要给出 ${key}，空值也要显式写`);
@@ -1571,8 +1578,10 @@ export function peek(scope, query, limit = 3, options = {}) {
 }
 
 export function readEntry(scope, id, options = {}) {
-  const found = withLocks(runtimeLayers(scope), () => {
-    for (const source of runtimeLayers(scope)) {
+  /** 显式指定层时只读那一层；默认仍只读当前项目和全局。 */
+  const sources = Array.isArray(options.layers) && options.layers.length ? options.layers : runtimeLayers(scope);
+  const found = withLocks(sources, () => {
+    for (const source of sources) {
       const index = loadIndex(source);
       const record = index.entries.find((item) => item.id === id);
       const archived = record ? null : index.archived.find((item) => item.id === id);
@@ -1606,11 +1615,14 @@ export function readEntry(scope, id, options = {}) {
 export function forget(scope, id, options = {}) {
   const mode = options.mode;
   if (mode !== 'archive' && mode !== 'purge') return { id, mode: 'needs_resolution' };
-  return withLocks([scope, globalScope()], () => {
+  /** 显式指定的层就是唯一范围；不然才按运行时「当前项目 + 全局」找。 */
+  const sources = Array.isArray(options.layers) && options.layers.length ? options.layers : null;
+  const scopeList = sources || [scope, globalScope()];
+  return withLocks(scopeList, () => {
     /** 屏障优先：上次彻底删除没做完时，先按原层 + 原 operationId 收尾，再决定这条在哪。 */
     let replayed = null;
     if (mode === 'purge') {
-      for (const source of [scope, globalScope()]) {
+      for (const source of scopeList) {
         const pending = state.purgeIntent(source);
         if (!pending) continue;
         /** 冷存里有待删条目的正文副本：先隔离，state.purge 的残留扫描才收得干净。 */
@@ -1631,7 +1643,7 @@ export function forget(scope, id, options = {}) {
       }
       if (replayed) return replayed;
     }
-    for (const source of [scope, globalScope()]) {
+    for (const source of scopeList) {
       const index = loadIndex(source);
       const active = index.entries.find((item) => item.id === id);
       const archived = active ? null : index.archived.find((item) => item.id === id);
@@ -1880,9 +1892,12 @@ export function layersFor(scope) {
 export function locate(scope, id, options = {}) {
   /**
    * 默认只看当前层和全局：面板/HTTP 用 id 探正文时跨层就是越权。
-   * 工具侧按标题读，明确传 crossLayer 才跨层（标题是用户给的句柄）。
+   * 工具侧按标题读，明确传 crossLayer 才跨层（标题是用户给的句柄）；
+   * 显式指定某一层时只给那一层，绝不拿项目层去命中全局条目。
    */
-  const sources = options.crossLayer ? layersFor(scope) : [scope, globalScope()];
+  const sources = Array.isArray(options.layers) && options.layers.length
+    ? options.layers
+    : options.crossLayer ? layersFor(scope) : runtimeLayers(scope);
   for (const source of sources) {
     const index = loadIndex(source, options);
     const active = index.entries.find((item) => item.id === id);
@@ -2639,8 +2654,21 @@ export function pendingConflictsOf(scope) {
  * 保存的唯一入口：先路由，再在两层里查重（完全相同 → existing_ref；只是相近 → 只给候选），
  * 最后才写。写之前判不出来的范围返回 needsScope，不替用户选。
  */
+function saveTargetOf(projectScope, source) {
+  /** 更新已有条目：先按 id 认出它到底在哪一层，只锁那一层。 */
+  const id = source && typeof source.id === 'string' ? source.id.trim() : '';
+  if (id) {
+    const found = locateInLayers(projectScope, id);
+    if (found) return found.scope;
+  }
+  /** 新增条目：归属由路由定，写全局就不该占住项目锁，反之亦然。 */
+  const routed = routeScope(source, { project: projectScope });
+  return routed.chosenScope === 'global' ? globalScope() : projectScope;
+}
+
 export function saveEntry(projectScope, source) {
-  return withLocks([projectScope, globalScope()], () => {
+  /** 只锁真正要写的那一层：别的项目写它自己的条目时，不会因为共享全局锁互相等待。 */
+  return withLocks([saveTargetOf(projectScope, source)], () => {
     const control = loadIndex(projectScope).__control || state.controlOf(null);
     if (!control.enabled) {
       return { needsScope: true, chosenScope: '', reasonCode: 'memory_disabled', requiredConditions: [], needsResolution: false, similarList: [], draft: null };
@@ -2671,6 +2699,14 @@ export function saveEntry(projectScope, source) {
         throw new Error('这条记忆在全局层；只有明确说「所有项目都这样」才改它');
       }
       targetScope = found.scope;
+      /** 面板拿旧版本改正文：中间被别处改过就拒绝，不覆盖别人的修改。 */
+      if (source.expectedRevision !== undefined) {
+        const current = loadIndex(targetScope).entries.find((item) => item.id === next.id && item.status !== 'archived');
+        if (!current) throw new Error('没有这条记忆，改用新增');
+        if (!Number.isInteger(Number(source.expectedRevision)) || Number(current.revision) !== Number(source.expectedRevision)) {
+          throw new state.StateError('conflict', '这条记忆已经被更新过，刷新后再改');
+        }
+      }
     }
     /** 更新已有项目条目也必须落在确认过的根目录里。 */
     if (targetScope.key !== 'global' && targetScope.confirmed === false) {
@@ -3044,6 +3080,7 @@ function learningRuleView(record) {
     conditions: Array.isArray(record.conditions) ? record.conditions : [],
     topicKey: record.topicKey || '',
     origin: record.origin,
+    reviewState: record.reviewState === 'legacy_unreviewed' ? 'legacy_unreviewed' : 'active',
     state: record.learning?.state || 'pending',
     samples: (Array.isArray(record.learning?.samples) ? record.learning.samples : []).slice(-4).map((row) => ({
       dimension: row.dimension || '作品',

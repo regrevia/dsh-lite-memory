@@ -55,6 +55,26 @@ test('P1-C: a lock held by a live pid still reports busy and is never deleted', 
   }
 });
 
+test('P0-B: 别的项目占着全局锁，本项目保存自己的条目照样能写', () => {
+  const project = fresh('other-project-save');
+  const global = store.globalScope();
+  fs.mkdirSync(global.dir, { recursive: true });
+  const file = lockOf(global);
+  fs.writeFileSync(file, `${process.pid}:busy-global`);
+  try {
+    const saved = store.saveEntry(project, {
+      title: '本项目照常保存',
+      summary: '别的项目或全局在写，不影响本项目的记忆',
+      body: '本项目照常保存正文。',
+      memoryClass: 'project_fact',
+    });
+    assert.equal(saved.chosenScope, 'project');
+    assert.ok(saved.record && saved.record.id.startsWith('mem_'));
+  } finally {
+    fs.rmSync(file, { force: true });
+  }
+});
+
 test('P0-B: a corrupt state.json falls back to state.prev.json and says so', () => {
   const scope = fresh('recover');
   store.upsert(scope, { title: '第一条', summary: '先写一条', body: '正文一' });

@@ -90,8 +90,10 @@ const walk = (node, out = [], expand = false) => {
 };
 const exhibit = walk(tree, [], true).find((node) => node.type === 'button' && node.props.title === 'A');
 assert.ok(exhibit, '展品应是原生按钮');
+const beforeClick = JSON.stringify(tree);
 exhibit.props.onClick();
 assert.equal(picked, 'mem_a');
+assert.equal(JSON.stringify(tree), beforeClick, '点开展品只换详情，不改宫殿里的记录');
 
 // 首帧列表视图不挂载宫殿；空数据时给下一步提示。
 const firstPaint = MemoryPanel({ sessionId: 'demo', onClose: () => {} });

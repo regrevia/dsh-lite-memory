@@ -1624,13 +1624,15 @@ window.__ModuleLoader__.load({
       },
     }));
 
-    const STAGE = { pending: '候选', trial: '试用', active: '生效', paused: '暂停' };
+    const STAGE = { pending: '候选', trial: '试用', active: '生效', paused: '暂停', legacy: '待复核' };
     const STAGE_TONE = {
       pending: 'var(--dsw-alias-state-warn-primary)',
       trial: 'var(--dsw-alias-brand-primary)',
       active: 'var(--dsw-alias-state-success-primary)',
       paused: 'var(--dsw-alias-label-secondary)',
+      legacy: 'var(--dsw-alias-state-warn-primary)',
     };
+    const stageOf = (rule) => (rule.reviewState === 'legacy_unreviewed' ? 'legacy' : rule.state);
     const StagePill = (props) => h('span', {
       style: {
         flex: '0 0 auto', padding: '0 6px', border: '1px solid var(--dsw-alias-border-l1)',
@@ -1667,6 +1669,7 @@ window.__ModuleLoader__.load({
     const usabilityOf = (rule, evolution, memoryOn) => {
       if (!memoryOn) return '记忆已关闭，暂不参与回答。';
       if (!evolution || evolution.enabled !== true || evolution.effectiveEnabled === false) return '自进化已关闭，暂不参与回答。';
+      if (rule.reviewState === 'legacy_unreviewed') return '所属项目还没确认，暂不参与回答。';
       if (rule.state === 'paused') return '已暂停，不参与回答。';
       const unresolved = rule.applicability === 'unresolved'
         || (rule.applicability === 'conditional' && (!Array.isArray(rule.conditions) || rule.conditions.length === 0));
@@ -1750,7 +1753,7 @@ window.__ModuleLoader__.load({
       },
       h('span', { style: { fontSize: '12px', lineHeight: '18px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, rule.title),
       h('span', { style: { ...PANEL_MUTED, display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, lineHeight: '16px' } },
-        h(StagePill, { state: rule.state }),
+        h(StagePill, { state: stageOf(rule) }),
         h('span', { style: { marginLeft: 'auto', flex: '0 0 auto', fontVariantNumeric: 'tabular-nums' } }, EVO_DATE(rule.updated)),
       ));
     };
@@ -1789,7 +1792,7 @@ window.__ModuleLoader__.load({
         ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap', paddingTop: '3px' } },
           rule.state === 'pending' || rule.state === 'trial'
             ? h(Action, { disabled: !canManage, onClick: () => act('adopt') }, '采纳') : null,
-          rule.state === 'paused'
+          rule.state === 'paused' && rule.reviewState !== 'legacy_unreviewed'
             ? h(Action, { disabled: !canManage, onClick: () => act('resume') }, '恢复')
             : (rule.state === 'trial' || rule.state === 'active'
               ? h(Action, { disabled: !canManage, onClick: () => act('pause') }, '暂停')
@@ -1876,7 +1879,7 @@ window.__ModuleLoader__.load({
         h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
           h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
             h('span', { style: PANEL_LABEL }, '当前状态'),
-            h(StagePill, { state: rule.state }),
+            h(StagePill, { state: stageOf(rule) }),
           ),
           h('div', { style: { fontSize: '12px', lineHeight: '1.55', opacity: 0.82 } }, usabilityOf(rule, props.evolution, props.memoryOn)),
           failureState
@@ -2082,6 +2085,10 @@ window.__ModuleLoader__.load({
       const [selectedRule, setSelectedRule] = React.useState('');
       const [detail, setDetail] = React.useState(null);
       const [detailNote, setDetailNote] = React.useState('');
+      const [editingMemory, setEditingMemory] = React.useState(false);
+      const [editTitle, setEditTitle] = React.useState('');
+      const [editBody, setEditBody] = React.useState('');
+      const [editNote, setEditNote] = React.useState('');
       const [busy, setBusy] = React.useState(false);
       const [showReason, setShowReason] = React.useState(false);
       const [showSettings, setShowSettings] = React.useState(false);
@@ -2159,6 +2166,8 @@ window.__ModuleLoader__.load({
       }, []);
 
       React.useEffect(() => {
+        setEditingMemory(false);
+        setEditNote('');
         if (!selectedMemory || !data) { setDetail(null); setDetailNote(''); return undefined; }
         let live = true;
         setDetail(null);
@@ -2311,6 +2320,51 @@ window.__ModuleLoader__.load({
         });
       };
 
+      /** 普通记忆的正文由人直接改：带读到的版本写，冲突就提示刷新，不覆盖别处的修改。 */
+      const saveMemoryEdit = (record) => {
+        if (busy || !canManage || !record || !record.id) return;
+        const title = editTitle.trim();
+        const text = editBody.trim();
+        if (!title || !text) return;
+        setBusy(true);
+        setEditNote('');
+        const payload = { sessionId, scopeKey: selectedKey, id: record.id, title, body: text, expectedRevision: record.revision };
+        post('/lite-memory/entry', payload).then((result) => {
+          if (!alive.current) return;
+          setBusy(false);
+          if (succeeded(result)) {
+            const nextTitle = result.body && typeof result.body.title === 'string' ? result.body.title : title;
+            const nextRevision = result.body && Number.isInteger(result.body.revision) ? result.body.revision : record.revision;
+            setEditingMemory(false);
+            setDetail((prev) => (prev ? { ...prev, title: nextTitle, body: text, currentBody: text, revision: nextRevision } : prev));
+            setData((prev) => {
+              if (!prev || !prev.selected || !Array.isArray(prev.selected.records)) return prev;
+              const records = prev.selected.records.map((row) => (row.id === record.id ? { ...row, title: nextTitle, revision: nextRevision } : row));
+              return { ...prev, selected: { ...prev.selected, records } };
+            });
+            setEditNote('');
+          } else {
+            setEditNote(failure(result, '这次没有改动'));
+            /**
+             * 版本过期不是失败终点：把最新正文和版本取回来，草稿留着，
+             * 人确认后再按一次保存就写在最新版本上。
+             */
+            if (result.status === 409 && result.body && result.body.retry) {
+              post('/lite-memory/body', { sessionId, id: record.id, scopeKey: selectedKey }).then((fresh) => {
+                if (!alive.current || !fresh.ok || !fresh.body || !fresh.body.ok || fresh.body.status === 'gone') return;
+                const revision = Number.isInteger(fresh.body.revision) ? fresh.body.revision : 0;
+                setDetail(fresh.body);
+                setData((prev) => {
+                  if (!prev || !prev.selected || !Array.isArray(prev.selected.records)) return prev;
+                  const records = prev.selected.records.map((row) => (row.id === record.id ? { ...row, revision: revision || row.revision } : row));
+                  return { ...prev, selected: { ...prev.selected, records } };
+                });
+              });
+            }
+          }
+        });
+      };
+
       const toggleControl = () => {
         if (busy || !canToggle) return;
         setBusy(true);
@@ -2446,6 +2500,25 @@ window.__ModuleLoader__.load({
           }));
 
       const detailProcessing = detail ? processingStatusOf(detail) : '';
+      const memoryEditor = editingMemory && detailRecord
+        ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } },
+          h(Field, { label: '标题', value: editTitle, onChange: setEditTitle }),
+          h('label', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+            h('span', { style: PANEL_LABEL }, '经验'),
+            h('textarea', {
+              value: editBody, onChange: (event) => setEditBody(event.target.value), 'aria-label': '经验',
+              rows: 8,
+              style: { ...PANEL_INPUT, height: 'auto', minHeight: '150px', padding: '7px 9px', resize: 'vertical', lineHeight: '1.6' },
+            }),
+          ),
+          editNote ? h('div', { style: { ...PANEL_MUTED, color: 'var(--dsw-alias-label-error)' } }, editNote) : null,
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' } },
+            h(Action, { disabled: busy || !editTitle.trim() || !editBody.trim(), onClick: () => saveMemoryEdit(detailRecord) }, '保存'),
+            h(Action, { disabled: busy, onClick: () => { setEditingMemory(false); setEditNote(''); } }, '取消'),
+          ),
+        )
+        : null;
+
       const memoryDetail = selectedMemory
         ? h('div', { style: { ...PANEL_CARD, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px' } },
           detail
@@ -2458,8 +2531,22 @@ window.__ModuleLoader__.load({
               Array.isArray(detailRecord && detailRecord.tags) && detailRecord.tags.length
                 ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '4px' } },
                   detailRecord.tags.slice(0, 6).map((tag) => h('span', { key: tag, style: { ...PANEL_MUTED, padding: '0 6px', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '999px' } }, `#${tag}`))) : null,
-              h('div', { style: { fontSize: '12px', lineHeight: '1.65', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, currentBodyOf(detail) || '没有正文'),
-              h(DetailExtras, { payload: detail }),
+              memoryEditor,
+              editingMemory ? null : h('div', { style: { fontSize: '12px', lineHeight: '1.65', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, currentBodyOf(detail) || '没有正文'),
+              editingMemory ? null : h(DetailExtras, { payload: detail }),
+              !editingMemory && detailRecord && canManage
+                ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap', paddingTop: '2px' } },
+                  h(Action, {
+                    disabled: busy,
+                    onClick: () => {
+                      setEditTitle(detailRecord.title || detail.title || '');
+                      setEditBody(currentBodyOf(detail) || '');
+                      setEditNote('');
+                      setEditingMemory(true);
+                    },
+                  }, '修改'),
+                )
+                : null,
             )
             : h('div', { style: PANEL_MUTED }, detailNote || '读取中…'),
         )

@@ -40,6 +40,11 @@ const NEGATIVE = /不要|不用|别用|别再|停用|取消这条|这条不要|�
 const CORRECTION = /改成|改为|换成|重做|重来|再来|下次|不对|错了|不是这样|又没|怎么又|还是没|没按|不好|不行|不满意|不要|别/;
 const EXECUTION_MISS = /之前说过|已经说过|不是说好|怎么又|又没|还是没|没按|又忘|重复/;
 const UNCLEAR = /不太对|再想想|感觉不对|说不上|有点怪|不对劲/;
+/**
+ * 点名项目范围才算全项目授权；「以后都」不等于「所有项目」。
+ * 「所有口播」「一律」这种覆盖全部对象的说法也算，但只限当前项目层。
+ */
+const PROJECT_WIDE = /(这个项目|本项目|所有项目|全项目|整个项目|全库|每个项目|所有(?!项目)|一律)/;
 
 const has = (pattern, text) => pattern.test(text);
 
@@ -182,6 +187,8 @@ export function candidateFrom({ messages, anchor, sessionId, projectId, now } = 
   if (!context.projectId) return null;
   /** 没有作品绑定时，规范纠正同样按项目候选收集；单次局部改动交给整理器判空，不再用电平词一刀切。 */
   if (cue.type !== 'spec_change') return null;
+  /** 作用域在收集时就固定：只有原句点名项目范围才给全项目，否则先待确认。 */
+  const applicability = PROJECT_WIDE.test(text) ? 'all_in_scope' : 'unresolved';
   return {
     projectId: context.projectId,
     sessionId: context.sessionId,
@@ -195,7 +202,7 @@ export function candidateFrom({ messages, anchor, sessionId, projectId, now } = 
     text,
     sourceExcerpt,
     cue,
-    expectedTarget: { scope: 'project', projectId, applicability: 'unresolved' },
+    expectedTarget: { scope: 'project', projectId, applicability },
     episodeUpdatedAt: '',
     at,
   };
@@ -360,16 +367,32 @@ export function pendingChangeFrom(feedback = {}) {
    * 兜底不是授权：只在文本自己说到全项目时才按全项目收，否则保留它原本的适用范围
    * （有任务种类就挂条件，没有就待确认），不能让一句「以后开头先给结论」变成全库规则。
    */
-  const projectWide = /(所有|全都|一律|任何|默认|整个项目|这个项目|本项目)/.test(currentText);
-  const taskKind = String(feedback.cue?.taskKind || '').trim();
-  const applicability = projectWide ? 'all_in_scope' : taskKind ? 'conditional' : 'unresolved';
+  const expected = feedback.expectedTarget && typeof feedback.expectedTarget === 'object' ? feedback.expectedTarget : null;
+  const taskKind = String(feedback.cue?.taskKind || expected?.taskKind || '').trim();
+  const expectedConditions = ['taskKind', 'seriesId', 'phase']
+    .filter((key) => String(expected?.[key] || '').trim())
+    .map((key) => ({ key, value: String(expected[key]).trim() }));
+  /**
+   * 兜底不重新推导作用域：候选收集时已经固定 expectedTarget 就照抄（只能沿用或收窄），
+   * 没有 expectedTarget 的旧调用才退回原句判断。
+   */
+  const applicability = expected
+    ? (expected.applicability === 'all_in_scope'
+      ? 'all_in_scope'
+      : expectedConditions.length ? 'conditional' : 'unresolved')
+    : /(所有|全都|一律|任何|默认|整个项目|这个项目|本项目)/.test(currentText)
+      ? 'all_in_scope'
+      : taskKind ? 'conditional' : 'unresolved';
+  const conditions = expected
+    ? (applicability === 'conditional' ? expectedConditions : [])
+    : applicability === 'conditional' ? [{ key: 'taskKind', value: taskKind }] : [];
   return {
     target: 'new',
     feedbackType: 'spec_change',
     topicKey,
     currentText,
     applicability,
-    conditions: applicability === 'conditional' ? [{ key: 'taskKind', value: taskKind }] : [],
+    conditions,
     evidence: ['u0'],
     persistence: 'project_candidate',
     /** 摘录从候选一路带到提交路径，模型返回空时也不丢来源。 */
@@ -511,7 +534,7 @@ export function buildCallInput({ projectId, episodeId, taskKind, seriesId, phase
   return { system, prompt, messages: [{ role: 'user', content: prompt }], refs, rules: inputRules, bytes: Buffer.byteLength(system) + Buffer.byteLength(prompt), sourceExcerpt, messageIds };
 }
 /** 严格解析：截断、工具调用、额外字段、超限都整批拒绝，不做第二次修复调用。 */
-export function parseOutput(text, { finish, refs, rules, ranges } = {}) {
+export function parseOutput(text, { finish, refs, rules, ranges, expectedTarget } = {}) {
   if (finish && finish.kind !== 'stop' && finish.kind !== 'completed') return { ok: false, reason: '整理没有正常结束' };
   const raw = String(text || '').trim();
   if (!raw) return { ok: false, reason: '整理没有返回内容' };
@@ -529,14 +552,14 @@ export function parseOutput(text, { finish, refs, rules, ranges } = {}) {
   if (data.changes.length > LIMITS.maxChanges) return { ok: false, reason: '一次改动太多' };
   const changes = [];
   for (const change of data.changes) {
-    const checked = validateChange(change, { refs, rules, ranges });
+    const checked = validateChange(change, { refs, rules, ranges, expectedTarget });
     if (!checked.ok) return checked;
     changes.push(checked.change);
   }
   return { ok: true, changes };
 }
 
-export function validateChange(change, { refs, rules, ranges } = {}) {
+export function validateChange(change, { refs, rules, ranges, expectedTarget } = {}) {
   if (!change || typeof change !== 'object' || Array.isArray(change)) return { ok: false, reason: '变化不是对象' };
   for (const key of Object.keys(change)) if (!ALLOWED_KEYS.has(key)) return { ok: false, reason: `变化里有未知字段：${key}` };
   const byRef = new Map((Array.isArray(rules) ? rules : []).map((row) => [row.ref, row]));
@@ -595,6 +618,35 @@ export function validateChange(change, { refs, rules, ranges } = {}) {
     for (const condition of conditions) {
       const allowed = conditionValueAllowed(condition, { ranges, existing });
       if (!allowed) return { ok: false, reason: '条件值不在本项目的栏目或阶段里' };
+    }
+  }
+  /** 收集时固定的作用域只能沿用或收窄：整理器不能把待确认候选抬成全项目规则。 */
+  const expected = expectedTarget && typeof expectedTarget === 'object' ? expectedTarget : null;
+  const expectedConditions = ['taskKind', 'seriesId', 'phase']
+    .filter((key) => String(expected?.[key] || '').trim())
+    .map((key) => ({ key, value: String(expected[key]).trim() }));
+  const expectedApplicability = expected
+    ? (expected.applicability === 'all_in_scope'
+      ? 'all_in_scope'
+      : expectedConditions.length ? 'conditional' : 'unresolved')
+    : '';
+  if (expectedApplicability && applicability === 'all_in_scope' && expectedApplicability !== 'all_in_scope') {
+    return { ok: false, reason: '适用范围不能从待确认抬成全项目' };
+  }
+  if (expected && expected.scope === 'episode' && applicability === 'all_in_scope') {
+    return { ok: false, reason: '作品规则不能抬成全项目' };
+  }
+  const effectiveConditions = conditions !== undefined ? conditions : normalizeConditions(existing?.conditions);
+  if (applicability === 'all_in_scope' && effectiveConditions.length) {
+    return { ok: false, reason: '全项目规则不能带条件' };
+  }
+  if (applicability === 'conditional' && !conditions && !existing && !sampleOnly) {
+    return { ok: false, reason: '条件适用必须给出条件' };
+  }
+  if (conditions && expectedConditions.length) {
+    const has = new Set(conditions.map((row) => `${row.key}=${row.value}`));
+    if (expectedConditions.some((row) => !has.has(`${row.key}=${row.value}`))) {
+      return { ok: false, reason: '条件不能删掉收集时的任务范围' };
     }
   }
   const evidence = Array.isArray(change.evidence) ? change.evidence.map((value) => String(value)) : [];
