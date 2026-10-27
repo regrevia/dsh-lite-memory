@@ -936,6 +936,16 @@ export function apply(ctx, config) {
     return win.bytes + bytes <= view.REQUEST_BYTES;
   }
 
+  /** 续写轮没有新消息：沿用上一次能核对的请求上下文。 */
+  const lastRuntime = new Map();
+  const rememberRuntime = (scope, sessionId, held) => {
+    if (!held || !sessionId) return;
+    const key = `${scope.key}\u0000${sessionId}`;
+    lastRuntime.delete(key);
+    lastRuntime.set(key, held);
+    if (lastRuntime.size > 20) lastRuntime.delete(lastRuntime.keys().next().value);
+  };
+
   function openWindow(agent, { sessionId, turn, messageIds }) {
     const key = agentKey(agent);
     if (!key) return null;
@@ -1423,11 +1433,13 @@ export function apply(ctx, config) {
     const contextId = typeof optionalContextId === 'string' ? optionalContextId.trim() : '';
     if (!contextId) {
       /** 没有显式上下文时，用本请求已经路由出来的任务；这层不依赖自进化开关。 */
-      const runtime = win && win.runtime;
+      const live = win && win.runtime ? win.runtime : null;
+      const runtime = live
+        || (win && win.sessionId ? lastRuntime.get(`${scope.key}\u0000${win.sessionId}`) : null);
       const sameRequest = runtime
         && runtime.projectKey === scope.key
         && (!runtime.sessionId || runtime.sessionId === String(win.sessionId || ''))
-        && runtime.batchKey === anchor.requestBatchKey(win.messageIds || []);
+        && (runtime === live ? runtime.batchKey === anchor.requestBatchKey(win.messageIds || []) : true);
       if (sameRequest) {
         /** 普通记忆可以直接用本请求上下文；实验正文仍要求显式 contextId，不能顺手放行。 */
         return { ok: true, scope, win, context: runtime.context, held: runtime, experimental: false };
@@ -1953,7 +1965,7 @@ export function apply(ctx, config) {
                 : value.links !== undefined && value.status === 'ok'
                   ? `memory · 「${value.title}」的相关记忆\n${value.links || '(无)'}`
                   : value.status === 'needs_context'
-                    ? 'memory · 这条记忆的适用条件还没确认'
+                    ? 'memory · 这条记忆的适用条件还没确认，先说明当前任务再读'
                     : value.status === 'not_applicable'
                       ? 'memory · 这条记忆不适用于当前任务'
                       : value.status === 'archived'
@@ -2304,6 +2316,7 @@ export function apply(ctx, config) {
        */
       const runtime = runtimeFor(scope, { sessionId, query, batchKey, messageIds: ids, autoRoute: recallMode() === 'adaptive' });
       if (win && runtime) win.runtime = runtime.held;
+      rememberRuntime(scope, sessionId, runtime && runtime.held);
       if (recallMode() !== 'adaptive') {
         clearPrepared(agent);
         return decision;

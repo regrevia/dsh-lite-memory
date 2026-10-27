@@ -575,4 +575,27 @@ const scopeOf = (dir) => store.scopeOf(dir);
   assert.match(value.text, /适用条件还没确认/);
 }
 
+/* L22：自动续写轮没有新的真人消息，仍沿用本会话上一次的请求上下文读正文。 */
+{
+  const dir = mkdir('continuation');
+  const scope = scopeOf(dir);
+  const saved = save(scope, { title: '口播发布清单', body: '按清单逐项确认。' });
+  state.transact(scope, {}, (draft) => {
+    const row = draft.entries.find((entry) => entry.id === saved.id);
+    row.current.conditions = [{ key: 'seriesId', value: '口播' }];
+    return { changed: true };
+  });
+  enable(scope, { seriesId: '口播' });
+  const runtime = boot();
+  const agent = makeAgent('a-continuation', dir);
+  await runtime.preStep({ agent, signal: signal(), turn: 't1' }, enter(human('这期口播怎么做')));
+  const first = await runtime.exec('memory_read', { id: saved.id }, agent);
+  await runtime.preStep({ agent, signal: signal(), turn: 't2' }, enter());
+  assert.equal(first.status, 'ok');
+  assert.match(first.body, /按清单逐项确认/);
+  const second = await runtime.exec('memory_read', { id: saved.id }, agent);
+  assert.equal(second.status, 'ok');
+  assert.equal(second.repeat, true);
+}
+
 console.log('evolution-read.test.mjs: all passed');
