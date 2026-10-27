@@ -258,9 +258,51 @@ window.__ModuleLoader__.load({
       };
     };
 
+    /** 一行展示的身份：曝光类型 + 文案 + 正文；拦截结果没有 id，只能按内容认。 */
+    const rowKeyOf = (toolName, block) => {
+      const text = settledText(block);
+      return text ? `${toolName}|${text}` : '';
+    };
+
+    /** 同一组行每次出现的去留：同键只留第一次。 */
+    const rowKeepFlags = (keys) => {
+      const seen = new Set();
+      return keys.map((key) => {
+        if (!key) return true;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    };
+
     const Row = (props) => {
       const line = props.phase === 'preparing' ? null : firstLine(settledText(props.block));
-      return h('div', { 'data-tool': props.toolName, style: ROW }, h('span', { style: DOT }, '·'), h('span', { style: LABEL }, line ?? RUNNING[props.toolName] ?? 'memory'));
+      const key = props.phase === 'preparing' ? '' : rowKeyOf(props.toolName, props.block);
+      const nodeRef = React.useRef(null);
+      const [dup, setDup] = React.useState(false);
+      const useLayout = React.useLayoutEffect || React.useEffect;
+      useLayout(() => {
+        const node = nodeRef.current;
+        if (!key || !node || typeof node.closest !== 'function') return;
+        const turnBox = node.closest('[data-chat-turn]');
+        const turn = turnBox ? turnBox.getAttribute('data-chat-turn') : null;
+        const rootScope = node.ownerDocument || node.parentElement;
+        if (!rootScope || typeof rootScope.querySelectorAll !== 'function') return;
+        const peers = Array.prototype.filter.call(rootScope.querySelectorAll('[data-memory-row]'), (peer) => {
+          if (!turn) return peer.parentElement === node.parentElement;
+          const box = peer.closest('[data-chat-turn]');
+          return box !== null && box.getAttribute('data-chat-turn') === turn;
+        });
+        const at = peers.indexOf(node);
+        if (at < 0) return;
+        setDup(!rowKeepFlags(peers.map((peer) => peer.getAttribute('data-memory-row') || ''))[at]);
+      }, [key]);
+      return h('div', {
+        ref: nodeRef,
+        'data-tool': props.toolName,
+        'data-memory-row': key || undefined,
+        style: dup ? { ...ROW, display: 'none' } : ROW,
+      }, h('span', { style: DOT }, '·'), h('span', { style: LABEL }, line ?? RUNNING[props.toolName] ?? 'memory'));
     };
 
     /** 建议行：候选 id 来自持久元数据，不读文案。 */
@@ -2700,7 +2742,7 @@ window.__ModuleLoader__.load({
 
     // 测试缝：Node 里验引用投影，浏览器里没有任何副作用。
     if (typeof globalThis.__LITE_MEMORY_TEST__ === 'function') {
-      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, agoLabel, checkupOf, titleCountsOf });
+      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, agoLabel, checkupOf, titleCountsOf, rowKeyOf, rowKeepFlags, Row });
     }
 
     return {

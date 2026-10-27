@@ -28,7 +28,7 @@ assert.equal(panel.name, 'shell.overlay');
 assert.equal(panel.order, 30);
 
 const EMPTY_CHILDREN = [];
-const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, agoLabel, checkupOf, titleCountsOf } = seen;
+const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, agoLabel, checkupOf, titleCountsOf, rowKeyOf, rowKeepFlags } = seen;
 
 // 图谱只按真实数据画：共享标签成枢纽，显式关联成边，位置由 id 决定。
 const graph = graphOf([
@@ -320,5 +320,15 @@ assert.deepEqual(filterRecords(checkupRows, '', { kind: 'unread' }).map((row) =>
 assert.deepEqual(filterRecords(checkupRows, '', { kind: 'noWhen' }).map((row) => row.id), ['mem_c0000001']);
 assert.deepEqual([...titleCountsOf(checkupRows).values()], [2, 1]);
 assert.equal(checkupOf([], [], false).globalEntries, null);
-console.log('client.test.mjs: 21 passed + palace');
+// 两条一模一样的拦截结果在同一轮里只展示一行：拦截结果没有 id，只能按曝光类型 + 文案 + 正文认。
+const blockedBlock = (text) => ({ kind: 'tool-result', callId: 'call-a', content: [{ type: 'text', text }], subCalls: [] });
+const blockedText = 'memory · 这条记忆的适用条件还没确认，先说明当前任务再读';
+assert.equal(blockedText.includes('mem_'), false);
+const blockedKeys = [rowKeyOf('memory_read', blockedBlock(blockedText)), rowKeyOf('memory_read', blockedBlock(blockedText))];
+assert.equal(blockedKeys[0].length > 0, true);
+assert.deepEqual(rowKeepFlags(blockedKeys), [true, false]);
+assert.equal(blockedKeys.filter((_key, at) => rowKeepFlags(blockedKeys)[at]).length, 1);
+assert.deepEqual(rowKeepFlags([rowKeyOf('memory_search', blockedBlock(blockedText)), rowKeyOf('memory_read', blockedBlock(blockedText))]), [true, true]);
+assert.deepEqual(rowKeepFlags([rowKeyOf('memory_read', blockedBlock('memory · stopped'))]), [true]);
+console.log('client.test.mjs: 22 passed + palace');
 
