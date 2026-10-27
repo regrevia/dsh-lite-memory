@@ -96,23 +96,24 @@ assert.equal(metaOf(settled(null)), null);
 assert.equal(metaOf(settled([{ kind: 'memory-read' }])), null);
 
 // 保存只在真的改了时进引用；正文保存不冒充引用。
-const save = citationOf({ kind: 'memory-save', id: 'mem_aaaaaaaa', title: 'A', scope: 'project', revision: 3, changed: false, mode: 'unchanged' }, 'memory-save');
+const save = citationOf({ kind: 'memory-save', title: 'A', scope: 'project', revision: 3, changed: false, mode: 'unchanged' }, 'memory-save');
 assert.equal(save, null);
-const changed = citationOf({ kind: 'memory-save', id: 'mem_aaaaaaaa', title: 'A', scope: 'global', revision: 2, changed: true, mode: 'updated' }, 'memory-save');
+const changed = citationOf({ kind: 'memory-save', title: 'A', scope: 'global', revision: 2, changed: true, mode: 'updated' }, 'memory-save');
 assert.equal(changed.exposure, 'update');
 assert.equal(changed.scope, 'global');
 
 // 没有真改动、缺版本、缺工作目录的写入行不产生撤销入口。
-assert.equal(undoRefOf({ kind: 'memory-save', id: 'mem_aaaaaaaa', revision: 3, changed: false }, '/tmp/p'), null);
-assert.equal(undoRefOf({ kind: 'memory-save', id: 'mem_aaaaaaaa', revision: 3 }, '/tmp/p'), null);
-assert.equal(undoRefOf({ kind: 'memory-save', id: 'mem_aaaaaaaa', revision: 3, changed: true }, ''), null);
-assert.equal(undoRefOf({ kind: 'memory-save', id: 'mem_aaaaaaaa', revision: 2, changed: true }, '/tmp/p').revision, 2);
+assert.equal(undoRefOf({ kind: 'memory-save', title: 'A', revision: 3, changed: false }, '/tmp/p'), null);
+assert.equal(undoRefOf({ kind: 'memory-save', title: 'A', revision: 3 }, '/tmp/p'), null);
+assert.equal(undoRefOf({ kind: 'memory-save', title: 'A', revision: 3, changed: true }, ''), null);
+assert.equal(undoRefOf({ kind: 'memory-save', revision: 2, changed: true }, '/tmp/p'), null);
+assert.equal(undoRefOf({ kind: 'memory-save', title: 'A', revision: 2, changed: true }, '/tmp/p').revision, 2);
 
 // 搜索的多条引用按 refs 展开；删除/归档状态原样保留。
 const refs = citationsOfMeta({ kind: 'memory-search', refs: [
-  { id: 'mem_aaaaaaaa', title: 'A', scope: 'project', revision: 1, status: 'ok' },
-  { id: 'mem_bbbbbbbb', title: 'B', scope: 'global', revision: 4, status: 'archived' },
-  { id: 'sug_cccccccc', title: 'C', scope: 'global', revision: 1, status: 'ok' },
+  { title: 'A', scope: 'project', revision: 1, status: 'ok' },
+  { title: 'B', scope: 'global', revision: 4, status: 'archived' },
+  { title: '', scope: 'global', revision: 1, status: 'ok' },
 ] });
 assert.equal(refs.length, 2);
 assert.equal(refs[1].status, 'archived');
@@ -121,17 +122,17 @@ assert.equal(refs[0].exposure, 'reference');
 // 一轮里 PTC 子结果也算；同 id 同用途只留一条，位置不变、内容取最新。
 const nodes = [
   { root: settled({ kind: 'memory-search', refs: [
-    { id: 'mem_aaaaaaaa', title: 'A', scope: 'project', revision: 1, status: 'ok' },
+    { title: 'A', scope: 'project', revision: 1, status: 'ok' },
   ] }) },
-  { root: settled({ kind: 'memory-read', id: 'mem_aaaaaaaa', title: 'A2', scope: 'project', revision: 2, status: 'ok' }, { subCalls: [settled({ kind: 'memory-read', id: 'mem_aaaaaaaa', title: 'A3', scope: 'project', revision: 2, status: 'ok' })] }) },
-  { root: settled({ kind: 'memory-read', id: 'mem_bbbbbbbb', title: 'B', scope: 'global', revision: 1, status: 'ok' }) },
+  { root: settled({ kind: 'memory-read', title: 'A', scope: 'project', revision: 2, status: 'ok' }, { subCalls: [settled({ kind: 'memory-read', title: 'A', scope: 'project', revision: 2, status: 'ok' })] }) },
+  { root: settled({ kind: 'memory-read', title: 'B', scope: 'global', revision: 1, status: 'ok' }) },
 ];
 const turn = dedupe(citationsOfTurn(nodes));
 assert.equal(turn.length, 2);
-assert.equal(turn[0].id, 'mem_aaaaaaaa');
+assert.equal(turn[0].title, 'A');
 assert.equal(turn[0].revision, 2);
-assert.equal(turn[0].title, 'A3');
-assert.equal(turn[1].id, 'mem_bbbbbbbb');
+assert.equal(turn[1].title, 'B');
+assert.equal('id' in turn[0], false);
 
 // 旧行没有元数据：什么也不产出，绝不从文案猜 id。
 assert.deepEqual(citationsOfTurn([{ root: null }, { root: { kind: 'tool-result', content: [{ type: 'text', text: 'memory · saved "A" mem_aaaaaaaa' }] } }]), []);
@@ -281,13 +282,13 @@ const palaceEmpty = MemoryPalace({ records: [], selectedId: '', onPick: () => {}
 assert.equal(expandNodes(palaceEmpty).some((node) => node.children.includes('这个项目还没有记忆')), true);
 
 // 每条引用带类型：搜索命中用条目的 kind，读过正文用 recordKind；缺了就只写范围与来源。
-const typedSearch = citationOf({ id: 'mem_aaaaaaaa', title: 'A', scope: 'global', revision: 1, status: 'ok', kind: 'preference' }, 'memory-search');
+const typedSearch = citationOf({ title: 'A', scope: 'global', revision: 1, status: 'ok', kind: 'preference' }, 'memory-search');
 assert.equal(typedSearch.entryKind, 'preference');
 assert.equal(refMetaOf(typedSearch), '偏好 · 全局 · 你记的');
-assert.equal(citationOf({ kind: 'memory-read', id: 'mem_bbbbbbbb', recordKind: 'procedure', scope: 'project', revision: 2 }, 'memory-read').entryKind, 'procedure');
+assert.equal(citationOf({ kind: 'memory-read', title: 'P', recordKind: 'procedure', scope: 'project', revision: 2 }, 'memory-read').entryKind, 'procedure');
 assert.equal(refMetaOf({ scope: 'project', origin: 'user_explicit' }), '项目 · 你记的');
 /** 检索引用也要带类型与更新距今，缺时间时退回两项。 */
-const aged = citationOf({ kind: 'preference', id: 'mem_cccccccc', scope: 'global', revision: 1, updated: new Date(Date.now() - 3 * 86_400_000).toISOString() }, 'memory-search');
+const aged = citationOf({ kind: 'preference', title: 'C', scope: 'global', revision: 1, updated: new Date(Date.now() - 3 * 86_400_000).toISOString() }, 'memory-search');
 assert.equal(aged.entryKind, 'preference');
 assert.equal(refMetaOf(aged), '偏好 · 全局 · 你记的 · 3 天前更新');
 assert.equal(agoLabel(''), '');

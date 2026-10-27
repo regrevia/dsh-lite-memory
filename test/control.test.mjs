@@ -95,7 +95,7 @@ const toggle = (scope, enabled) => store.setMemoryEnabled(scope, enabled, { oper
   const saved = await runtime.exec('memory_save', { title: '关闭后写入', summary: '应当拒绝', body: '不该落盘' }, agent);
   assert.equal(saved.changed, false);
   assert.equal(saved.reason, 'memory_disabled');
-  assert.equal(saved.id, '');
+  assert.equal(saved.id, undefined);
 }
 
 /* C02：关闭期间所有写入入口都拒绝，自进化不能绕过总开关打开。 */

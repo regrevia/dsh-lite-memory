@@ -1011,6 +1011,24 @@ function applyDraft(scope, index, source, now, options = {}) {
   if (draft.id && !record) throw new Error('没有这条记忆，改用新增');
   let mergedFrom = null;
   let similarList = [];
+  /**
+   * 同名就是同一条：标题是唯一句柄，重复存同一个标题必须是更新，不能悄悄另建一条
+   * （否则按标题读、按标题忘都会撞上两条）。前置条件明确不同的同名才允许是另一条。
+   */
+  if (!record && !distinct) {
+    const wantedConditions = view.conditionsKey(draft.conditions || []);
+    /** 只改摘要/正文时没重写适用条件，别因此把有条件的那条挤成另一条。 */
+    const statedConditions = Boolean(draft.has.when || draft.has.conditions || draft.has.applicability);
+    const named = live.find((item) => [item.title, ...(item.aliases || [])]
+      .some((name) => String(name || '').trim().toLowerCase() === String(draft.title || '').trim().toLowerCase())
+      && (!statedConditions || view.conditionsKey(item.conditions || []) === wantedConditions)
+      /** 同名但两边都明确写了不同的 when，是用户表达的另一种情况，算另一条。 */
+      && !(draft.has.when && String(item.when || '') && String(item.when || '') !== String(draft.when || '')));
+    if (named) {
+      record = named;
+      mergedFrom = named.title === draft.title ? null : named.title;
+    }
+  }
   if (!record) {
     /** distinct 是用户明确说的「这是另一条」：同名也另起一条，不被规范化后的精确同名吞掉。 */
     const hit = distinct ? null : resolveTarget(live, draft);
@@ -1860,6 +1878,35 @@ export function locate(scope, id, options = {}) {
   return null;
 }
 
+/**
+ * 标题是界面和模型唯一的句柄：在给定范围里按标题（含别名）找那一条。
+ * 同层可能同名但适用条件不同，所以带了版次就先按版次收敛，再退回第一条。
+ */
+export function locateByTitle(scope, title, options = {}) {
+  const wanted = normalizeText(title, 120).toLowerCase();
+  if (!wanted) return null;
+  const sources = options.crossLayer ? layersFor(scope) : [scope, globalScope()];
+  const want = Number.isInteger(options.revision) ? options.revision : null;
+  for (const source of sources) {
+    const index = loadIndex(source, options);
+    const pick = (list) => {
+      const rows = list.filter((item) => [item.title, ...(Array.isArray(item.aliases) ? item.aliases : [])]
+        .some((name) => normalizeText(name, 120).toLowerCase() === wanted));
+      if (rows.length === 0) return null;
+      if (want !== null) {
+        const exact = rows.find((item) => (Number(item.revision) || 1) === want);
+        if (exact) return exact;
+      }
+      return rows[0];
+    };
+    const active = pick(index.entries);
+    if (active) return { scope: source, record: active, archived: false };
+    const archived = pick(index.archived);
+    if (archived) return { scope: source, record: archived, archived: true };
+  }
+  return null;
+}
+
 function forgottenFingerprints(index) {
   const out = new Set();
   for (const row of index.suppressions || []) {
@@ -2313,6 +2360,24 @@ export function readCitationBody(sessionId, id) {
   const data = readSessionFile(sessionId);
   const row = ((data && data.items) || []).find((item) => item && item.id === id);
   if (!row) return null;
+  return readCitationRow(sessionId, row);
+}
+
+/** 按标题读引用正文：界面手里只有标题，id 留在引用文件里。 */
+export function readCitationBodyByTitle(sessionId, title, options = {}) {
+  const wanted = normalizeText(title, 120).toLowerCase();
+  if (!wanted) return null;
+  const data = readSessionFile(sessionId);
+  const want = Number.isInteger(options.revision) ? options.revision : null;
+  const rows = ((data && data.items) || []).filter((item) => item
+    && normalizeText(item.title || '', 120).toLowerCase() === wanted);
+  if (rows.length === 0) return null;
+  const row = (want !== null && rows.find((item) => (Number(item.revision) || 1) === want)) || rows[0];
+  return readCitationRow(sessionId, row);
+}
+
+function readCitationRow(sessionId, row) {
+  const id = row.id;
   const found = resolveCitation(row);
   if (!found) return null;
   let body;

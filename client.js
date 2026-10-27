@@ -82,16 +82,15 @@ window.__ModuleLoader__.load({
       return meta;
     };
 
-    const isMemoryId = (value) => typeof value === 'string' && /^mem_[a-z0-9]{6,}$/.test(value);
     const isCandidateId = (value) => typeof value === 'string' && /^sug_[a-z0-9]{6,}$/.test(value);
 
-    /** 一条引用的规范形态：只有定位与版次。 */
+    /** 一条引用的规范形态：只有标题、范围与版次；id 不进界面。 */
     const citationOf = (meta, kind) => {
-      if (!meta || !isMemoryId(meta.id)) return null;
+      if (!meta || typeof meta.title !== 'string' || !meta.title.trim()) return null;
       if (kind === 'memory-save' && meta.changed !== true) return null;
       return {
-        id: meta.id,
-        title: typeof meta.title === 'string' ? meta.title : '',
+        title: meta.title,
+        key: `${meta.scope === 'global' ? 'global' : 'project'}\u0000${meta.title}`, // ui-copy-ignore
         scope: meta.scope === 'global' ? 'global' : 'project',
         revision: Number.isInteger(meta.revision) ? meta.revision : 1,
         status: typeof meta.status === 'string' ? meta.status : 'ok',
@@ -158,7 +157,7 @@ window.__ModuleLoader__.load({
       const seen = new Map();
       const out = [];
       for (const item of items) {
-        const key = `${item.scope}:${item.id}:${item.exposure}`;
+        const key = `${item.scope}:${item.key}:${item.exposure}`;
         const at = seen.get(key);
         if (at === undefined) {
           seen.set(key, out.length);
@@ -340,7 +339,7 @@ window.__ModuleLoader__.load({
     const undoRefOf = (meta, cwd) => (meta
       && meta.kind === 'memory-save'
       && meta.changed === true
-      && isMemoryId(meta.id)
+      && typeof meta.title === 'string' && meta.title.trim().length > 0
       && Number.isInteger(meta.revision)
       && typeof cwd === 'string'
       && cwd.length > 0
@@ -359,7 +358,7 @@ window.__ModuleLoader__.load({
       const drop = () => {
         if (!canDrop) return;
         setState('saving');
-        post('/lite-memory/undo', { op: 'undo', id: changed.id, revision: changed.revision, cwd }).then((result) => {
+        post('/lite-memory/undo', { op: 'undo', title: changed.title, revision: changed.revision, cwd }).then((result) => {
           if (succeeded(result)) {
             setState('dropped');
             setNote(result.body && result.body.mode === 'restored' ? 'memory · restored' : 'memory · archived');
@@ -676,28 +675,28 @@ window.__ModuleLoader__.load({
         setOpen(false);
       };
       const show = (item) => {
-        if (shown && shown.id === item.id) {
+        if (shown && shown.key === item.key) {
           close();
           return;
         }
         const request = generation.current + 1;
         generation.current = request;
         setOpen(true);
-        setShown({ id: item.id, ref: item, loading: true });
+        setShown({ key: item.key, ref: item, loading: true });
         setNote('');
-        post('/lite-memory/body', { id: item.id, revision: item.revision, sessionId }).then((result) => {
+        post('/lite-memory/body', { title: item.title, scope: item.scope, revision: item.revision, sessionId }).then((result) => {
           if (!alive.current || generation.current !== request) return;
           const payload = result.ok && result.body ? result.body : null;
           if (!payload || payload.ok !== true) {
-            setShown({ id: item.id, ref: item, invalid: true });
+            setShown({ key: item.key, ref: item, invalid: true });
             return;
           }
           if (payload.status === 'gone') {
-            setShown({ id: item.id, ref: item, gone: true });
+            setShown({ key: item.key, ref: item, gone: true });
             return;
           }
           setShown({
-            id: item.id,
+            key: item.key,
             ref: item,
             title: typeof payload.title === 'string' ? payload.title : '',
             when: typeof payload.when === 'string' ? payload.when : '',
@@ -713,11 +712,11 @@ window.__ModuleLoader__.load({
         });
       };
       const rows = open ? items.map((item) => h(RefRow, {
-        key: `${item.scope}|${item.id}|${item.revision}`, // ui-copy-ignore
-        item, tone, active: Boolean(shown && shown.id === item.id),
+        key: `${item.key}|${item.revision}`, // ui-copy-ignore
+        item, tone, active: Boolean(shown && shown.key === item.key),
         onShow: () => show(item),
       })) : [];
-      const detail = shown && shown.ref && items.some((item) => item.id === shown.id && item.revision === shown.ref.revision)
+      const detail = shown && shown.ref && items.some((item) => item.key === shown.key && item.revision === shown.ref.revision)
         ? h('div', { style: { ...REF_BODY, borderLeft: `2px solid ${tone}` } },
           shown.loading ? h('span', { style: REF_META }, '读取中…') : null,
           shown.gone ? h('span', { style: REF_META }, '这条记忆已删除') : null,

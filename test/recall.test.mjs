@@ -278,7 +278,6 @@ assert.notEqual(bootA.provider.text({ agent: agentB, signal: signalB }), prepare
   const fourth = await bootA.exec('memory_read', { id: bigBodies[3].id }, agent);
   assert.equal(fourth.status, 'budget_exhausted');
   assert.equal(fourth.body || '', '');
-  assert.equal(fourth.id, '');
   assert.equal(bootA.render('memory_read', {}, fourth), 'memory · 这条消息已停止读记忆，下一条消息再读');
   const win = bootA.debug.windowOf(agent);
   assert.ok(win.bytes <= 8192);
@@ -389,7 +388,7 @@ assert.notEqual(bootA.provider.text({ agent: agentB, signal: signalB }), prepare
     if (row.status === 'budget_exhausted') exhausted = row;
   }
   assert.ok(exhausted, '超过额度后拒绝读正文');
-  assert.equal(exhausted.id, '');
+  assert.equal(exhausted.id, undefined);
   assert.ok(win.bytes <= 8192);
   assert.ok(win.bodies <= 3);
   assert.ok(win.reads <= 8);
@@ -425,7 +424,7 @@ assert.notEqual(bootA.provider.text({ agent: agentB, signal: signalB }), prepare
   const oldBody = save(scopeE, { title: '口端口令', tags: ['端口'], summary: '端口以最新为准', body: '第一版：端口是 5000' });
   store.upsert(scopeE, { id: oldBody.id, title: '口端口令', summary: '端口以最新为准', body: '第二版：端口是 49661' });
   const current = await bootA.exec('memory_search', { query: '口端口令', history: true }, agent);
-  assert.ok(current.refs.some((ref) => ref.id === oldBody.id && ref.revision === 2), '检索只给当前版本');
+  assert.ok(current.refs.some((ref) => ref.title === '口端口令' && ref.revision === 2), '检索只给当前版本');
   const latest = await bootA.exec('memory_read', { id: oldBody.id }, agent);
   assert.match(latest.body, /第二版/);
   assert.doesNotMatch(latest.body, /第一版/);

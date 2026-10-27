@@ -23,6 +23,8 @@ import {
   recordCitations,
   listCitations,
   readCitationBody,
+  readCitationBodyByTitle,
+  locateByTitle,
   evolutionStatus,
   controlStatus,
   setMemoryEnabled,
@@ -215,7 +217,14 @@ function keepHandler(webServer, cwdForSession) {
      */
     if (action === 'body') {
       const id = typeof body.id === 'string' ? body.id : '';
-      if (!id) return sendJson(res, 400, { ok: false, reason: '缺少 id' });
+      /** 界面只有标题：按标题照样能读，id 留着兼容旧引用文件。 */
+      const titleRef = typeof body.title === 'string' ? body.title.trim() : '';
+      const revisionRef = Number.isInteger(body.revision) ? body.revision : undefined;
+      if (!id && !titleRef) return sendJson(res, 400, { ok: false, reason: '缺少标题' });
+      /** 找不到时只回调用方给的那个句柄：按 id 问就回 id，按标题问就回标题。 */
+      const goneReply = () => sendJson(res, 200, titleRef
+        ? { ok: true, status: 'gone', title: titleRef }
+        : { ok: true, status: 'gone', id });
       const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
       const cwd = typeof body.cwd === 'string' ? body.cwd : '';
       const scopeKey = typeof body.scopeKey === 'string' ? body.scopeKey : '';
@@ -231,8 +240,9 @@ function keepHandler(webServer, cwdForSession) {
           : listed ? { key: listed.key, dir: listed.dir, cwd: listed.cwd || '', requestedCwd: listed.cwd || '', rootSource: 'configured', confirmed: true }
             : null;
         if (!target) return sendJson(res, 404, { ok: false, reason: '没有这个项目' });
-        const located = locate(target, id, { readOnly: true });
-        if (!located) return sendJson(res, 200, { ok: true, status: 'gone', id });
+        const located = id ? locate(target, id, { readOnly: true })
+          : locateByTitle(target, titleRef, { readOnly: true, revision: revisionRef });
+        if (!located) return goneReply();
         found = {
           ...located.record,
           scope: located.scope.key === 'global' ? 'global' : 'project',
@@ -241,15 +251,17 @@ function keepHandler(webServer, cwdForSession) {
         };
       } else if (sessionId) {
         try {
-          found = readCitationBody(sessionId, id);
+          found = id ? readCitationBody(sessionId, id)
+            : readCitationBodyByTitle(sessionId, titleRef, { revision: revisionRef });
         } catch {
           found = null;
         }
         /** 不在本会话引用里就当已消失：不给跨会话探正文，界面也只显示「已删除」。 */
-        if (!found) return sendJson(res, 200, { ok: true, status: 'gone', id });
+        if (!found) return goneReply();
       } else if (cwd) {
-        const located = locate(scopeOf(cwd), id, { readOnly: true });
-        if (!located) return sendJson(res, 200, { ok: true, status: 'gone', id });
+        const located = id ? locate(scopeOf(cwd), id, { readOnly: true })
+          : locateByTitle(scopeOf(cwd), titleRef, { readOnly: true, revision: revisionRef });
+        if (!located) return goneReply();
         found = {
           ...located.record,
           scope: located.scope.key === 'global' ? 'global' : 'project',
@@ -259,7 +271,7 @@ function keepHandler(webServer, cwdForSession) {
       } else {
         return sendJson(res, 400, { ok: false, reason: '缺少来源' });
       }
-      if (!found) return sendJson(res, 200, { ok: true, status: 'gone', id });
+      if (!found) return goneReply();
       /** 面板要分开「当前规范」和旧版本；历史只作可折叠对照，不拼进正文。 */
       const versions = Array.isArray(found.versions) ? found.versions
         : Array.isArray(found.history) ? found.history : [];
@@ -269,7 +281,6 @@ function keepHandler(webServer, cwdForSession) {
         : enums.has(learning.lastStatus) ? learning.lastStatus : '';
       return sendJson(res, 200, {
         ok: true,
-        id: found.id,
         status: found.status,
         title: found.title,
         when: found.when || '',
@@ -630,16 +641,19 @@ function keepHandler(webServer, cwdForSession) {
     }
 
     if (action === 'undo') {
-      if (!id) return sendJson(res, 400, { ok: false, reason: '缺少 id' });
-      if (!locate(scope, id)) return sendJson(res, 404, { ok: false, reason: '没有这条记忆' });
+      const undoTitle = typeof body.title === 'string' ? body.title.trim() : '';
+      if (!id && !undoTitle) return sendJson(res, 400, { ok: false, reason: '缺少标题' });
+      const located = id ? locate(scope, id)
+        : locateByTitle(scope, undoTitle, { revision: Number.isInteger(body.revision) ? body.revision : undefined });
+      if (!located) return sendJson(res, 404, { ok: false, reason: '没有这条记忆' });
       /** 撤销是精确动作：必须带当时看到的版本；缺版本就不猜，免得撤掉别人后来的修改。 */
       if (!Number.isInteger(body.revision) || body.revision < 1) {
         return sendJson(res, 400, { ok: false, reason: '缺少版本' });
       }
       try {
-        const undone = undoChange(scope, id, { expectedRevision: body.revision });
+        const undone = undoChange(scope, located.record.id, { expectedRevision: body.revision });
         if (!undone) return sendJson(res, 404, { ok: false, reason: '没有这条记忆' });
-        return sendJson(res, 200, { ok: true, id: undone.id, mode: undone.mode });
+        return sendJson(res, 200, { ok: true, title: undone.title, revision: undone.revision, mode: undone.mode });
       } catch (error) {
         return sendJson(res, 409, { ok: false, reason: error instanceof Error ? error.message : '撤销失败' });
       }
@@ -669,7 +683,6 @@ function keepHandler(webServer, cwdForSession) {
 /** 给界面的事件引用：只有定位与版次，不带正文，避免把维护字段当内容画出来。 */
 function refsOf(hits) {
   return hits.map((item) => ({
-    id: item.id,
     title: item.title || '',
     scope: item.scope || 'project',
     revision: item.revision || 1,
@@ -1132,7 +1145,7 @@ export function apply(ctx, config) {
         win.recallHeader = true;
       }
       lines.push(line);
-      cards.push({ id: card.id, revision, scope: card.scope, title: card.title });
+      cards.push({ revision, scope: card.scope, title: card.title });
     }
     const finalText = `${RECALL_HEADER}\n${lines.join('\n')}`;
     if (auto) {
@@ -1654,21 +1667,19 @@ export function apply(ctx, config) {
     output: {
       presentationMeta: (_args, value) => ({
         kind: 'memory-save',
-        id: value.id || '',
         title: value.title || '',
         scope: value.scope || '',
         revision: value.revision || 0,
         changed: value.changed === true,
         recordKind: typeof value.kind === 'string' && value.kind ? value.kind : '',
         mode: value.needsScope ? 'needs_scope'
-          : value.existingId ? 'duplicate'
+          : value.existingTitle ? 'duplicate'
             : value.needsResolution ? 'needs_resolution'
               : value.changed === false ? 'unchanged' : value.merged ? 'updated' : 'created',
       }),
       schema: {
         type: 'object',
         properties: {
-          id: { type: 'string' },
           title: { type: 'string' },
           summary: { type: 'string' },
           when: { type: 'string' },
@@ -1683,7 +1694,7 @@ export function apply(ctx, config) {
           needsResolution: { type: 'boolean' },
           needsScope: { type: 'boolean' },
           reason: { type: 'string' },
-          existingId: { type: 'string' },
+          existingTitle: { type: 'string' },
           existingScope: { type: 'string' },
           crossLayer: { type: 'boolean' },
           crossScope: { type: 'string', enum: ['global', 'project'] },
@@ -1694,7 +1705,7 @@ export function apply(ctx, config) {
           archived: { type: 'string' },
           pendingConflicts: { type: 'integer' },
         },
-        required: ['id', 'title', 'summary', 'when', 'revision', 'merged', 'changed', 'scope', 'needsResolution', 'archived'],
+        required: ['title', 'summary', 'when', 'revision', 'merged', 'changed', 'scope', 'needsResolution', 'archived'],
         additionalProperties: false,
       },
       render: (_args, value) => [{
@@ -1705,7 +1716,7 @@ export function apply(ctx, config) {
             : value.reason === 'unconfirmed_project'
             ? `memory · 当前目录还不能确认属于哪个项目：「${value.title}」\n先确认项目根目录，或显式 scope="global"`
             : `memory · 归属还没定：「${value.title}」\n补 memoryClass（personal_preference / project_fact / environment_fact / portable_procedure）或显式 scope；设备事实还要给设备条件`
-          : value.existingId
+          : value.existingTitle
             ? `memory · 已有相同记忆：「${value.title}」（${value.existingScope}）\n要改成另一条，加 resolution="distinct"`
             : value.needsResolution
           ? `memory · 需要确认：「${value.title}」与已有条目相近${value.crossLayer ? '（在另一层）' : ''}${value.sameTopic ? '（同一主题槽位）' : ''}\n${value.similar}\n要更新它：用同一个标题${value.crossScope === 'global' ? '、并带 scope="global"' : ''}再存一次；确实是另一条，加 resolution="distinct"`
@@ -1719,7 +1730,7 @@ export function apply(ctx, config) {
       const projectScopeName = projectNameOf(projectScope);
       if (!memoryEnabled(projectScope)) {
         return {
-          id: '', title: String(args.title || ''), summary: '', when: '', revision: 0,
+          title: String(args.title || ''), summary: '', when: '', revision: 0,
           merged: false, changed: false, scope: '', needsScope: true, reason: 'memory_disabled',
           recoveryPending: controlStatus(projectScope).recoveryPending,
           needsResolution: false, similarTitles: '', similar: '', archived: '',
@@ -1753,7 +1764,6 @@ export function apply(ctx, config) {
       const saved = saveEntry(projectScope, draft);
       if (saved.needsScope) {
         return {
-          id: '',
           title: saved.draft?.title || '',
           summary: saved.draft?.summary || '',
           when: saved.draft?.when || '',
@@ -1771,7 +1781,6 @@ export function apply(ctx, config) {
       }
       if (saved.existing) {
         return {
-          id: saved.existing.id,
           title: saved.existing.title || saved.draft?.title || '',
           summary: '',
           when: '',
@@ -1781,7 +1790,7 @@ export function apply(ctx, config) {
           scope: saved.existing.scope,
           scopeName: saved.existing.scope === 'global' ? '' : projectScopeName,
           needsScope: false,
-          existingId: saved.existing.id,
+          existingTitle: saved.existing.title || saved.draft?.title || '',
           existingScope: saved.existing.scope,
           needsResolution: false,
           similarTitles: '',
@@ -1792,7 +1801,6 @@ export function apply(ctx, config) {
       const scope = saved.chosenScope === 'global' || (args.scope === 'global' && !saved.chosenScope) ? globalScope() : projectScope;
       if (saved.needsResolution) {
         return {
-          id: '',
           title: saved.draft.title,
           summary: saved.draft.summary,
           when: saved.draft.when,
@@ -1813,7 +1821,6 @@ export function apply(ctx, config) {
       }
       recordCitations(scope, sessionIdOf(execution), [saved.record]);
       return {
-        id: saved.record.id,
         title: saved.record.title,
         summary: saved.record.summary,
         when: saved.record.when || '',
@@ -1849,7 +1856,6 @@ export function apply(ctx, config) {
           title: { type: 'string' },
           id: { type: 'string' },
           reason: { type: 'string' },
-          targetId: { type: 'string' },
           targetTitle: { type: 'string' },
         },
         required: ['asked'],
@@ -1858,7 +1864,7 @@ export function apply(ctx, config) {
       render: (_args, value) => [{
         type: 'text',
         text: value.asked
-          ? `memory · suggested "${value.title}"${value.targetId ? ` · 确认后更新「${value.targetTitle}」` : ''}`
+          ? `memory · suggested "${value.title}"${value.targetTitle ? ` · 确认后更新「${value.targetTitle}」` : ''}`
           : `memory · skipped${value.reason ? `\n${value.reason}` : ''}`,
       }],
     },
@@ -1872,7 +1878,7 @@ export function apply(ctx, config) {
         asked: true,
         title: noted.title,
         id: noted.id,
-        ...(noted.targetId ? { targetId: noted.targetId, targetTitle: noted.targetTitle } : {}),
+        ...(noted.targetTitle ? { targetTitle: noted.targetTitle } : {}),
       };
     },
   }), 'lite-memory: memory_suggest');
@@ -2030,7 +2036,6 @@ export function apply(ctx, config) {
       schema: {
         type: 'object',
         properties: {
-          id: { type: 'string' },
           title: { type: 'string' },
           when: { type: 'string' },
           revision: { type: 'integer' },
@@ -2043,7 +2048,7 @@ export function apply(ctx, config) {
           links: { type: 'string' },
           repeat: { type: 'boolean' },
         },
-        required: ['id', 'scope', 'status'],
+        required: ['scope', 'status'],
         additionalProperties: false,
       },
       render: (_args, value) => [{
@@ -2070,7 +2075,6 @@ export function apply(ctx, config) {
       }],
       presentationMeta: (_args, value) => ({
         kind: 'memory-read',
-        id: value.id || '',
         title: value.title || '',
         scope: value.scope || '',
         revision: value.revision || 0,
@@ -2080,9 +2084,9 @@ export function apply(ctx, config) {
       }),
     },
     execute: async (args, execution) => {
-      if (recallMode() === 'off' || !memoryEnabledFor(execution)) return { id: '', scope: '', status: 'memory_disabled' };
+      if (recallMode() === 'off' || !memoryEnabledFor(execution)) return { scope: '', status: 'memory_disabled' };
       const resolved = resolveRequestContext(execution, args.contextId);
-      if (!resolved.ok) return { id: '', scope: '', status: resolved.status || 'needs_context' };
+      if (!resolved.ok) return { scope: '', status: resolved.status || 'needs_context' };
       const scope = resolved.scope;
       const scopeName = scope.key === 'global' ? '' : projectNameOf(scope);
       const context = resolved.context;
@@ -2098,14 +2102,14 @@ export function apply(ctx, config) {
         const refId = refIdOf(scope, args);
         const source = locate(scope, refId, { crossLayer: true });
         const gateOk = !source || view.eligibility(source.record, gateRuntime, 'read').ok;
-        if (!gateOk && !byTitle) return { id: '', scope: '', status: 'needs_context', links: '' };
+        if (!gateOk && !byTitle) return { scope: '', status: 'needs_context', links: '' };
         const found = readLinks(scope, refId, { context, allowExperimental, runtime: gateRuntime, now: Date.now() });
         if (!found) throw new Error(`没有「${String(args.title || args.id || '').trim()}」这条记忆`);
         if (found.status !== 'ok') {
-          const withheld = { id: '', scope: '', status: found.status, links: '' };
+          const withheld = { scope: '', status: found.status, links: '' };
           if (win) {
             const bytes = jsonBytes(withheld);
-            if (!affordableTool(win, bytes)) return { id: '', scope: '', status: 'budget_exhausted' };
+            if (!affordableTool(win, bytes)) return { scope: '', status: 'budget_exhausted' };
             win.bytes += bytes;
             win.toolBytes += bytes;
             win.reads += 1;
@@ -2117,10 +2121,10 @@ export function apply(ctx, config) {
           ? '- 有一条已失效'
           : `- ${link.scope === 'global' ? '[global] ' : (scopeName ? `[${scopeName}] ` : '')}「${link.title}」`));
         const text = rows.join('\n') || '(无)';
-        const value = { id: found.id, scope: found.scope, scopeName, status: found.status, links: text };
+        const value = { scope: found.scope, scopeName, status: found.status, links: text };
         if (win) {
           const bytes = jsonBytes(value);
-          if (!affordableTool(win, bytes)) return { id: '', scope: '', status: 'budget_exhausted' };
+          if (!affordableTool(win, bytes)) return { scope: '', status: 'budget_exhausted' };
           win.bytes += bytes;
           win.toolBytes += bytes;
           win.reads += 1;
@@ -2131,15 +2135,14 @@ export function apply(ctx, config) {
       if (!record) throw new Error(`没有「${String(args.title || args.id || '').trim()}」这条记忆`);
       const gate = view.eligibility(record, gateRuntime, 'read');
       const unknownByTitle = byTitle && gate.status === 'needs_context';
-      if (!gate.ok && !unknownByTitle) return { id: '', scope: record.scope, status: gate.status, body: '' };
+      if (!gate.ok && !unknownByTitle) return { scope: record.scope, status: gate.status, body: '' };
       /** 条件未知或不适用的条目只报状态：正文和标题都不能绕过自动召回的门槛（点名标题的询问除外）。 */
       if (record.status !== 'ok' && record.status !== 'archived' && !unknownByTitle) {
-        return { id: '', scope: record.scope, status: record.status === 'needs_context' ? 'needs_context' : 'not_applicable', body: '' };
+        return { scope: record.scope, status: record.status === 'needs_context' ? 'needs_context' : 'not_applicable', body: '' };
       }
       const revision = record.revision || 1;
       const body = String(record.body ?? '');
       const value = {
-        id: record.id,
         title: record.title,
         when: record.when || '',
         revision,
@@ -2151,19 +2154,19 @@ export function apply(ctx, config) {
         ...(unknownByTitle ? { status: 'needs_context' } : {}),
       };
       if (win) {
-        if (!affordableTool(win, 0)) return { id: '', scope: '', status: 'budget_exhausted' };
+        if (!affordableTool(win, 0)) return { scope: '', status: 'budget_exhausted' };
         const seenRevision = win.readBodies.get(record.id);
         if (seenRevision === revision) {
           const receipt = { ...value, body: '', repeat: true };
           const bytes = jsonBytes(receipt);
-          if (!affordableTool(win, bytes)) return { id: '', scope: '', status: 'budget_exhausted' };
+          if (!affordableTool(win, bytes)) return { scope: '', status: 'budget_exhausted' };
           win.bytes += bytes;
           win.toolBytes += bytes;
           win.reads += 1;
           return receipt;
         }
         const bytes = jsonBytes(value);
-        if (!affordableTool(win, bytes, 1)) return { id: '', scope: '', status: 'budget_exhausted' };
+        if (!affordableTool(win, bytes, 1)) return { scope: '', status: 'budget_exhausted' };
         win.bytes += bytes;
         win.toolBytes += bytes;
         win.bodies += 1;
@@ -2183,13 +2186,12 @@ export function apply(ctx, config) {
       schema: {
         type: 'object',
         properties: {
-          id: { type: 'string' },
           title: { type: 'string' },
           scope: { type: 'string' },
           scopeName: { type: 'string' },
           mode: { type: 'string', enum: ['archive', 'purged', 'needs_resolution', 'purge_pending', 'memory_disabled'] },
         },
-        required: ['id', 'mode'],
+        required: ['mode'],
         additionalProperties: false,
       },
       render: (_args, value) => [{
@@ -2206,7 +2208,6 @@ export function apply(ctx, config) {
       }],
       presentationMeta: (_args, value) => ({
         kind: 'memory-forget',
-        id: value.id || '',
         title: value.title || '',
         scope: value.scope || '',
         mode: value.mode,
@@ -2215,12 +2216,12 @@ export function apply(ctx, config) {
     execute: async (args, execution) => {
       const scope = scopeOf(cwdOf(execution));
       const projectScopeName = projectNameOf(scope);
-      if (!memoryEnabled(scope)) return { id: String(args.id || ''), title: '', scope: '', mode: 'memory_disabled' };
+      if (!memoryEnabled(scope)) return { title: '', scope: '', mode: 'memory_disabled' };
       const refId = refIdOf(scope, args);
       const located = locate(scope, refId);
       if (!located && !args.mode) throw new Error(`没有「${String(args.title || args.id || '').trim()}」这条记忆`);
       if (!args.mode) {
-        return { id: refId, title: located.record.title || '', mode: 'needs_resolution', scope: located.scope.key === 'global' ? 'global' : 'project' };
+        return { title: located.record.title || '', mode: 'needs_resolution', scope: located.scope.key === 'global' ? 'global' : 'project' };
       }
       let dropped;
       try {
@@ -2234,7 +2235,6 @@ export function apply(ctx, config) {
           } catch (again) {
             if (again && again.code === 'purge_pending') {
               return {
-                id: args.id,
                 title: located ? located.record.title : '',
                 mode: 'purge_pending',
                 scope: layer.key === 'global' ? 'global' : 'project',
@@ -2251,7 +2251,6 @@ export function apply(ctx, config) {
       const layerKey = dropped.scopeKey || (located ? located.scope.key : scope.key);
       if (dropped.mode === 'purged') revokeLearningUse(layerKey);
       return {
-        id: dropped.id,
         title: dropped.title || (located ? located.record.title : ''),
         mode: dropped.mode,
         scope: layerKey === 'global' ? 'global' : 'project',

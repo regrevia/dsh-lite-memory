@@ -116,30 +116,31 @@ const phrased = await exec('memory_save', { title: '以后都用这个一次性�
 assert.equal(phrased.scope, 'project');
 assert.equal(store.loadIndex(store.globalScope()).entries.some((item) => item.title === '以后都用这个一次性脚本'), false);
 
-assert.equal(typeof saved.id, 'string');
+assert.equal(typeof saved.title, 'string');
+assert.equal(saved.id, undefined);
 assert.match(render('memory_save', {}, saved), /^memory · saved \[[^\]]+\] "发布顺序"$/);
 
 const merged = await exec('memory_save', { title: '发布顺序', summary: '发版前要按顺序做的事', body: '第一步\n第二步' });
 assert.equal(merged.merged, true);
-assert.equal(merged.id, saved.id);
+assert.equal(merged.title, saved.title);
 assert.equal(merged.revision, 2);
 assert.match(render('memory_save', {}, merged), /^memory · merged \[[^\]]+\] "发布顺序"$/);
 
-const patch = await exec('memory_save', { id: saved.id, title: '发布顺序', summary: '发版前要按顺序做的事', when: '发版当天' });
+const patch = await exec('memory_save', { title: '发布顺序', summary: '发版前要按顺序做的事', when: '发版当天' });
 assert.equal(patch.when, '发版当天');
 assert.match(render('memory_save', {}, patch), /（发版当天）/);
 
 /** 同样的字段再存一次不算修改：不改版次，也不该被读成「存过一次」。 */
 const again = await exec('memory_save', { title: '发布顺序', summary: '发版前要按顺序做的事', when: '发版当天' });
 assert.equal(again.changed, false);
-assert.equal(again.id, saved.id);
+assert.equal(again.title, saved.title);
 assert.equal(again.revision, 3);
 assert.match(render('memory_save', {}, again), /^memory · unchanged \[[^\]]+\] "发布顺序"$/);
 
 // ── similar title asks before overwriting ────────────────────────────────────
 const probe = await exec('memory_save', { title: '发布顺序是啥', summary: '发版前要按顺序做的事', body: '另一条' });
 assert.equal(probe.needsResolution, true);
-assert.equal(probe.id, '');
+assert.equal(probe.id, undefined);
 assert.equal(probe.revision, 0);
 assert.ok(probe.similarTitles.length > 0);
 assert.doesNotMatch(probe.similarTitles, /mem_[a-z0-9]{6,}/, '相近候选按标题点名');
@@ -151,7 +152,8 @@ assert.doesNotMatch(probeText, /mem_[a-z0-9]{6,}/, '相近提示只给标题');
 const distinct = await exec('memory_save', { title: '发布顺序是啥', summary: '发版前要按顺序做的事', body: '另一条', resolution: 'distinct' });
 assert.equal(distinct.needsResolution, false);
 assert.equal(distinct.merged, false);
-assert.notEqual(distinct.id, saved.id);
+assert.equal(distinct.id, undefined);
+assert.notEqual(distinct.title, saved.title);
 
 // ── search / read / forget ───────────────────────────────────────────────────
 const hits = await exec('memory_search', { query: '发布流程' });
@@ -167,14 +169,15 @@ assert.equal(miss.count, 0);
 assert.equal(typeof miss.noTriggerReason, 'string');
 assert.equal(render('memory_search', {}, miss), 'memory · 没有命中');
 
-const read = await exec('memory_read', { id: saved.id });
+const read = await exec('memory_read', { title: saved.title });
 assert.equal(read.status, 'needs_context');
-assert.equal(read.body, '');
-const plain = await exec('memory_read', { id: distinct.id });
+assert.ok(read.body.length > 0, '按标题读正文不受适用条件拦截，只把状态标出来');
+const plain = await exec('memory_read', { title: distinct.title });
 assert.equal(plain.body, '另一条');
 assert.equal(plain.revision, 1);
 assert.match(render('memory_read', {}, plain), /^memory · \[[^\]]+\] 「发布顺序是啥」/);
-assert.ok(!render('memory_read', {}, plain).includes(distinct.id));
+assert.ok(!render('memory_read', {}, plain).includes('mem_'));
+assert.equal(plain.title, distinct.title);
 
 /* 界面与工具文本一律不出现内部编号：id 只是存储地址。 */
 for (const [name, value] of [['memory_save', saved], ['memory_save', merged], ['memory_save', patch],
@@ -183,12 +186,15 @@ for (const [name, value] of [['memory_save', saved], ['memory_save', merged], ['
 }
 
 // 没点明归档还是彻底忘掉时不动盘，先返回待确认
-const undecided = await exec('memory_forget', { id: distinct.id });
+const undecided = await exec('memory_forget', { title: distinct.title });
 assert.equal(undecided.mode, 'needs_resolution');
 assert.match(render('memory_forget', {}, undecided), /^memory · 先确认是归档还是彻底忘掉 · 「发布顺序是啥」$/);
-assert.ok(store.locate(store.scopeOf(cwd), distinct.id));
-const archived = await exec('memory_forget', { id: distinct.id, mode: 'archive' });
-assert.equal(archived.id, distinct.id);
+const distinctRow = store.search(store.scopeOf(cwd), distinct.title).find((row) => row.title === distinct.title);
+assert.ok(distinctRow);
+assert.ok(store.locate(store.scopeOf(cwd), distinctRow.id));
+const archived = await exec('memory_forget', { title: distinct.title, mode: 'archive' });
+assert.equal(archived.title, distinct.title);
+assert.equal(archived.id, undefined);
 assert.match(render('memory_forget', {}, archived), /^memory · archived \[[^\]]+\] "发布顺序是啥"，可找回$/);
 assert.equal(await exec('memory_save', { title: '发布顺序是啥', summary: '发版前要按顺序做的事', body: '第三条' }).then((v) => v.merged), false);
 
@@ -261,12 +267,14 @@ assert.ok(stats.count >= 1);
 
 // ── 引用条：会话读过哪几条，点开能拿到正文 ───────────────────────────────────
 const cited = await exec('memory_save', { title: '引用测试', summary: '底部引用条要能点开正文', body: '引用正文第一行' });
-await exec('memory_read', { id: cited.id });
+await exec('memory_read', { title: cited.title });
+const citedRow = store.search(store.scopeOf(cwd), '引用测试').find((row) => row.title === '引用测试');
+assert.ok(citedRow);
 const cites = await call('/lite-memory/citations', { sessionId: 'session-contract' });
 assert.equal(cites.status, 200);
-assert.ok(cites.body.items.some((item) => item.id === cited.id && item.title === '引用测试'));
+assert.ok(cites.body.items.some((item) => item.id === citedRow.id && item.title === '引用测试'));
 assert.equal(cites.body.items.some((item) => 'path' in item), false);
-const opened = await call('/lite-memory/body', { sessionId: 'session-contract', id: cited.id });
+const opened = await call('/lite-memory/body', { sessionId: 'session-contract', id: citedRow.id });
 assert.equal(opened.status, 200);
 assert.match(opened.body.body, /引用正文第一行/);
 assert.equal(opened.body.scopeLabel, path.basename(cwd));
@@ -275,16 +283,16 @@ assert.equal(gone.status, 200);
 assert.equal(gone.body.status, 'gone');
 assert.equal('title' in gone.body, false);
 /** 别的会话、别的工作目录都不能拿 id 探正文；本会话引用过或本目录这一层才行。 */
-const foreignSession = await call('/lite-memory/body', { sessionId: 'session-contract-2', id: cited.id });
+const foreignSession = await call('/lite-memory/body', { sessionId: 'session-contract-2', id: citedRow.id });
 assert.equal(foreignSession.status, 200);
 assert.equal(foreignSession.body.status, 'gone');
 assert.equal('body' in foreignSession.body, false);
-const viaCwd = await call('/lite-memory/body', { cwd, id: cited.id });
+const viaCwd = await call('/lite-memory/body', { cwd, id: citedRow.id });
 assert.equal(viaCwd.status, 200);
 assert.match(viaCwd.body.body, /引用正文第一行/);
-const foreignCwd = await call('/lite-memory/body', { cwd: path.join(os.tmpdir(), 'lite-memory-contract-foreign'), id: cited.id });
+const foreignCwd = await call('/lite-memory/body', { cwd: path.join(os.tmpdir(), 'lite-memory-contract-foreign'), id: citedRow.id });
 assert.equal(foreignCwd.body.status, 'gone');
-assert.equal((await call('/lite-memory/body', { id: cited.id })).status, 400);
+assert.equal((await call('/lite-memory/body', { id: citedRow.id })).status, 400);
 assert.equal((await call('/lite-memory/citations', {})).status, 400);
 assert.equal((await call('/lite-memory/citations', {}, { origin: 'http://evil.example' })).status, 403);
 assert.notEqual((await call('/lite-memory/citations', { sessionId: 'session-contract' }, { origin: 'dsh-app://app' })).status, 403);
@@ -342,6 +350,8 @@ assert.equal(fs.existsSync(path.join(store.scopeOf(evoUnknown).dir, 'state.json'
 
 // ── 自动召回：只在这句话跟已有记忆有关时出现，且不改命中计数 ─────────────────
 const hinted = await exec('memory_save', { title: 'Chrome 弹钥匙串窗口要带 mock keychain', summary: '临时 profile 起 Chrome 会弹钥匙串窗口' });
+const hintedRow = store.search(store.scopeOf(cwd), 'mock keychain').find((row) => row.title === hinted.title);
+assert.ok(hintedRow);
 // 只有一句 when、没有结构化条件的条目属于未解决，不自动注入
 await exec('memory_save', { title: '发布窗口在周四晚上', summary: '只在周四晚上发版', when: '周四晚上' });
 const recallAgent = { id: 'session-contract', cwd, session: { id: 'session-recall', header: { cwd } } };
@@ -359,7 +369,7 @@ assert.equal(recall.interpolate, false);
 assert.equal(recall.required, false);
 
 const sig1 = new AbortController().signal;
-const hitsBefore = store.loadIndex(store.scopeOf(cwd)).entries.find((item) => item.id === hinted.id).hits;
+const hitsBefore = store.loadIndex(store.scopeOf(cwd)).entries.find((item) => item.id === hintedRow.id).hits;
 await preStep({ agent: recallAgent, signal: sig1, turn: '2' }, pass('又弹钥匙串窗口了，怎么弄', 'h1'));
 const hintText = recall.text({ agent: recallAgent, signal: sig1 });
 assert.doesNotMatch(hintText, /mem_[a-z0-9]{6,}/, '召回卡只给标题，不给内部编号');
@@ -378,7 +388,7 @@ assert.equal(recall.text({ agent: recallAgent, signal: sig1 }), '');
 const missReceipt = await call('/lite-memory/overview', { sessionId: 'session-recall' });
 assert.ok(['no_overlap', 'needs_context'].includes(missReceipt.body.current.recall.reason), '没提醒时也说明依据');
 assert.equal(missReceipt.body.current.recall.cards, 0);
-const hitsAfter = store.loadIndex(store.scopeOf(cwd)).entries.find((item) => item.id === hinted.id).hits;
+const hitsAfter = store.loadIndex(store.scopeOf(cwd)).entries.find((item) => item.id === hintedRow.id).hits;
 assert.equal(hitsAfter, hitsBefore);
 
 const sig2 = new AbortController().signal;
@@ -402,8 +412,10 @@ const evoRule = await defs.get('memory_save').execute(
   { title: '口播开头', summary: '口播开头三句内给结论', body: '开场三句内给结论。' },
   { agent: evoAgentSeed },
 );
+const evoRow = store.loadIndex(evoReadScope).entries.find((entry) => entry.title === evoRule.title);
+assert.ok(evoRow, '口播开头落在这一层');
 state.transact(evoReadScope, {}, (draft) => {
-  const row = draft.entries.find((entry) => entry.id === evoRule.id);
+  const row = draft.entries.find((entry) => entry.id === evoRow.id);
   row.origin = 'project_evolution';
   row.current.conditions = [{ key: 'seriesId', value: '口播' }];
   row.maintenance = { ...(row.maintenance || {}), learning: { state: 'active', source: 'evolution' } };
@@ -441,14 +453,14 @@ assert.equal(evoRecall.text({ agent: evoAgent, signal: evoSig }), '');
 const evoManage = await call('/lite-memory/evolution', { sessionId: 'session-evo-read', learningAction: 'snapshot' });
 assert.equal(evoManage.status, 200);
 assert.equal(evoManage.body.rules.length, 1);
-assert.equal(evoManage.body.rules[0].id, evoRule.id);
+assert.equal(evoManage.body.rules[0].id, evoRow.id);
 assert.ok(evoManage.body.payload.bytes > 0);
 const evoDeleteStale = await call('/lite-memory/evolution', {
-  sessionId: 'session-evo-read', learningAction: 'delete', id: evoRule.id, expectedRevision: evoManage.body.rules[0].revision - 1,
+  sessionId: 'session-evo-read', learningAction: 'delete', id: evoRow.id, expectedRevision: evoManage.body.rules[0].revision - 1,
 });
 assert.equal(evoDeleteStale.status, 409);
 const evoDelete = await call('/lite-memory/evolution', {
-  sessionId: 'session-evo-read', learningAction: 'delete', id: evoRule.id, expectedRevision: evoManage.body.rules[0].revision,
+  sessionId: 'session-evo-read', learningAction: 'delete', id: evoRow.id, expectedRevision: evoManage.body.rules[0].revision,
 });
 assert.equal(evoDelete.status, 200);
 assert.equal(evoDelete.body.ok, true);
@@ -458,44 +470,46 @@ const manageSeed = await defs.get('memory_save').execute(
   { title: '口播收尾', summary: '口播收尾留一句行动', body: '结尾给一句具体行动。' },
   { agent: evoAgent },
 );
+const manageRow = store.loadIndex(evoReadScope).entries.find((entry) => entry.title === manageSeed.title);
+assert.ok(manageRow, '口播收尾落在这一层');
 state.transact(evoReadScope, {}, (draft) => {
-  const row = draft.entries.find((entry) => entry.id === manageSeed.id);
+  const row = draft.entries.find((entry) => entry.id === manageRow.id);
   row.origin = 'project_evolution';
   row.current.conditions = [{ key: 'seriesId', value: '口播' }];
   row.maintenance = { ...(row.maintenance || {}), learning: { state: 'pending', source: 'evolution' } };
   return { changed: true };
 });
 const manageSnap = await call('/lite-memory/evolution', { sessionId: 'session-evo-read', learningAction: 'snapshot' });
-const manageRule = manageSnap.body.rules.find((rule) => rule.id === manageSeed.id);
+const manageRule = manageSnap.body.rules.find((rule) => rule.id === manageRow.id);
 assert.ok(manageRule);
 assert.equal(manageRule.state, 'pending');
 const manageEdit = await call('/lite-memory/evolution', {
-  sessionId: 'session-evo-read', learningAction: 'edit', id: manageSeed.id,
+  sessionId: 'session-evo-read', learningAction: 'edit', id: manageRow.id,
   expectedRevision: manageRule.revision, body: '结尾给一句具体动作。',
 });
 assert.equal(manageEdit.status, 200);
 assert.equal(manageEdit.body.ok, true);
-const afterManageEdit = (await call('/lite-memory/evolution', { sessionId: 'session-evo-read', learningAction: 'snapshot' })).body.rules.find((rule) => rule.id === manageSeed.id);
+const afterManageEdit = (await call('/lite-memory/evolution', { sessionId: 'session-evo-read', learningAction: 'snapshot' })).body.rules.find((rule) => rule.id === manageRow.id);
 assert.equal(afterManageEdit.state, 'pending');
 assert.equal(afterManageEdit.body, '结尾给一句具体动作。');
 const manageAdopt = await call('/lite-memory/evolution', {
-  sessionId: 'session-evo-read', learningAction: 'adopt', id: manageSeed.id, expectedRevision: afterManageEdit.revision,
+  sessionId: 'session-evo-read', learningAction: 'adopt', id: manageRow.id, expectedRevision: afterManageEdit.revision,
 });
 assert.equal(manageAdopt.status, 200);
-assert.equal((await call('/lite-memory/evolution', { sessionId: 'session-evo-read', learningAction: 'snapshot' })).body.rules.find((rule) => rule.id === manageSeed.id).state, 'active');
+assert.equal((await call('/lite-memory/evolution', { sessionId: 'session-evo-read', learningAction: 'snapshot' })).body.rules.find((rule) => rule.id === manageRow.id).state, 'active');
 const managePause = await call('/lite-memory/evolution', {
-  sessionId: 'session-evo-read', learningAction: 'pause', ids: [manageSeed.id],
+  sessionId: 'session-evo-read', learningAction: 'pause', ids: [manageRow.id],
 });
 assert.equal(managePause.status, 200);
-assert.equal((await call('/lite-memory/evolution', { sessionId: 'session-evo-read', learningAction: 'snapshot' })).body.rules.find((rule) => rule.id === manageSeed.id).state, 'paused');
+assert.equal((await call('/lite-memory/evolution', { sessionId: 'session-evo-read', learningAction: 'snapshot' })).body.rules.find((rule) => rule.id === manageRow.id).state, 'paused');
 const manageResume = await call('/lite-memory/evolution', {
-  sessionId: 'session-evo-read', learningAction: 'resume', id: manageSeed.id,
+  sessionId: 'session-evo-read', learningAction: 'resume', id: manageRow.id,
 });
 assert.equal(manageResume.status, 200);
-const manageResumed = (await call('/lite-memory/evolution', { sessionId: 'session-evo-read', learningAction: 'snapshot' })).body.rules.find((rule) => rule.id === manageSeed.id);
+const manageResumed = (await call('/lite-memory/evolution', { sessionId: 'session-evo-read', learningAction: 'snapshot' })).body.rules.find((rule) => rule.id === manageRow.id);
 assert.equal(manageResumed.state, 'trial');
 const manageDiscard = await call('/lite-memory/evolution', {
-  sessionId: 'session-evo-read', learningAction: 'discard', id: manageSeed.id, expectedRevision: manageResumed.revision,
+  sessionId: 'session-evo-read', learningAction: 'discard', id: manageRow.id, expectedRevision: manageResumed.revision,
 });
 assert.equal(manageDiscard.status, 200);
 assert.equal((await call('/lite-memory/evolution', { sessionId: 'session-evo-read', learningAction: 'snapshot' })).body.rules.length, 0);
@@ -509,8 +523,10 @@ const closedSeed = await defs.get('memory_save').execute(
   { title: '口播开头', summary: '口播开头三句内给结论', body: '开场三句内给结论。' },
   { agent: closedAgent },
 );
+const closedRow = store.loadIndex(closedScope).entries.find((entry) => entry.title === closedSeed.title);
+assert.ok(closedRow, '关闭前的样例落在这一层');
 state.transact(closedScope, {}, (draft) => {
-  const row = draft.entries.find((entry) => entry.id === closedSeed.id);
+  const row = draft.entries.find((entry) => entry.id === closedRow.id);
   row.origin = 'project_evolution';
   row.maintenance = { ...(row.maintenance || {}), learning: { state: 'active' } };
   return { changed: true };
@@ -530,7 +546,7 @@ const closedRevision = closedSnapshot.body.rules[0].revision;
 for (const action of ['adopt', 'edit', 'delete', 'pause', 'resume', 'pin', 'undo']) {
   const payload = { sessionId: 'session-closed', learningAction: action, id: closedSeed.id, expectedRevision: closedRevision, body: '改过的正文' };
   if (action === 'pin') payload.pinned = true;
-  if (action === 'pause') payload.ids = [closedSeed.id];
+  if (action === 'pause') payload.ids = [closedRow.id];
   const result = await call('/lite-memory/evolution', payload);
   assert.equal(result.status, 409, action);
   assert.equal(result.body.code, 'memory_disabled', action);
@@ -541,7 +557,7 @@ const closedTool = await defs.get('memory_save').execute(
 );
 assert.equal(closedTool.changed, false);
 assert.equal(closedTool.reason, 'memory_disabled');
-assert.equal(closedTool.id, '');
+assert.equal(closedTool.id, undefined);
 assert.equal(Buffer.compare(closedBefore, fs.readFileSync(closedFile)), 0);
 const reopened = await call('/lite-memory/control', { sessionId: 'session-closed', enabled: true, operationId: 'op_reopen_contract' });
 assert.equal(reopened.status, 200);
@@ -554,20 +570,21 @@ const metaOf = (name, args, value) => defs.get(name).output.presentationMeta(arg
 const savedMeta = metaOf('memory_save', {}, saved);
 assert.equal(savedMeta.kind, 'memory-save');
 assert.equal(savedMeta.recordKind, saved.kind);
-assert.equal(savedMeta.id, saved.id);
+assert.equal(savedMeta.id, undefined);
 assert.equal(savedMeta.title, '发布顺序');
 assert.equal(savedMeta.changed, true);
 assert.ok(['created', 'updated'].includes(savedMeta.mode));
 assert.equal('path' in savedMeta, false);
 const searchMeta = metaOf('memory_search', {}, globalSearch);
-assert.deepEqual(Object.keys(searchMeta.refs[0]).sort(), ['id', 'kind', 'origin', 'revision', 'scope', 'status', 'title', 'updated', 'when']);
-assert.equal(searchMeta.refs[0].id, global.id);
+assert.deepEqual(Object.keys(searchMeta.refs[0]).sort(), ['kind', 'origin', 'revision', 'scope', 'status', 'title', 'updated', 'when']);
+assert.equal(searchMeta.refs[0].title, '回复用中文');
+assert.equal(searchMeta.refs[0].scope, 'global');
 /** 引用要能区分偏好/约定/流程/资料，界面才不必猜标题文案。 */
-assert.equal(searchMeta.refs[0].kind, store.loadIndex(store.globalScope()).entries.find((item) => item.id === global.id).kind);
+assert.equal(searchMeta.refs[0].kind, store.loadIndex(store.globalScope()).entries.find((item) => item.title === '回复用中文').kind);
 assert.equal(searchMeta.refs[0].when, '');
 /** 出处行要说「N 天前更新」，只给时间不进正文。 */
 assert.equal(typeof searchMeta.refs[0].updated, 'string');
-const readValue = await exec('memory_read', { id: global.id });
+const readValue = await exec('memory_read', { title: '回复用中文' });
 const readMeta = metaOf('memory_read', {}, readValue);
 assert.equal(readMeta.kind, 'memory-read');
 assert.equal(readMeta.recordKind, readValue.kind);
@@ -583,10 +600,10 @@ if (suggestMeta.asked === true) assert.match(suggestMeta.id, /^sug_[a-z0-9]+$/);
 // ── 撤销带着当时的版本：过期就冲突，不覆盖后来的修改 ─────────────────────────
 const guarded = await exec('memory_save', { title: '版本守卫', summary: '撤销要带当时版本' });
 await exec('memory_save', { title: '版本守卫', summary: '撤销要带当时版本', body: '第二版正文' });
-const stale = await call('/lite-memory/undo', { op: 'undo', id: guarded.id, revision: 1, cwd });
+const stale = await call('/lite-memory/undo', { op: 'undo', title: '版本守卫', revision: 1, cwd });
 assert.equal(stale.status, 409);
-const fresh = store.loadIndex(store.scopeOf(cwd)).entries.find((item) => item.id === guarded.id);
-const accepted = await call('/lite-memory/undo', { op: 'undo', id: guarded.id, revision: fresh.revision, cwd });
+const fresh = store.loadIndex(store.scopeOf(cwd)).entries.find((item) => item.title === '版本守卫');
+const accepted = await call('/lite-memory/undo', { op: 'undo', title: '版本守卫', revision: fresh.revision, cwd });
 assert.equal(accepted.status, 200);
 
 // ── 第二组：确认前后语义一致、比较口径统一 ──────────────────────────────────
@@ -627,9 +644,9 @@ const narrow = await exec2('memory_save', {
   conditions: [{ key: 'targetOs', value: 'windows' }],
 });
 assert.equal(narrow.changed, true);
-const narrowed = await exec2('memory_save', { id: narrow.id, title: 'windows 上跑构建', summary: 'windows 构建用这条命令' });
+const narrowed = await exec2('memory_save', { title: 'windows 上跑构建', summary: 'windows 构建用这条命令' });
 assert.equal(narrowed.changed, true);
-const narrowRecord = projectEntries().find((item) => item.id === narrow.id);
+const narrowRecord = projectEntries().find((item) => item.title === 'windows 上跑构建');
 assert.equal(narrowRecord.applicability, 'conditional');
 assert.deepEqual(narrowRecord.conditions, [{ key: 'targetOs', value: 'windows' }]);
 
@@ -654,11 +671,11 @@ const boxB = await exec2('memory_save', {
   conditions: [{ key: 'machine', value: 'box-b' }],
 });
 assert.equal(boxB.changed, true);
-assert.notEqual(boxB.id, boxA.id);
 const bothBoxes = projectEntries().filter((item) => item.title === '冒烟顺序' && item.status === 'active');
 assert.equal(bothBoxes.length, 2);
 assert.deepEqual(bothBoxes.map((item) => item.conditions[0].value).sort(), ['box-a', 'box-b']);
-assert.equal(bothBoxes.find((item) => item.id === boxA.id).body, '先登录再下单');
+assert.equal(bothBoxes.find((item) => item.conditions[0].value === 'box-a').body, '先登录再下单');
+assert.equal(bothBoxes.find((item) => item.conditions[0].value === 'box-b').body, '先建号再登录');
 
 /** 同一主题、条件一致但正文不同：读取要报冲突，不能悄悄挑一条当现行规范。 */
 const slotA = await exec2('memory_save', {
@@ -679,7 +696,9 @@ const slotB = await exec2('memory_save', {
   topicKey: '发版检查',
   resolution: 'distinct',
 });
-assert.notEqual(slotA.id, slotB.id);
+const slotEntries = projectEntries().filter((item) => item.title === '发版检查项');
+assert.equal(slotEntries.length, 2);
+assert.notEqual(slotEntries[0].id, slotEntries[1].id);
 const resolvedSlots = store.visibleRules(projectScope, {}).resolved;
 const slotRow = [...resolvedSlots.values()].find((row) => row.key === '发版检查');
 assert.ok(slotRow);
@@ -700,9 +719,11 @@ const linkedB = await exec2('memory_save', {
   links: [{ type: 'related', title: linkedA.title }],
 });
 assert.equal(linkedB.changed, true, JSON.stringify(linkedB));
-const linkedRecord = projectEntries().find((item) => item.id === linkedB.id);
+const linkedRecord = projectEntries().find((item) => item.title === '关联目标乙');
+const linkedTarget = projectEntries().find((item) => item.title === '关联目标甲');
+assert.ok(linkedRecord && linkedTarget);
 assert.equal(linkedRecord.links.length, 1);
-assert.equal(linkedRecord.links[0].id, linkedA.id);
+assert.equal(linkedRecord.links[0].id, linkedTarget.id);
 assert.equal(linkedRecord.links[0].type, 'related');
 /** 更新句柄也是标题：抄标题改这一条，不需要任何内部编号。 */
 const retitled = await exec2('memory_save', { updateTitle: linkedA.title, title: linkedA.title, summary: '改过的摘要' });
@@ -854,7 +875,7 @@ assert.equal(ov.body.selected.key, ov.body.current.key);
 assert.equal(ov.body.selected.kind, 'project');
 assert.equal(ov.body.selected.evolution.enabled, false);
 assert.ok(Array.isArray(ov.body.selected.evolution.rules));
-assert.ok(ov.body.selected.records.some((row) => row.id === ovFirst.id && row.title === '开场先给结论'));
+assert.ok(ov.body.selected.records.some((row) => row.title === '开场先给结论'));
 assert.equal(ov.body.selected.records.some((row) => 'body' in row), false, '列表不带正文');
 assert.equal(ov.body.selected.stats.total, 2);
 assert.equal(ov.body.selected.stats.tags, 3);
@@ -878,15 +899,15 @@ assert.equal(ovGlobal.body.selected.kind, 'global');
 assert.ok(ovGlobal.body.selected.records.some((row) => row.title === '观察全局'));
 
 // 详情按服务端枚举过的 scopeKey 取；内部路径、未知键一律不放行
-const ovBody = await call('/lite-memory/body', { sessionId: 'session-overview', id: ovFirst.id, scopeKey: ov.body.current.key });
+const ovBody = await call('/lite-memory/body', { sessionId: 'session-overview', title: '开场先给结论', scopeKey: ov.body.current.key });
 assert.equal(ovBody.status, 200);
 assert.equal(ovBody.body.body, '开场三句内给结论。');
 assert.equal(ovBody.body.scopeLabel, path.basename(ovCwd));
-const ovOtherBody = await call('/lite-memory/body', { sessionId: 'session-overview', id: ovOther.id, scopeKey: store.scopeOf(ovOtherCwd).key });
+const ovOtherBody = await call('/lite-memory/body', { sessionId: 'session-overview', title: '别的项目', scopeKey: store.scopeOf(ovOtherCwd).key });
 assert.equal(ovOtherBody.status, 200);
 assert.equal(ovOtherBody.body.scopeLabel, path.basename(ovOtherCwd));
-assert.equal((await call('/lite-memory/body', { sessionId: 'session-overview', id: ovFirst.id, scopeKey: 'nope' })).status, 404);
-assert.equal((await call('/lite-memory/body', { sessionId: 'session-overview', id: ovFirst.id, scopeKey: '../x' })).status, 404);
+assert.equal((await call('/lite-memory/body', { sessionId: 'session-overview', title: '开场先给结论', scopeKey: 'nope' })).status, 404);
+assert.equal((await call('/lite-memory/body', { sessionId: 'session-overview', title: '开场先给结论', scopeKey: '../x' })).status, 404);
 assert.equal((await call('/lite-memory/overview', {})).status, 400);
 assert.equal((await call('/lite-memory/overview', { sessionId: 'session-overview' }, { origin: 'http://evil.example' })).status, 403);
 const ovUnknownCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-overview-unknown-'));
@@ -900,27 +921,27 @@ assert.equal(fs.existsSync(path.join(store.scopeOf(ovUnknownCwd).dir, 'state.jso
 
 // 实验条目也画进图里，但只有面板能看见；普通读取面仍然拿不到
 state.transact(store.scopeOf(ovCwd), {}, (draft) => {
-  const row = draft.entries.find((entry) => entry.id === ovSecond.id);
+  const row = draft.entries.find((entry) => (entry.current || {}).title === '封面留白');
   row.origin = 'project_evolution';
   row.maintenance = { ...(row.maintenance || {}), learning: { state: 'trial', source: 'evolution' } };
   return { changed: true };
 });
 const ovExperimental = await call('/lite-memory/overview', { sessionId: 'session-overview' });
 assert.equal(ovExperimental.body.selected.stats.experimental, 1);
-assert.equal(ovExperimental.body.selected.records.find((row) => row.id === ovSecond.id).experimental, true);
-assert.equal(store.loadIndex(store.scopeOf(ovCwd), { allowExperimental: true }).entries.some((row) => row.id === ovSecond.id), true);
+assert.equal(ovExperimental.body.selected.records.find((row) => row.title === '封面留白').experimental, true);
+assert.equal(store.loadIndex(store.scopeOf(ovCwd), { allowExperimental: true }).entries.some((row) => row.title === '封面留白'), true);
 
 // 归档不是死数字：总数诚实，列表单独取，正文还能按 id 打开
 state.transact(store.scopeOf(ovCwd), {}, (draft) => {
-  const row = draft.entries.find((entry) => entry.id === ovSecond.id);
+  const row = draft.entries.find((entry) => (entry.current || {}).title === '封面留白');
   row.status = 'archived';
   return { changed: true };
 });
 const ovArchived = await call('/lite-memory/overview', { sessionId: 'session-overview' });
 assert.equal(ovArchived.body.selected.stats.archived, 1);
-assert.equal(ovArchived.body.selected.records.some((row) => row.id === ovSecond.id), false);
-assert.equal(ovArchived.body.selected.archived.some((row) => row.id === ovSecond.id), true);
-const ovArchivedBody = await call('/lite-memory/body', { sessionId: 'session-overview', id: ovSecond.id, scopeKey: ovArchived.body.selected.key });
+assert.equal(ovArchived.body.selected.records.some((row) => row.title === '封面留白'), false);
+assert.equal(ovArchived.body.selected.archived.some((row) => row.title === '封面留白'), true);
+const ovArchivedBody = await call('/lite-memory/body', { sessionId: 'session-overview', title: '封面留白', scopeKey: ovArchived.body.selected.key });
 assert.equal(ovArchivedBody.status, 200);
 assert.equal(ovArchivedBody.body.status, 'archived');
 assert.equal(ovArchivedBody.body.body, '右侧留白。');

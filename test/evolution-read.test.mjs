@@ -424,7 +424,7 @@ const scopeOf = (dir) => store.scopeOf(dir);
   await runtime.preStep({ agent, signal: signal(), turn: 't1' }, enter(human('这期口播开头')));
   const value = await runtime.exec('memory_search', { query: '口播开头', bindForRequest: true }, agent);
   assert.equal(value.status, 'ok');
-  assert.equal((value.refs || []).some((ref) => ref.id === id), true);
+  assert.equal((value.refs || []).some((ref) => ref.title === '口播开头'), true);
   const episodes = Object.values(store.taskState(scope).episodes);
   assert.equal(episodes.length, 1);
   assert.equal(episodes[0].status, 'proposed');
