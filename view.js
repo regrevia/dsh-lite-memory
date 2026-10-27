@@ -320,7 +320,7 @@ function wordsOf(text) {
 export const asciiWordsOf = (text) => plain(text, 400).toLowerCase().match(/[a-z][a-z0-9_-]{1,}/g) || [];
 export const wordIn = (pool, word) => new RegExp(`(^|[^a-z0-9])${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^a-z0-9])`).test(pool);
 
-const WEIGHT = { title: 3, keywords: 4, summary: 1.5, when: 1 };
+const WEIGHT = { title: 3, keywords: 4, summary: 1.5, when: 1, coverage: 1.6 };
 
 /** 最长公共连续片段：四个字以上连着重合，是「在说同一件事」的强证据。 */
 function longestRun(text, raw) {
@@ -346,7 +346,7 @@ function longestRun(text, raw) {
  * 轻量匹配：标题 / 旧标题 / 关键词 / 摘要各算各的分，先过阈值再排序。
  * 排序固定用 id 兜底，同一批数据每次顺序一致。
  */
-export function matchScore(record, query) {
+export function matchScore(record, query, corpus = null) {
   const raw = plain(query, 400);
   if (!raw) return { score: 0, hints: [] };
   if (new RegExp(`\\b${String(record.id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(raw)) {
@@ -389,18 +389,33 @@ export function matchScore(record, query) {
    * 整词命中按字段取一次最大值：一个字/一个词重合只说明沾边，
    * 每个词各加一次会把分数堆到阈值以上（「这」曾让无关记忆被自动召回）。
    */
+  /**
+   * 语料里到处都有的词（「触发」「文件」「项目」）只算沾边：
+   * 一条记忆靠这种通用词挤进提示位，真相关的那条就被挤出去了。
+   */
+  const common = (text) => {
+    if (!corpus || !corpus.df || !corpus.total) return false;
+    const df = corpus.df.get(text) || 0;
+    return df > Math.max(3, corpus.total * 0.15);
+  };
   let titleWordHit = false;
   let keywordWordHit = false;
+  /** 标题里同时命中的不同实词：两个以上独立概念都落在标题，比只沾一个词更说明在说同一件事。 */
+  const titleWords = new Set();
   for (const word of words) {
     if ([...word].length < 2) continue;
     const plainWord = word.toLowerCase();
-    if (keywordWordHit) continue;
+    if (common(plainWord)) continue;
     if (keywordTexts.some((text) => plain(text, 400).toLowerCase().includes(plainWord))) { keywordWordHit = true; continue; }
     if (plain(record.title, 400).toLowerCase().includes(plainWord)
-      || (record.aliases || []).some((name) => plain(name, 400).toLowerCase().includes(plainWord))) titleWordHit = true;
+      || (record.aliases || []).some((name) => plain(name, 400).toLowerCase().includes(plainWord))) {
+      titleWordHit = true;
+      titleWords.add(plainWord);
+    }
   }
   if (!keywordWordHit && titleWordHit) { score += WEIGHT.title; hints.push('title'); }
   if (keywordWordHit) { score += WEIGHT.keywords; hints.push('keyword'); }
+  if (titleWords.size >= 2) { score += WEIGHT.coverage; hints.push('coverage'); }
   /** 四字以上的连续重合直接算强命中：句子换了说法但词还连着，就该被想起。 */
   /** 分已经够的就不必算连续片段；这一步只是补「换了说法但词连着」的情况。 */
   const run = score >= MATCH_FLOOR ? 0 : Math.max(0, ...[record.title, (record.aliases || []).join(' '), record.summary, record.when]
@@ -437,6 +452,17 @@ export function rank(records, query, options = {}) {
   const limit = Number.isInteger(options.limit) ? options.limit : 4;
   const context = options.context || {};
   const rows = [];
+  /** 先数一遍词出现在多少条记忆里：通用词降权，只在这批候选内统计，不额外读盘。 */
+  const corpus = { df: new Map(), total: 0 };
+  for (const record of records || []) {
+    if (!record) continue;
+    corpus.total += 1;
+    const seen = new Set();
+    for (const word of wordsOf([record.title, (record.aliases || []).join(' '), (record.tags || []).join(' '), (record.triggers || []).join(' '), record.summary, record.when].filter(Boolean).join(' '))) {
+      seen.add(word.toLowerCase());
+    }
+    for (const word of seen) corpus.df.set(word, (corpus.df.get(word) || 0) + 1);
+  }
   for (const record of records || []) {
     if (!record || record.status === 'archived') continue;
     if (options.requireApplicable && record.reviewState === 'legacy_unreviewed') continue;
@@ -449,7 +475,7 @@ export function rank(records, query, options = {}) {
       status = options.requireApplicable ? statusOf(record, context) : 'ok';
       if (options.requireApplicable && status !== 'ok') continue;
     }
-    const matched = matchScore(record, query);
+    const matched = matchScore(record, query, corpus);
     if (matched.score < MATCH_FLOOR) continue;
     /** 当前任务明确的话题/工作类型优先，但不覆盖查询本身的字面命中。 */
     const task = options.task || {};

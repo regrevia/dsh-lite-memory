@@ -8,6 +8,7 @@ import {
   forget,
   undoChange,
   locate,
+  layersFor,
   findAnywhere,
   renderIndex,
   loadIndex,
@@ -685,7 +686,7 @@ function refsOf(hits) {
 const SAVE_PARAMS = {
   type: 'object',
   properties: {
-    id: { type: 'string', description: '要更新的记忆 id（来自搜索结果或相近提示）。同一件事更新时用它，别另建一条' },
+    updateTitle: { type: 'string', description: '要更新的那条记忆的标题（原样抄搜索结果里的标题）。同一件事更新时用它，别另建一条' },
     title: { type: 'string', description: `标题：名词短语，用户一眼能认出是哪件事，不超过 ${LIMITS.titleChars} 字。它就是这条记忆的身份` },
     summary: { type: 'string', description: `一句话说清要记的内容本身——用户只看这一行决定留不留，名词短语最好，超长会自动截到这个长度` },
     body: { type: 'string', description: `正文 markdown，整段替换旧正文，不超过 ${LIMITS.entryBytes} 字节。只写原则、判断规则、触发条件和边界；不写一次性数字或代码片段，这些查当前代码或文档。` },
@@ -694,7 +695,7 @@ const SAVE_PARAMS = {
     tags: { type: 'array', items: { type: 'string' }, description: '最多 5 个标签；更新时不给就保留原值' },
     supersedes: {
       type: 'string',
-      description: '要取代的记忆 id：新内容写成新条目，旧条目标为已被取代并保留在历史里；同层才有效，已被取代过的不能再取代',
+      description: '要取代的那条记忆的标题（原样抄搜索结果里的标题）：新内容写成新条目，旧条目标为已被取代并保留在历史里；同层才有效，已被取代过的不能再取代',
     },
     resolution: {
       type: 'string',
@@ -707,13 +708,12 @@ const SAVE_PARAMS = {
     evidenceRef: { type: 'string', description: '归属判定的依据（哪条消息、哪个文件、哪次观察）；用户没说范围时用来判断能不能存' },
     sameTopicAs: {
       type: 'object',
-      description: '显式绑定到已有主题槽位：{scope, id, revision}。版本不符或目标不存在就报错，不写',
+      description: '显式绑定到已有主题槽位：{scope, title}。标题对不上就报错，不写',
       properties: {
         scope: { type: 'string', enum: ['project', 'global'] },
-        id: { type: 'string' },
-        revision: { type: 'integer' },
+        title: { type: 'string' },
       },
-      required: ['scope', 'id', 'revision'],
+      required: ['scope', 'title'],
       additionalProperties: false,
     },
     mode: {
@@ -757,9 +757,9 @@ const SAVE_PARAMS = {
         type: 'object',
         properties: {
           type: { type: 'string', enum: view.LINK_TYPES, description: '默认 related' },
-          id: { type: 'string', pattern: '^mem_[a-z0-9]{6,}$' },
+          title: { type: 'string', description: '被关联那条记忆的标题（原样抄搜索结果里的标题）' },
         },
-        required: ['id'],
+        required: ['title'],
         additionalProperties: false,
       },
     },
@@ -776,7 +776,7 @@ const SAVE_PARAMS = {
 
 const SUGGEST_PARAMS = {
   ...SAVE_PARAMS,
-  properties: Object.fromEntries(Object.entries(SAVE_PARAMS.properties).filter(([key]) => !['scope', 'id', 'resolution', 'memoryClass', 'durability', 'evidenceRef', 'sameTopicAs'].includes(key))),
+  properties: Object.fromEntries(Object.entries(SAVE_PARAMS.properties).filter(([key]) => !['scope', 'id', 'updateTitle', 'resolution', 'memoryClass', 'durability', 'evidenceRef', 'sameTopicAs'].includes(key))),
 };
 
 const SEARCH_PARAMS = {
@@ -795,7 +795,6 @@ const SEARCH_PARAMS = {
 const READ_PARAMS = {
   type: 'object',
   properties: {
-    id: { type: 'string', description: '内部编号；正常不用传，按 title 找就行' },
     title: { type: 'string', description: '记忆标题，来自搜索结果或召回卡' },
     view: { type: 'string', enum: ['full', 'links'], description: '默认 full 读正文；links 只看直接相关的记忆清单，不取正文' },
     contextId: { type: 'string', description: '上一轮自动索引或工具结果给出的任务上下文 id；读实验规则时带上' },
@@ -806,7 +805,6 @@ const READ_PARAMS = {
 const FORGET_PARAMS = {
   type: 'object',
   properties: {
-    id: { type: 'string', description: '内部编号；正常不用传，按 title 指哪条就行' },
     title: { type: 'string', description: '要忘掉的那条记忆的标题' },
     mode: {
       type: 'string',
@@ -823,7 +821,8 @@ function refIdOf(scope, args, label = '记忆') {
   if (id) return id;
   const title = typeof args.title === 'string' ? args.title.trim() : '';
   if (!title) throw new Error(`要读或要忘一条${label}，先给标题`);
-  for (const target of [scope, globalScope()]) {
+  /** 标题跨层解析：当前项目、全局、别的项目层都查，找到就用它的 id。 */
+  for (const target of layersFor(scope)) {
     let index;
     try { index = loadIndex(target); } catch { continue; }
     const hit = (index.entries || []).find((entry) => entry && entry.status !== 'archived'
@@ -1687,6 +1686,7 @@ export function apply(ctx, config) {
           existingId: { type: 'string' },
           existingScope: { type: 'string' },
           crossLayer: { type: 'boolean' },
+          crossScope: { type: 'string', enum: ['global', 'project'] },
           sameTopic: { type: 'boolean' },
           similarTitles: { type: 'string' },
           similar: { type: 'string' },
@@ -1708,7 +1708,7 @@ export function apply(ctx, config) {
           : value.existingId
             ? `memory · 已有相同记忆：「${value.title}」（${value.existingScope}）\n要改成另一条，加 resolution="distinct"`
             : value.needsResolution
-          ? `memory · 需要确认：「${value.title}」与已有条目相近${value.crossLayer ? '（在另一层）' : ''}${value.sameTopic ? '（同一主题槽位）' : ''}\n${value.similar}\n要更新它，用同一个标题再存一次；确实是另一条，加 resolution="distinct"`
+          ? `memory · 需要确认：「${value.title}」与已有条目相近${value.crossLayer ? '（在另一层）' : ''}${value.sameTopic ? '（同一主题槽位）' : ''}\n${value.similar}\n要更新它：用同一个标题${value.crossScope === 'global' ? '、并带 scope="global"' : ''}再存一次；确实是另一条，加 resolution="distinct"`
           : value.changed === false
             ? `memory · unchanged ${withTag(value, `"${value.title}"`)}`
             : `memory · ${value.merged ? 'merged' : 'saved'} ${withTag(value, `"${value.title}"`)}${value.when ? `（${value.when}）` : ''}${value.similar ? ` · 相近：${value.similar}` : ''}${value.archived ? ` · 已归档「${value.archived}」腾位` : ''}${value.fullTextSaved ? ' · 完整原句已另存' : ''}${value.supersededTitle ? ` · 已取代「${value.supersededTitle}」` : ''}`,
@@ -1731,6 +1731,25 @@ export function apply(ctx, config) {
         : supersedes;
       const draft = { ...args, writeMode: args.mode || 'patch' };
       if (supersedes) { if (supersedesId) draft.supersedes = supersedesId; else delete draft.supersedes; }
+      /** 更新句柄也用标题：id 只是底层实现，模型抄标题就行。 */
+      const updateTitle = String(args.updateTitle || '').trim();
+      if (updateTitle) {
+        const updateId = (() => { try { return refIdOf(projectScope, { title: updateTitle }, '记忆'); } catch { return ''; } })();
+        if (!updateId) return { error: `memory · 没有「${updateTitle}」这条记忆；要新增就不用 updateTitle` };
+        draft.id = updateId;
+      }
+      /** 关联目标同样按标题解析成内部 id 再落盘。 */
+      if (Array.isArray(args.links) && args.links.length) {
+        const resolved = [];
+        for (const link of args.links) {
+          const title = typeof link?.title === 'string' ? link.title.trim() : '';
+          if (!title) return { error: 'memory · 关联要写成 {type, title}：给被关联那条记忆的标题' };
+          const targetId = (() => { try { return refIdOf(projectScope, { title }, '记忆'); } catch { return ''; } })();
+          if (!targetId) return { error: `memory · 没有「${title}」这条记忆，关联没写成` };
+          resolved.push({ type: link.type || 'related', id: targetId });
+        }
+        draft.links = resolved;
+      }
       const saved = saveEntry(projectScope, draft);
       if (saved.needsScope) {
         return {
@@ -1784,6 +1803,7 @@ export function apply(ctx, config) {
           needsScope: false,
           needsResolution: true,
           crossLayer: Boolean(saved.crossLayer),
+          crossScope: saved.crossScope === 'global' ? 'global' : 'project',
           sameTopic: Boolean(saved.sameTopic),
           similarTitles: saved.similarList.map((item) => item.title).join('、'),
           similar: saved.similarList.map((item) => describeCandidate(item, { sameTopic: saved.sameTopic })).join('；'),
@@ -2071,12 +2091,14 @@ export function apply(ctx, config) {
       const win = windowOf(agent);
       const gateRuntime = resolved.held || win?.runtime
         || { projectId: scope.key, context, experimental: resolved.experimental === true };
+      /** 点名标题是小心的询问；只给 id 属于程序化取用，条件不明时不放正文。 */
+      const byTitle = Boolean(typeof args.title === 'string' && args.title.trim())
+        && !(typeof args.id === 'string' && args.id.trim());
       if (args.view === 'links') {
         const refId = refIdOf(scope, args);
-        const source = locate(scope, refId);
-        if (source && !view.eligibility(source.record, gateRuntime, 'read').ok) {
-          return { id: '', scope: '', status: 'needs_context', links: '' };
-        }
+        const source = locate(scope, refId, { crossLayer: true });
+        const gateOk = !source || view.eligibility(source.record, gateRuntime, 'read').ok;
+        if (!gateOk && !byTitle) return { id: '', scope: '', status: 'needs_context', links: '' };
         const found = readLinks(scope, refId, { context, allowExperimental, runtime: gateRuntime, now: Date.now() });
         if (!found) throw new Error(`没有「${String(args.title || args.id || '').trim()}」这条记忆`);
         if (found.status !== 'ok') {
@@ -2108,9 +2130,10 @@ export function apply(ctx, config) {
       const record = readEntry(scope, refIdOf(scope, args), { context, allowExperimental });
       if (!record) throw new Error(`没有「${String(args.title || args.id || '').trim()}」这条记忆`);
       const gate = view.eligibility(record, gateRuntime, 'read');
-      if (!gate.ok) return { id: '', scope: record.scope, status: gate.status, body: '' };
-      /** 条件未知或不适用的条目只报状态：正文和标题都不能绕过自动召回的门槛。 */
-      if (record.status !== 'ok') {
+      const unknownByTitle = byTitle && gate.status === 'needs_context';
+      if (!gate.ok && !unknownByTitle) return { id: '', scope: record.scope, status: gate.status, body: '' };
+      /** 条件未知或不适用的条目只报状态：正文和标题都不能绕过自动召回的门槛（点名标题的询问除外）。 */
+      if (record.status !== 'ok' && record.status !== 'archived' && !unknownByTitle) {
         return { id: '', scope: record.scope, status: record.status === 'needs_context' ? 'needs_context' : 'not_applicable', body: '' };
       }
       const revision = record.revision || 1;
@@ -2125,6 +2148,7 @@ export function apply(ctx, config) {
         status: record.status,
         kind: record.kind || 'note',
         body,
+        ...(unknownByTitle ? { status: 'needs_context' } : {}),
       };
       if (win) {
         if (!affordableTool(win, 0)) return { id: '', scope: '', status: 'budget_exhausted' };

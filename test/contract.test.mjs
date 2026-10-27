@@ -84,6 +84,9 @@ for (const key of ['source', 'origin', 'confirmed', 'force', 'autoRecall']) {
   assert.equal(key in saveParams, false, `memory_save 不该接受 ${key}`);
 }
 assert.equal(saveParams.mode.enum.includes('replace_current'), true);
+/** 关联目标也按标题给，参数里不该出现 mem_ 开头的 id 字段。 */
+assert.equal(saveParams.links.items.properties.id, undefined);
+assert.equal(saveParams.links.items.properties.title.type, 'string');
 assert.equal(JSON.stringify(saveParams.applicability.enum), JSON.stringify(['all_in_scope', 'conditional', 'unresolved']));
 
 assert.deepEqual(saveParams.resolution.enum, ['distinct']);
@@ -91,12 +94,14 @@ assert.deepEqual(saveParams.resolution.enum, ['distinct']);
 assert.equal(defs.get('memory_search').parameters.properties.limit.maximum, 4);
 /** 空检索结果会带 noTriggerReason，输出 schema 必须声明它，否则宿主校验直接报错。 */
 assert.equal(defs.get('memory_search').output.schema.properties.noTriggerReason.type, 'string');
-assert.equal(saveParams.id.type, 'string');
+/** 更新句柄只暴露标题：id 是底层实现，参数表里不该出现。 */
+assert.equal(saveParams.updateTitle.type, 'string');
+assert.equal(saveParams.id, undefined);
 assert.deepEqual(saveParams.scope.enum, ['auto', 'project', 'global']);
 assert.equal(saveParams.memoryClass.type, 'string');
 assert.deepEqual(saveParams.memoryClass.enum, ['personal_preference', 'project_fact', 'environment_fact', 'portable_procedure']);
 assert.deepEqual(saveParams.durability.enum, ['durable', 'task']);
-assert.deepEqual(saveParams.sameTopicAs.required, ['scope', 'id', 'revision']);
+assert.deepEqual(saveParams.sameTopicAs.required, ['scope', 'title']);
 assert.equal(defs.get('memory_suggest').parameters.properties.scope, undefined);
 assert.equal(defs.get('memory_suggest').parameters.properties.resolution, undefined);
 
@@ -140,7 +145,7 @@ assert.ok(probe.similarTitles.length > 0);
 assert.doesNotMatch(probe.similarTitles, /mem_[a-z0-9]{6,}/, '相近候选按标题点名');
 const probeText = render('memory_save', {}, probe);
 assert.match(probeText.split('\n')[0], /^memory · 需要确认：「发布顺序是啥」与已有条目相近$/);
-assert.match(probeText, /要更新它，用同一个标题再存一次/);
+assert.match(probeText, /要更新它：用同一个标题再存一次/);
 assert.match(probeText, /「发布顺序」/);
 assert.doesNotMatch(probeText, /mem_[a-z0-9]{6,}/, '相近提示只给标题');
 const distinct = await exec('memory_save', { title: '发布顺序是啥', summary: '发版前要按顺序做的事', body: '另一条', resolution: 'distinct' });
@@ -682,7 +687,7 @@ assert.equal(slotRow.status, 'conflict');
 
 /** 工具参数里的 links / selection.items / topicKey:null 是合法输入，不能被 schema 挡掉或被校验器拒绝。 */
 assert.equal(saveParams.links.items.type, 'object');
-assert.deepEqual(saveParams.links.items.required, ['id']);
+assert.deepEqual(saveParams.links.items.required, ['title']);
 assert.equal(saveParams.selection.properties.items.type, 'array');
 assert.deepEqual(saveParams.topicKey.type, ['string', 'null']);
 const linkedA = await exec2('memory_save', { title: '关联目标甲', summary: '用来当关联目标', body: '甲', scope: 'project' });
@@ -692,13 +697,19 @@ const linkedB = await exec2('memory_save', {
   body: '乙',
   scope: 'project',
   resolution: 'distinct',
-  links: [{ type: 'related', id: linkedA.id }],
+  links: [{ type: 'related', title: linkedA.title }],
 });
 assert.equal(linkedB.changed, true, JSON.stringify(linkedB));
 const linkedRecord = projectEntries().find((item) => item.id === linkedB.id);
 assert.equal(linkedRecord.links.length, 1);
 assert.equal(linkedRecord.links[0].id, linkedA.id);
 assert.equal(linkedRecord.links[0].type, 'related');
+/** 更新句柄也是标题：抄标题改这一条，不需要任何内部编号。 */
+const retitled = await exec2('memory_save', { updateTitle: linkedA.title, title: linkedA.title, summary: '改过的摘要' });
+assert.equal(retitled.changed, true);
+assert.equal(retitled.summary, '改过的摘要');
+const missingUpdate = await exec2('memory_save', { updateTitle: '从来没有存过的标题', title: '新的一条', summary: '新' });
+assert.match(missingUpdate.error, /没有「从来没有存过的标题」这条记忆/);
 
 
 // ── 项目实验：正常回合结束后走一次短整理，只写后台结果 ─────────────────────────

@@ -1553,8 +1553,8 @@ export function peek(scope, query, limit = 3, options = {}) {
 }
 
 export function readEntry(scope, id, options = {}) {
-  const found = withLocks([scope, globalScope()], () => {
-    for (const source of [scope, globalScope()]) {
+  const found = withLocks(layersFor(scope), () => {
+    for (const source of layersFor(scope)) {
       const index = loadIndex(source);
       const record = index.entries.find((item) => item.id === id);
       const archived = record ? null : index.archived.find((item) => item.id === id);
@@ -1664,8 +1664,8 @@ export function forget(scope, id, options = {}) {
 
 /** 直接读邻居：只给当前投影，不缓存目标正文；目标不在了就标 invalid，不拿旧版本顶上。 */
 export function readLinks(scope, id, options = {}) {
-  return withLocks([scope, globalScope()], () => {
-    for (const source of [scope, globalScope()]) {
+  return withLocks(layersFor(scope), () => {
+    for (const source of layersFor(scope)) {
       const index = loadIndex(source);
       const record = index.entries.find((item) => item.id === id);
       if (!record) continue;
@@ -1684,7 +1684,7 @@ export function readLinks(scope, id, options = {}) {
 
 /** 关联目标按当前投影现场解引用：先项目层再全局层，归档和删除都算不存在。 */
 function findCurrent(id, scope, options = {}) {
-  for (const source of [scope, globalScope()]) {
+  for (const source of layersFor(scope)) {
     let index;
     try {
       index = loadIndex(source);
@@ -1824,8 +1824,33 @@ export function findAnywhere(id) {
 }
 
 /** 按 id 在项目层与全局层里找位置，不靠文案猜作用域；管理动作也要看得见已归档的条目。 */
+/**
+ * 标题是唯一对外的句柄：当前项目找不到，就去全局和别的项目层找。
+ * 只用于读路径（读正文、查关联、解析标题）；写入仍然只动自己那层。
+ */
+export function layersFor(scope) {
+  const out = [];
+  const seen = new Set();
+  const push = (item) => {
+    if (!item || !item.dir || seen.has(item.dir)) return;
+    seen.add(item.dir);
+    out.push(item);
+  };
+  push(scope);
+  push(globalScope());
+  try {
+    for (const row of state.knownProjectScopes()) push({ key: row.key, dir: row.dir, cwd: row.cwd });
+  } catch { /* 层列表读不出来就只查当前层和全局，不影响读取 */ }
+  return out;
+}
+
 export function locate(scope, id, options = {}) {
-  for (const source of [scope, globalScope()]) {
+  /**
+   * 默认只看当前层和全局：面板/HTTP 用 id 探正文时跨层就是越权。
+   * 工具侧按标题读，明确传 crossLayer 才跨层（标题是用户给的句柄）。
+   */
+  const sources = options.crossLayer ? layersFor(scope) : [scope, globalScope()];
+  for (const source of sources) {
     const index = loadIndex(source, options);
     const active = index.entries.find((item) => item.id === id);
     if (active) return { scope: source, record: active, archived: false };
@@ -2474,12 +2499,15 @@ function crossLayerSimilar(projectScope, targetScope, draft) {
 }
 
 function bindSameTopic(projectScope, ref) {
-  if (!ref || typeof ref !== 'object' || typeof ref.id !== 'string') return { error: 'sameTopicAs 要写成 {scope, id, revision}' };
+  if (!ref || typeof ref !== 'object') return { error: 'sameTopicAs 要写成 {scope, title}' };
   const source = ref.scope === 'global' ? globalScope() : projectScope;
-  const record = loadIndex(source).entries.find((item) => item.id === ref.id);
-  if (!record) return { error: `sameTopicAs 指向的记忆不存在：${ref.id}` };
-  if (Number(ref.revision) !== Number(record.revision || 1)) {
-    return { error: `sameTopicAs 的目标已经改过：${ref.id}` };
+  /** 句柄统一用标题：id 是底层实现，模型手里不该出现；老调用传 id 仍认。 */
+  const byTitle = typeof ref.title === 'string' ? normalizeText(ref.title, 120).toLowerCase() : '';
+  const record = loadIndex(source).entries.find((item) => (typeof ref.id === 'string' && item.id === ref.id)
+    || (byTitle && [item.title, ...(item.aliases || [])].some((name) => normalizeText(name, 120).toLowerCase() === byTitle)));
+  if (!record) return { error: `sameTopicAs 指向的记忆不存在：${ref.title || ref.id || ''}` };
+  if (ref.revision !== undefined && Number(ref.revision) !== Number(record.revision || 1)) {
+    return { error: `sameTopicAs 的目标已经改过：「${record.title}」` };
   }
   return { topicKey: view.topicSlot(record) };
 }
@@ -2574,6 +2602,8 @@ export function saveEntry(projectScope, source) {
         return {
           needsResolution: true,
           crossLayer: true,
+          /** 相近那条在哪一层：跨层「用同一个标题再存一次」得落在它那层，否则会另建一条。 */
+          crossScope: near[0] && near[0].scope === 'global' ? 'global' : 'project',
           similarList: near,
           similar: near[0],
           draft,
