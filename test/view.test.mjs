@@ -121,6 +121,9 @@ test('触发词进检索与自动召回', () => {
   };
   assert.ok(view.matchScore(record, '帮我把视频贴给我看看').score >= view.MATCH_FLOOR);
   assert.ok(view.matchScore(record, '完全无关的主题词').score < view.MATCH_FLOOR);
+  /** 单字重合不算相关：「这」出现在「这个」里，不能让整句沾边就被召回。 */
+  const unrelated = { id: 'mem_cccccccccccc', title: '以后都用这个一次性脚本', summary: '这个脚本只跑一次', when: '', aliases: [], tags: [], triggers: [], status: 'active' };
+  assert.equal(view.matchScore(unrelated, '把这段视频的字幕导出来').score, 0);
   const ranked = view.rank([record], '帮我把视频贴给我看看', { limit: 4, context: ctxOf(null, {}) });
   assert.equal(ranked.length, 1);
   assert.equal(ranked[0].record.id, record.id);

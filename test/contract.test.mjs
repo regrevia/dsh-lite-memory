@@ -367,7 +367,7 @@ assert.equal(recallReceipt.body.current.recall.limit, 3);
 assert.equal(recallReceipt.body.current.recall.cards, 1);
 assert.ok(recallReceipt.body.current.recall.chars > 0);
 assert.ok(!/mem_[a-z0-9]{6,}/.test(JSON.stringify(recallReceipt.body.current.recall)), '判断依据不带内部编号');
-const missTurn = await preStep({ agent: recallAgent, signal: sig1, turn: '3' }, pass('明早路过菜市场买点香菜', 'h2'));
+const missTurn = await preStep({ agent: recallAgent, signal: sig1, turn: '3' }, pass('把这段视频的字幕导出来', 'h2'));
 assert.equal(missTurn.kind, 'enter');
 assert.equal(recall.text({ agent: recallAgent, signal: sig1 }), '');
 const missReceipt = await call('/lite-memory/overview', { sessionId: 'session-recall' });

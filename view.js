@@ -305,7 +305,15 @@ function wordsOf(text) {
   } catch {
     for (const word of plainText.split(/[^\p{L}\p{N}]+/u)) if (word && !STOPWORDS.has(word)) out.push(word);
   }
-  return out.slice(0, 24);
+  /** 本机 ICU 缺中文词典时整句会被切成单字；补上二元组，别让「这」这种单字当整词。 */
+  if (!/[a-z]/i.test(plainText) && out.some((word) => [...word].length === 1)) {
+    const chars = plainText.replace(/[^\p{L}\p{N}]+/gu, '');
+    for (let i = 0; i + 1 < chars.length; i += 1) {
+      const gram = chars.slice(i, i + 2);
+      if (!STOPWORDS.has(gram)) out.push(gram);
+    }
+  }
+  return out.slice(0, 48);
 }
 
 /** 纯英文查询按整词判断：git 不该命中 digital。自动召回和手动搜索共用这一条。 */
@@ -357,16 +365,22 @@ export function matchScore(record, query) {
     score += WEIGHT.keywords;
     hints.push('trigger');
   }
+  /**
+   * 整词命中按字段取一次最大值：一个字/一个词重合只说明沾边，
+   * 每个词各加一次会把分数堆到阈值以上（「这」曾让无关记忆被自动召回）。
+   */
+  let titleWordHit = false;
+  let keywordWordHit = false;
   for (const word of words) {
+    if ([...word].length < 2) continue;
     const plainWord = word.toLowerCase();
-    const inTitle = plain(record.title, 400).toLowerCase().includes(plainWord)
-      || (record.aliases || []).some((name) => plain(name, 400).toLowerCase().includes(plainWord));
-    const inKeywords = keywordTexts.some((text) => plain(text, 400).toLowerCase().includes(plainWord));
-    if (inTitle || inKeywords) {
-      score += inKeywords ? WEIGHT.keywords : WEIGHT.title;
-      hints.push(inKeywords ? 'keyword' : 'title');
-    }
+    if (keywordWordHit) continue;
+    if (keywordTexts.some((text) => plain(text, 400).toLowerCase().includes(plainWord))) { keywordWordHit = true; continue; }
+    if (plain(record.title, 400).toLowerCase().includes(plainWord)
+      || (record.aliases || []).some((name) => plain(name, 400).toLowerCase().includes(plainWord))) titleWordHit = true;
   }
+  if (!keywordWordHit && titleWordHit) { score += WEIGHT.title; hints.push('title'); }
+  if (keywordWordHit) { score += WEIGHT.keywords; hints.push('keyword'); }
   const summaryScore = hit(record.summary, WEIGHT.summary);
   if (summaryScore > 0) {
     score += summaryScore;
@@ -381,7 +395,7 @@ export function matchScore(record, query) {
       .filter(Boolean).join('\n').toLowerCase();
     if (!ascii.some((word) => wordIn(pool, word))) return { score: 0, hints: [] };
   }
-  return { score, hints };
+  return { score, hints: [...new Set(hints)] };
 }
 
 export const MATCH_FLOOR = 2.4;
