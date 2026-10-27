@@ -10,7 +10,7 @@ const view = await import('../view.js');
 
 const {
   saveEntry, routeScope, visibleRules, move, resumeMove, movePending,
-  upsert, forget, readLinks, loadIndex, scopeOf, globalScope, readEntry,
+  upsert, forget, readLinks, loadIndex, scopeOf, globalScope, readEntry, pendingConflictsOf,
 } = store;
 
 let passed = 0;
@@ -369,4 +369,25 @@ await test('L06 展示视图不把关联结构塞给模型', () => {
 });
 
 for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
+
+// ── S12 冲突队列：相近只记待办，确认后才进库 ───────────────────────────────
+await test('S12 相近保存进待办队列，确认 distinct 后出队', () => {
+  const scope = fresh('conflict-queue');
+  saveEntry(globalScope(), { title: '发布前检查清单', summary: '发版前逐项确认', body: '清单', scope: 'global', resolution: 'distinct' });
+  assert.equal(pendingConflictsOf(globalScope()), 0);
+  const near = saveEntry(scope, { title: '发布前检查清单', summary: '发版前逐项确认（项目补充）', body: '项目清单' });
+  assert.equal(near.needsResolution, true);
+  assert.equal(near.pendingConflicts, 1);
+  assert.equal(pendingConflictsOf(scope), 1);
+  const queued = loadIndex(scope).conflicts[0];
+  assert.equal(queued.title, '发布前检查清单');
+  assert.equal(queued.scope, 'project');
+  assert.equal(queued.candidates.length >= 1, true);
+  const again = saveEntry(scope, { title: '发布前检查清单', summary: '发版前逐项确认（项目补充）', body: '项目清单' });
+  assert.equal(pendingConflictsOf(scope), 1);
+  const distinct = saveEntry(scope, { title: '发布前检查清单', summary: '发版前逐项确认（项目补充）', body: '项目清单', resolution: 'distinct' });
+  assert.equal(distinct.needsResolution, false);
+  assert.equal(pendingConflictsOf(scope), 0);
+});
+
 console.log(`crossing.test.mjs: ${passed} passed`);

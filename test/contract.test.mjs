@@ -110,13 +110,13 @@ assert.equal(phrased.scope, 'project');
 assert.equal(store.loadIndex(store.globalScope()).entries.some((item) => item.title === '以后都用这个一次性脚本'), false);
 
 assert.equal(typeof saved.id, 'string');
-assert.match(render('memory_save', {}, saved), /^memory · saved \[[^\]]+\] "发布顺序" · mem_[a-z0-9]+$/);
+assert.match(render('memory_save', {}, saved), /^memory · saved \[[^\]]+\] "发布顺序"$/);
 
 const merged = await exec('memory_save', { title: '发布顺序', summary: '发版前要按顺序做的事', body: '第一步\n第二步' });
 assert.equal(merged.merged, true);
 assert.equal(merged.id, saved.id);
 assert.equal(merged.revision, 2);
-assert.match(render('memory_save', {}, merged), /^memory · merged \[[^\]]+\] "发布顺序" · mem_[a-z0-9]+$/);
+assert.match(render('memory_save', {}, merged), /^memory · merged \[[^\]]+\] "发布顺序"$/);
 
 const patch = await exec('memory_save', { id: saved.id, title: '发布顺序', summary: '发版前要按顺序做的事', when: '发版当天' });
 assert.equal(patch.when, '发版当天');
@@ -127,7 +127,7 @@ const again = await exec('memory_save', { title: '发布顺序', summary: '发�
 assert.equal(again.changed, false);
 assert.equal(again.id, saved.id);
 assert.equal(again.revision, 3);
-assert.match(render('memory_save', {}, again), /^memory · unchanged \[[^\]]+\] "发布顺序" · mem_[a-z0-9]+$/);
+assert.match(render('memory_save', {}, again), /^memory · unchanged \[[^\]]+\] "发布顺序"$/);
 
 // ── similar title asks before overwriting ────────────────────────────────────
 const probe = await exec('memory_save', { title: '发布顺序是啥', summary: '发版前要按顺序做的事', body: '另一条' });
@@ -163,23 +163,24 @@ assert.equal(read.body, '');
 const plain = await exec('memory_read', { id: distinct.id });
 assert.equal(plain.body, '另一条');
 assert.equal(plain.revision, 1);
-assert.match(render('memory_read', {}, plain), new RegExp(`^memory · \\[[^\\]]+\\] 「发布顺序是啥」 · ${distinct.id}`));
+assert.match(render('memory_read', {}, plain), /^memory · \[[^\]]+\] 「发布顺序是啥」/);
+assert.ok(!render('memory_read', {}, plain).includes(distinct.id));
 
 // 没点明归档还是彻底忘掉时不动盘，先返回待确认
 const undecided = await exec('memory_forget', { id: distinct.id });
 assert.equal(undecided.mode, 'needs_resolution');
-assert.match(render('memory_forget', {}, undecided), new RegExp(`^memory · 先确认是归档还是彻底忘掉 · ${distinct.id}$`));
+assert.match(render('memory_forget', {}, undecided), /^memory · 先确认是归档还是彻底忘掉 · 「发布顺序是啥」$/);
 assert.ok(store.locate(store.scopeOf(cwd), distinct.id));
 const archived = await exec('memory_forget', { id: distinct.id, mode: 'archive' });
 assert.equal(archived.id, distinct.id);
-assert.match(render('memory_forget', {}, archived), new RegExp(`^memory · archived \\[[^\\]]+\\] "发布顺序是啥" · ${distinct.id}，可找回$`));
+assert.match(render('memory_forget', {}, archived), /^memory · archived \[[^\]]+\] "发布顺序是啥"，可找回$/);
 assert.equal(await exec('memory_save', { title: '发布顺序是啥', summary: '发版前要按顺序做的事', body: '第三条' }).then((v) => v.merged), false);
 
 // ── suggestion → keep → replay → reject ──────────────────────────────────────
 const suggested = await exec('memory_suggest', { title: '发布前跑文案检查', summary: '发版前先跑 ui 文案 lint', body: 'node ui-copy-lint.mjs', when: '发布前' });
 assert.equal(suggested.asked, true);
 assert.match(suggested.id, /^sug_[a-z0-9]+$/);
-assert.match(render('memory_suggest', {}, suggested), /^memory · suggested "发布前跑文案检查" · sug_[a-z0-9]+$/);
+assert.match(render('memory_suggest', {}, suggested), /^memory · suggested "发布前跑文案检查"$/);
 
 const duplicate = await exec('memory_suggest', { title: '发布前跑文案检查', summary: '发版前先跑 ui 文案 lint' });
 assert.equal(duplicate.asked, false);
@@ -234,7 +235,7 @@ assert.equal((await call('/lite-memory/keep', {}, { method: 'GET' })).status, 40
 // ── global layer ─────────────────────────────────────────────────────────────
 const global = await exec('memory_save', { title: '回复用中文', summary: '用户要求回复用中文', scope: 'global' });
 assert.equal(global.scope, 'global');
-assert.match(render('memory_save', {}, global), /^memory · saved \[global\] "回复用中文" · mem_[a-z0-9]+$/);
+assert.match(render('memory_save', {}, global), /^memory · saved \[global\] "回复用中文"$/);
 const globalSearch = await exec('memory_search', { query: '回复用中文' });
 assert.equal(globalSearch.count, 1);
 assert.match(render('memory_search', {}, globalSearch), /\[global\] mem_/);

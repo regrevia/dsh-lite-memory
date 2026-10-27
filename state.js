@@ -535,6 +535,7 @@ export function emptyState(scope) {
     candidates: [],
     receipts: [],
     suppressions: [],
+    conflicts: [],
     control: { enabled: true, epoch: crypto.randomUUID(), changedAt: now },
     experimental: { projectEvolution: newEvolution() },
   };
@@ -569,7 +570,7 @@ export function validateState(data) {
     if (typeof data[key] !== 'string' || !data[key]) throw new StateError('invalid', `记忆状态缺少 ${key}`);
   }
   if (!Number.isInteger(data.generation) || data.generation < 0) throw new StateError('invalid', '记忆状态 generation 不对');
-  for (const key of ['entries', 'candidates', 'receipts', 'suppressions']) {
+  for (const key of ['entries', 'candidates', 'receipts', 'suppressions', 'conflicts']) {
     if (!Array.isArray(data[key])) throw new StateError('invalid', `记忆状态 ${key} 不是数组`);
   }
   const ids = new Set();
@@ -665,9 +666,12 @@ function readEnvelope(file) {
     if (upgraded.experimental === undefined) {
       upgraded.experimental = { projectEvolution: { enabled: false, epoch: '', policyVersion: EVOLUTION_POLICY_VERSION, feedbackGeneration: 0, learning: emptyLearning() } };
     }
+    if (!Array.isArray(upgraded.conflicts)) upgraded.conflicts = [];
     validateState(upgraded);
     return upgraded;
   }
+  /** 旧库没有冲突队列：读时补空数组。 */
+  if (!Array.isArray(data.payload.conflicts)) data.payload.conflicts = [];
   validateState(data.payload);
   return data.payload;
 }

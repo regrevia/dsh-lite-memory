@@ -211,6 +211,7 @@ export function loadIndex(scope, options = {}) {
     receipts: JSON.parse(JSON.stringify(loaded.state.receipts || [])),
     lastSuggestedAt: loaded.state.lastSuggestedAt || '',
     suppressions: JSON.parse(JSON.stringify(loaded.state.suppressions || [])),
+    conflicts: JSON.parse(JSON.stringify(loaded.state.conflicts || [])),
     __evolution: state.evolutionOf(loaded.state),
     __tasks: anchor.normalizeTasks(state.evolutionOf(loaded.state).tasks),
     __control: state.controlOf(loaded.state),
@@ -236,6 +237,7 @@ function applyFlat(scope, draft, index) {
   draft.candidates = Array.isArray(index.suggestions) ? JSON.parse(JSON.stringify(index.suggestions)) : [];
   draft.receipts = Array.isArray(index.receipts) ? JSON.parse(JSON.stringify(index.receipts)) : [];
   draft.suppressions = Array.isArray(index.suppressions) ? JSON.parse(JSON.stringify(index.suppressions)) : [];
+  draft.conflicts = Array.isArray(index.conflicts) ? JSON.parse(JSON.stringify(index.conflicts)) : [];
   draft.lastSuggestedAt = typeof index.lastSuggestedAt === 'string' ? index.lastSuggestedAt : draft.lastSuggestedAt || '';
   draft.scopeKey = draft.scopeKey || index.scope;
 }
@@ -248,9 +250,10 @@ export function saveIndex(scope, index) {
   const meta = index.__meta || { exists: false };
   const expected = meta.exists ? { generation: meta.generation, epoch: meta.epoch } : null;
   const result = state.transact(scope, { expected, expectCreate: !meta.exists }, (draft) => {
-    const before = JSON.stringify([draft.entries, draft.candidates, draft.receipts, draft.suppressions, draft.lastSuggestedAt]);
+    const stamp = () => JSON.stringify([draft.entries, draft.candidates, draft.receipts, draft.suppressions, draft.conflicts, draft.lastSuggestedAt]);
+    const before = stamp();
     applyFlat(scope, draft, index);
-    const after = JSON.stringify([draft.entries, draft.candidates, draft.receipts, draft.suppressions, draft.lastSuggestedAt]);
+    const after = stamp();
     return { changed: before !== after };
   });
   const published = result.state;
@@ -2481,6 +2484,49 @@ function bindSameTopic(projectScope, ref) {
   return { topicKey: view.topicSlot(record) };
 }
 
+
+/** 冲突队列：只记待办，不预写记忆；最多 20 条。 */
+const CONFLICT_LIMIT = 20;
+
+function queueConflictLocked(scope, draft, candidates) {
+  const index = loadIndex(scope);
+  const title = normalizeText(draft && draft.title, 120);
+  if (!title) return Array.isArray(index.conflicts) ? index.conflicts.length : 0;
+  const scopeKey = scope.key === 'global' ? 'global' : 'project';
+  const now = new Date().toISOString();
+  const rows = Array.isArray(index.conflicts) ? index.conflicts : [];
+  const view = candidates.slice(0, 2).map((item) => ({
+    id: item.id, title: item.title || '', when: item.when || '', reason: item.reason || 'similar_title',
+  }));
+  const hit = rows.find((row) => row.title === title && row.scope === scopeKey);
+  if (hit) {
+    hit.candidates = view;
+    hit.updatedAt = now;
+  } else {
+    rows.push({ id: `cf_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`, title, scope: scopeKey, candidates: view, createdAt: now, updatedAt: now });
+  }
+  index.conflicts = rows.slice(-CONFLICT_LIMIT);
+  saveIndex(scope, index);
+  return index.conflicts.length;
+}
+
+function clearConflictLocked(scope, title) {
+  const index = loadIndex(scope);
+  const rows = Array.isArray(index.conflicts) ? index.conflicts : [];
+  const norm = normalizeText(title, 120);
+  const next = rows.filter((row) => !(row.title === norm && row.scope === (scope.key === 'global' ? 'global' : 'project')));
+  if (next.length === rows.length) return rows.length;
+  index.conflicts = next;
+  saveIndex(scope, index);
+  return next.length;
+}
+
+/** 当前层还有几条没处理的冲突。 */
+export function pendingConflictsOf(scope) {
+  const rows = loadIndex(scope).conflicts;
+  return Array.isArray(rows) ? rows.length : 0;
+}
+
 /**
  * 保存的唯一入口：先路由，再在两层里查重（完全相同 → existing_ref；只是相近 → 只给候选），
  * 最后才写。写之前判不出来的范围返回 needsScope，不替用户选。
@@ -2524,6 +2570,7 @@ export function saveEntry(projectScope, source) {
       }
       const near = crossLayerSimilar(projectScope, targetScope, draft);
       if (near.length) {
+        const pendingConflicts = queueConflictLocked(targetScope, draft, near);
         return {
           needsResolution: true,
           crossLayer: true,
@@ -2531,12 +2578,19 @@ export function saveEntry(projectScope, source) {
           similar: near[0],
           draft,
           needsScope: false,
+          pendingConflicts,
           chosenScope: targetScope.key === 'global' ? 'global' : 'project',
         };
       }
     }
     const foreign = targetScope.key === 'global' ? [] : loadIndex(globalScope()).entries;
     const result = upsertLocked(targetScope, next, { foreignEntries: foreign });
+    if (!result.needsResolution) clearConflictLocked(targetScope, draft ? draft.title : next.title);
+    if (result.needsResolution) {
+      const rows = Array.isArray(result.similarList) ? result.similarList : [];
+      const pendingConflicts = queueConflictLocked(targetScope, result.draft || draft, rows);
+      return { ...result, chosenScope: targetScope.key === 'global' ? 'global' : 'project', needsScope: false, reasonCode: routed.reasonCode, pendingConflicts };
+    }
     return { ...result, chosenScope: targetScope.key === 'global' ? 'global' : 'project', needsScope: false, reasonCode: routed.reasonCode };
   });
 }

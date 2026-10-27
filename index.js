@@ -1616,6 +1616,7 @@ export function apply(ctx, config) {
           similar: { type: 'string' },
           supersededId: { type: 'string' },
           archived: { type: 'string' },
+          pendingConflicts: { type: 'integer' },
         },
         required: ['id', 'title', 'summary', 'when', 'revision', 'merged', 'changed', 'scope', 'needsResolution', 'archived'],
         additionalProperties: false,
@@ -1629,12 +1630,12 @@ export function apply(ctx, config) {
             ? `memory · 当前目录还不能确认属于哪个项目：「${value.title}」\n先确认项目根目录，或显式 scope="global"`
             : `memory · 归属还没定：「${value.title}」\n补 memoryClass（personal_preference / project_fact / environment_fact / portable_procedure）或显式 scope；设备事实还要给设备条件`
           : value.existingId
-            ? `memory · 已有相同记忆：「${value.title}」 · ${value.existingId}（${value.existingScope}）\n要改成另一条，加 resolution="distinct"`
+            ? `memory · 已有相同记忆：「${value.title}」（${value.existingScope}）\n要改成另一条，加 resolution="distinct"`
             : value.needsResolution
           ? `memory · 需要确认：「${value.title}」与已有条目相近${value.crossLayer ? '（在另一层）' : ''}${value.sameTopic ? '（同一主题槽位）' : ''}\n${value.similar}\n要更新它，用 id 重存；确实是另一条，加 resolution="distinct"`
           : value.changed === false
-            ? `memory · unchanged ${withTag(value, `"${value.title}"`)} · ${value.id}`
-            : `memory · ${value.merged ? 'merged' : 'saved'} ${withTag(value, `"${value.title}"`)}${value.when ? `（${value.when}）` : ''} · ${value.id}${value.similar ? ` · 相近：${value.similar}` : ''}${value.archived ? ` · 已归档「${value.archived}」腾位` : ''}${value.fullTextSaved ? ' · 完整原句已另存' : ''}${value.supersededId ? ` · 已取代 ${value.supersededId}` : ''}`,
+            ? `memory · unchanged ${withTag(value, `"${value.title}"`)}`
+            : `memory · ${value.merged ? 'merged' : 'saved'} ${withTag(value, `"${value.title}"`)}${value.when ? `（${value.when}）` : ''}${value.similar ? ` · 相近：${value.similar}` : ''}${value.archived ? ` · 已归档「${value.archived}」腾位` : ''}${value.fullTextSaved ? ' · 完整原句已另存' : ''}${value.supersededId ? ' · 已取代旧说法' : ''}`,
       }],
     },
     execute: async (args, execution) => {
@@ -1704,6 +1705,7 @@ export function apply(ctx, config) {
           similarIds: saved.similarList.map((item) => item.id).join('、'),
           similar: saved.similarList.map((item) => describeCandidate(item, { sameTopic: saved.sameTopic })).join('；'),
           archived: '',
+          pendingConflicts: Number(saved.pendingConflicts) || 0,
         };
       }
       recordCitations(scope, sessionIdOf(execution), [saved.record]);
@@ -1725,7 +1727,8 @@ export function apply(ctx, config) {
         similarIds: saved.similarList.map((item) => item.id).join('、'),
         supersededId: String(args.supersedes || ''),
         archived: (saved.archived || []).map((item) => item.title).join('、'),
-        ...(saved.similar ? { similar: `${saved.similar.id}「${saved.similar.title}」` } : {}),
+        pendingConflicts: Number(saved.pendingConflicts) || 0,
+        ...(saved.similar ? { similar: `「${saved.similar.title}」` } : {}),
       };
     },
   }), 'lite-memory: memory_save');
@@ -1752,7 +1755,7 @@ export function apply(ctx, config) {
       render: (_args, value) => [{
         type: 'text',
         text: value.asked
-          ? `memory · suggested "${value.title}" · ${value.id}${value.targetId ? ` · 确认后更新 ${value.targetId}「${value.targetTitle}」` : ''}`
+          ? `memory · suggested "${value.title}"${value.targetId ? ` · 确认后更新「${value.targetTitle}」` : ''}`
           : `memory · skipped${value.reason ? `\n${value.reason}` : ''}`,
       }],
     },
@@ -1946,7 +1949,7 @@ export function apply(ctx, config) {
             : value.repeat
               ? 'memory · 本请求已读过这条记忆'
               : value.body
-                ? `memory · ${withTag(value, `「${value.title}」`)}${value.when ? `（${value.when}）` : ''} · ${value.id}${statusLabel(value.status)}\n${value.body}`
+                ? `memory · ${withTag(value, `「${value.title}」`)}${value.when ? `（${value.when}）` : ''}${statusLabel(value.status)}\n${value.body}`
                 : value.links !== undefined && value.status === 'ok'
                   ? `memory · 「${value.title}」的相关记忆\n${value.links || '(无)'}`
                   : value.status === 'needs_context'
@@ -2079,12 +2082,12 @@ export function apply(ctx, config) {
         text: value.mode === 'memory_disabled'
           ? 'memory · 本项目记忆已关闭，先在面板打开'
           : value.mode === 'purged'
-          ? `memory · forgotten "${value.title}" · ${value.id}`
+          ? `memory · forgotten "${value.title}"`
           : value.mode === 'purge_pending'
-            ? `memory · 清除未完成 · ${value.id}，重启后会继续`
+            ? `memory · 清除未完成 · 「${value.title || '这条记忆'}」，重启后会继续`
             : value.mode === 'needs_resolution'
-              ? `memory · 先确认是归档还是彻底忘掉 · ${value.id}`
-              : `memory · archived ${withTag(value, `"${value.title}"`)} · ${value.id}，可找回`,
+              ? `memory · 先确认是归档还是彻底忘掉 · 「${value.title || '这条记忆'}」`
+              : `memory · archived ${withTag(value, `"${value.title}"`)}，可找回`,
       }],
       presentationMeta: (_args, value) => ({
         kind: 'memory-forget',
@@ -2101,7 +2104,7 @@ export function apply(ctx, config) {
       const located = locate(scope, args.id);
       if (!located && !args.mode) throw new Error(`没有 ${args.id} 这条记忆`);
       if (!args.mode) {
-        return { id: args.id, mode: 'needs_resolution', scope: located.scope.key === 'global' ? 'global' : 'project' };
+        return { id: args.id, title: located.record.title || '', mode: 'needs_resolution', scope: located.scope.key === 'global' ? 'global' : 'project' };
       }
       let dropped;
       try {
