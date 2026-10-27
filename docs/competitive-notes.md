@@ -310,15 +310,15 @@
 | --- | --- | --- | --- |
 | 注入时机 | 会话开始常驻索引（Claude Code/Codex/Hermes/Letta） | 仅重叠时暴露 ≤3 条标题 | **保留**（差异化），补预算可观测 |
 | 注入内容 | 索引 + 摘要 | 标题 + id，正文按需 `memory_read` | 保留，已是最省 |
-| 写入归并 | LLM 分类（mem0 旧版）或只追加（mem0 v3） | 标题+when+id 确定性归并 | 保留（可预期），补取代链 |
+| 写入归并 | LLM 分类（mem0 旧版）或只追加（mem0 v3） | 标题+when+id 确定性归并 + 取代链 | 保留（可预期），取代链已补 |
 | 冲突 | 置信度/矛盾检测自动 superseded | `needsResolution` 阻断 + 候选 id | **补**：候选解释 + 待办队列 |
-| 有效期 | 双时态窗口（Graphiti） | 无（只有建议/抑制 TTL） | **P0 补最小字段** |
+| 有效期 | 双时态窗口（Graphiti） | `validFrom`/`validUntil`/`supersededBy` 最小字段（0.18.0） | 已补（P0-1/P0-2） |
 | 删除 | 失效不删（Graphiti/mem0） | 归档不删 | 已对齐，补 superseded 语义 |
 | 溯源 | episode（Graphiti）、3 层披露（claude-mem） | 会话 citation + `sourceExcerpt` | **P1 补二级来源** |
 | 检索 | 语义+BM25+图（多数） | bigram 重叠 + 标题/标签 | 保留（零依赖），明确不做向量库 |
 | 面板 | 图+日志（Zep）、时间线+纠错（Hermes）、体检（Letta） | 列表/图 + 自进化页签 | **P1 补体检与冲突队列** |
-| 一致性 | git（Letta）、锁+单写者告警（Hermes） | 原子写+fsync+锁+校验和+prev | **已领先**，补锁可观测与迁移预演 |
-| 降级 | 配置项 + 按会话开关（Codex） | 无集中开关 | **P2 补** |
+| 一致性 | git（Letta）、锁+单写者告警（Hermes） | 原子写+fsync+锁+校验和+prev；恢复后总开关保持关闭（0.18.3） | **已领先**，补锁可观测与迁移预演 |
+| 降级 | 配置项 + 按会话开关（Codex） | 项目总开关 + 自进化开关（0.18.0） | 已补，按会话开关仍缺 |
 | 后台任务 | 空闲/额度门控（Codex）、定时整合（mcp-memory） | TTL 过期逻辑但无调度语义 | **P1 补空闲门控** |
 
 ---
@@ -329,9 +329,9 @@
 
 | ID | 动作 | 文件 / 函数 | 验收 |
 | --- | --- | --- | --- |
-| P0-1 | 记录增加 `validFrom` / `validUntil` / `supersededBy` / `supersedeReason` 四个可选字段；`findCurrent` 增加「未被取代且未过期」过滤；`memory_search history:true` 能取回被取代项并标注 | `store.js` `toFlat` / `fromFlat` / `applyFlat` / `findCurrent` / `archiveEntry` | 旧数据无字段仍可读；新增字段进 checksum；归档项仍可见于 history |
-| P0-2 | `memory_save` 支持 `supersedes: <id>`：写新记录、给旧记录打 `supersededBy` + `validUntil`、`versions` 保留旧正文 | 落地：`store.js` `applyDraft` / `stampSupersede`；`index.js` `memory_save` 的 `supersedes` 参数；`test/record.test.mjs` | 一次调用后旧 id 在默认检索消失、在 history 出现；撤销能把两者都回滚 |
-| P0-3 | 自动回忆可解释：`recallText` 返回 `reasonCode`（`no_overlap` / `budget` / `session_disabled` / `hit`）、`chars`、`limit`，并写入会话 receipts | `index.js` `recallText`（约 1510 行）、`RECALL_QUERY_CHARS`（809 行）；`store.js` `scoreQuery`、`citationKey` | 面板/日志能回答「为什么这次没提醒我」；不改变注入文本 |
+| P0-1 已完成 0.18.0 | 记录增加 `validFrom` / `validUntil` / `supersededBy` / `supersedeReason` 四个可选字段；`findCurrent` 增加「未被取代且未过期」过滤；`memory_search history:true` 能取回被取代项并标注 | `store.js` `toFlat` / `fromFlat` / `applyFlat` / `findCurrent` / `archiveEntry` | 旧数据无字段仍可读；新增字段进 checksum；归档项仍可见于 history |
+| P0-2 已完成 0.18.0 | `memory_save` 支持 `supersedes: <id>`：写新记录、给旧记录打 `supersededBy` + `validUntil`、`versions` 保留旧正文 | 落地：`store.js` `applyDraft` / `stampSupersede`；`index.js` `memory_save` 的 `supersedes` 参数；`test/record.test.mjs` | 一次调用后旧 id 在默认检索消失、在 history 出现；撤销能把两者都回滚 |
+| P0-3 未做 | 自动回忆可解释：`recallText` 返回 `reasonCode`（`no_overlap` / `budget` / `session_disabled` / `hit`）、`chars`、`limit`，并写入会话 receipts | `index.js` `recallText`（约 1510 行）、`RECALL_QUERY_CHARS`（809 行）；`store.js` `scoreQuery`、`citationKey` | 面板/日志能回答「为什么这次没提醒我」；不改变注入文本 |
 
 ### P1（下一轮）
 
