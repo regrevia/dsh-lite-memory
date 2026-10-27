@@ -279,7 +279,7 @@ assert.notEqual(bootA.provider.text({ agent: agentB, signal: signalB }), prepare
   assert.equal(fourth.status, 'budget_exhausted');
   assert.equal(fourth.body || '', '');
   assert.equal(fourth.id, '');
-  assert.equal(bootA.render('memory_read', {}, fourth), 'memory · 本请求的记忆额度已用完');
+  assert.equal(bootA.render('memory_read', {}, fourth), 'memory · 这条消息已停止读记忆，下一条消息再读');
   const win = bootA.debug.windowOf(agent);
   assert.ok(win.bytes <= 8192);
   assert.equal(win.bodies, 3);
@@ -393,6 +393,19 @@ assert.notEqual(bootA.provider.text({ agent: agentB, signal: signalB }), prepare
   assert.ok(win.bytes <= 8192);
   assert.ok(win.bodies <= 3);
   assert.ok(win.reads <= 8);
+}
+
+// A21：自动注入把这一轮用得差不多，模型按标题来读正文不该被连带挡掉。
+{
+  const agent = makeAgent('agent-read-after-auto', cwdA);
+  await prepare(bootA, agent, '大正文样本怎么用');
+  const win = bootA.debug.windowOf(agent);
+  assert.ok(win, '自动召回开了额度窗口');
+  /** 模拟自动注入已经把这轮的 8192 B 用满。 */
+  win.bytes = 8192;
+  const row = await bootA.exec('memory_read', { title: '大正文样本1' }, agent);
+  assert.equal(row.status, 'ok', '自动注入用满之后仍能读正文');
+  assert.ok(Buffer.byteLength(row.body) > 900);
 }
 
 // A18：归档/旧正文不进正常检索；只有明确查历史才列归档。

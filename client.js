@@ -2225,7 +2225,7 @@ window.__ModuleLoader__.load({
       } else if (activityCode === 'scope_unconfirmed' || activityCode === 'unknown_scope') {
         activityText = '暂未整理：适用范围待确认';
       } else if (activityCode === 'quota' || activityCode === 'exhausted') {
-        activityText = '本轮整理额度已用完';
+        activityText = '这轮先整理这些，下一条消息接着整理';
       } else if (activityCode === 'failed' || activityCode === 'error') {
         activityText = staleLearning ? '这轮整理没采用' : '最近整理失败，可查看原因';
       } else if (activityCode === 'waiting' || activityCode === 'idle' || activityCode === 'empty') {

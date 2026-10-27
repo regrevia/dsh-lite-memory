@@ -985,6 +985,17 @@ export function apply(ctx, config) {
     return win.bytes + bytes <= view.REQUEST_BYTES;
   }
 
+  /**
+   * 工具自己取的记忆另算一笔：自动注入已经用满时，模型按标题来读正文不该被连带挡掉，
+   * 否则用户看到的就是「额度已用完」这种没法处理的死路。
+   */
+  function affordableTool(win, bytes, bodies = 0) {
+    if (!win) return true;
+    if (win.reads >= view.REQUEST_LIMITS.reads) return false;
+    if (bodies && win.bodies + bodies > view.REQUEST_LIMITS.bodies) return false;
+    return (win.toolBytes || 0) + bytes <= view.TOOL_BYTES;
+  }
+
   /** 续写轮没有新消息：沿用上一次能核对的请求上下文。 */
   const lastRuntime = new Map();
   const rememberRuntime = (scope, sessionId, held) => {
@@ -1003,7 +1014,7 @@ export function apply(ctx, config) {
     if (existing && existing.signature === signature) return existing;
     const next = {
       signature, sessionId, turn, messageIds,
-      bytes: 0, bodies: 0, reads: 0,
+      bytes: 0, bodies: 0, reads: 0, toolBytes: 0,
       provided: new Map(), readBodies: new Map(), at: Date.now(),
       experiment: null, contexts: new Map(), runtime: null, autoBudget: null,
     };
@@ -1890,7 +1901,7 @@ export function apply(ctx, config) {
       render: (_args, value) => [{
         type: 'text',
         text: value.status === 'budget_exhausted'
-          ? 'memory · 本请求的记忆额度已用完'
+          ? 'memory · 这条消息已停止检索，下一条消息再查'
           : value.status === 'memory_disabled'
             ? 'memory · 记忆检索已关闭'
             : value.status === 'needs_context'
@@ -1904,7 +1915,7 @@ export function apply(ctx, config) {
       if (recallMode() === 'off' || !memoryEnabledFor(execution)) return { count: 0, chars: 0, text: '', status: 'memory_disabled', refs: [] };
       const agent = execution?.agent;
       const win = windowOf(agent);
-      if (win && !affordable(win, 0)) return { count: 0, chars: 0, text: '', status: 'budget_exhausted', refs: [] };
+      if (win && !affordableTool(win, 0)) return { count: 0, chars: 0, text: '', status: 'budget_exhausted', refs: [] };
       const wantsBind = args.bindForRequest === true;
       const contextId = wantsBind && !args.contextId ? toolContextFor(execution) : args.contextId;
       if (wantsBind && !contextId) {
@@ -1955,8 +1966,9 @@ export function apply(ctx, config) {
         };
         if (win) {
           const bytes = jsonBytes(value);
-          if (!affordable(win, bytes)) return { ...value, status: 'budget_exhausted', text: '' };
+          if (!affordableTool(win, bytes)) return { ...value, status: 'budget_exhausted', text: '' };
           win.bytes += bytes;
+          win.toolBytes += bytes;
           win.reads += 1;
         }
         return value;
@@ -1966,18 +1978,20 @@ export function apply(ctx, config) {
         const empty = { count: 0, chars: 0, text: '', status: 'ok', reasonCode: 'no_match', noTriggerReason: '没有匹配的记忆', refs: [] };
         if (win) {
           const bytes = jsonBytes(empty);
-          if (!affordable(win, bytes)) return { ...empty, status: 'budget_exhausted' };
+          if (!affordableTool(win, bytes)) return { ...empty, status: 'budget_exhausted' };
           win.bytes += bytes;
+          win.toolBytes += bytes;
           win.reads += 1;
         }
         return empty;
       }
       if (win) {
         let kept = shown.length;
-        while (kept > 0 && !affordable(win, jsonBytes(valueOf(kept)))) kept -= 1;
+        while (kept > 0 && !affordableTool(win, jsonBytes(valueOf(kept)))) kept -= 1;
         if (kept === 0) return { count: 0, chars: 0, text: '', status: 'budget_exhausted', refs: [] };
         const value = valueOf(kept);
         win.bytes += jsonBytes(value);
+        win.toolBytes += jsonBytes(value);
         win.reads += 1;
         recordCitations(scope, sessionIdOf(execution), hits.slice(0, kept));
         return value;
@@ -2015,7 +2029,7 @@ export function apply(ctx, config) {
       render: (_args, value) => [{
         type: 'text',
         text: value.status === 'budget_exhausted'
-          ? 'memory · 本请求的记忆额度已用完'
+          ? 'memory · 这条消息已停止读记忆，下一条消息再读'
           : value.status === 'memory_disabled'
             ? 'memory · 记忆检索已关闭'
             : value.repeat
@@ -2069,8 +2083,9 @@ export function apply(ctx, config) {
           const withheld = { id: '', scope: '', status: found.status, links: '' };
           if (win) {
             const bytes = jsonBytes(withheld);
-            if (!affordable(win, bytes)) return { id: '', scope: '', status: 'budget_exhausted' };
+            if (!affordableTool(win, bytes)) return { id: '', scope: '', status: 'budget_exhausted' };
             win.bytes += bytes;
+            win.toolBytes += bytes;
             win.reads += 1;
           }
           return withheld;
@@ -2083,8 +2098,9 @@ export function apply(ctx, config) {
         const value = { id: found.id, scope: found.scope, scopeName, status: found.status, links: text };
         if (win) {
           const bytes = jsonBytes(value);
-          if (!affordable(win, bytes)) return { id: '', scope: '', status: 'budget_exhausted' };
+          if (!affordableTool(win, bytes)) return { id: '', scope: '', status: 'budget_exhausted' };
           win.bytes += bytes;
+          win.toolBytes += bytes;
           win.reads += 1;
         }
         return value;
@@ -2111,19 +2127,21 @@ export function apply(ctx, config) {
         body,
       };
       if (win) {
-        if (!affordable(win, 0)) return { id: '', scope: '', status: 'budget_exhausted' };
+        if (!affordableTool(win, 0)) return { id: '', scope: '', status: 'budget_exhausted' };
         const seenRevision = win.readBodies.get(record.id);
         if (seenRevision === revision) {
           const receipt = { ...value, body: '', repeat: true };
           const bytes = jsonBytes(receipt);
-          if (!affordable(win, bytes)) return { id: '', scope: '', status: 'budget_exhausted' };
+          if (!affordableTool(win, bytes)) return { id: '', scope: '', status: 'budget_exhausted' };
           win.bytes += bytes;
+          win.toolBytes += bytes;
           win.reads += 1;
           return receipt;
         }
         const bytes = jsonBytes(value);
-        if (!affordable(win, bytes, 1)) return { id: '', scope: '', status: 'budget_exhausted' };
+        if (!affordableTool(win, bytes, 1)) return { id: '', scope: '', status: 'budget_exhausted' };
         win.bytes += bytes;
+        win.toolBytes += bytes;
         win.bodies += 1;
         win.reads += 1;
         win.readBodies.set(record.id, revision);
@@ -2348,7 +2366,7 @@ export function apply(ctx, config) {
       const ids = fresh.map((message) => String(message?.id ?? '')).filter(Boolean).sort();
       const win = openWindow(agent, { sessionId, turn, messageIds: ids });
       const budgetBefore = win ? {
-        bytes: win.bytes, bodies: win.bodies, reads: win.reads,
+        bytes: win.bytes, bodies: win.bodies, reads: win.reads, toolBytes: win.toolBytes || 0,
         provided: new Map(win.provided), readBodies: new Map(win.readBodies),
         recallHeader: win.recallHeader, experimentBytes: win.experimentBytes,
         autoBudget: win.autoBudget ? JSON.parse(JSON.stringify(win.autoBudget)) : null,
@@ -2407,6 +2425,7 @@ export function apply(ctx, config) {
         win.bytes = budgetBefore.bytes;
         win.bodies = budgetBefore.bodies;
         win.reads = budgetBefore.reads;
+        win.toolBytes = budgetBefore.toolBytes;
         win.provided = budgetBefore.provided;
         win.readBodies = budgetBefore.readBodies;
         win.recallHeader = budgetBefore.recallHeader;
