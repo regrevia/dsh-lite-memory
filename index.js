@@ -644,6 +644,8 @@ function refsOf(hits) {
     /** 界面要按类型分开展示（偏好/约定/流程/资料），维护字段不进正文。 */
     kind: typeof item.kind === 'string' && item.kind ? item.kind : 'note',
     when: typeof item.when === 'string' ? item.when : '',
+    /** 界面要能说「N 天前更新」，只给时间不给正文。 */
+    updated: typeof item.updated === 'string' ? item.updated : '',
   }));
 }
 
@@ -1800,6 +1802,7 @@ export function apply(ctx, config) {
                 origin: { type: 'string' },
                 kind: { type: 'string' },
                 when: { type: 'string' },
+                updated: { type: 'string' }, // ui-copy-ignore
               },
               required: ['id', 'title', 'scope', 'revision', 'status', 'origin', 'kind', 'when'],
               additionalProperties: false,

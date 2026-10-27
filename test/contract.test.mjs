@@ -529,11 +529,13 @@ assert.equal(savedMeta.changed, true);
 assert.ok(['created', 'updated'].includes(savedMeta.mode));
 assert.equal('path' in savedMeta, false);
 const searchMeta = metaOf('memory_search', {}, globalSearch);
-assert.deepEqual(Object.keys(searchMeta.refs[0]).sort(), ['id', 'kind', 'origin', 'revision', 'scope', 'status', 'title', 'when']);
+assert.deepEqual(Object.keys(searchMeta.refs[0]).sort(), ['id', 'kind', 'origin', 'revision', 'scope', 'status', 'title', 'updated', 'when']);
 assert.equal(searchMeta.refs[0].id, global.id);
 /** 引用要能区分偏好/约定/流程/资料，界面才不必猜标题文案。 */
 assert.equal(searchMeta.refs[0].kind, store.loadIndex(store.globalScope()).entries.find((item) => item.id === global.id).kind);
 assert.equal(searchMeta.refs[0].when, '');
+/** 出处行要说「N 天前更新」，只给时间不进正文。 */
+assert.equal(typeof searchMeta.refs[0].updated, 'string');
 const readValue = await exec('memory_read', { id: global.id });
 const readMeta = metaOf('memory_read', {}, readValue);
 assert.equal(readMeta.kind, 'memory-read');

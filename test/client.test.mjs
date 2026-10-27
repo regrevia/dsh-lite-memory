@@ -28,7 +28,7 @@ assert.equal(panel.name, 'shell.overlay');
 assert.equal(panel.order, 30);
 
 const EMPTY_CHILDREN = [];
-const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf } = seen;
+const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, agoLabel } = seen;
 
 // 图谱只按真实数据画：共享标签成枢纽，显式关联成边，位置由 id 决定。
 const graph = graphOf([
@@ -280,5 +280,31 @@ assert.equal(palacePicked, 'mem_a');
 const palaceEmpty = MemoryPalace({ records: [], selectedId: '', onPick: () => {}, emptyText: '这个项目还没有记忆' });
 assert.equal(expandNodes(palaceEmpty).some((node) => node.children.includes('这个项目还没有记忆')), true);
 
-console.log('client.test.mjs: 19 passed + palace');
+// 每条引用带类型：搜索命中用条目的 kind，读过正文用 recordKind；缺了就只写范围与来源。
+const typedSearch = citationOf({ id: 'mem_aaaaaaaa', title: 'A', scope: 'global', revision: 1, status: 'ok', kind: 'preference' }, 'memory-search');
+assert.equal(typedSearch.entryKind, 'preference');
+assert.equal(refMetaOf(typedSearch), '偏好 · 全局 · 你记的');
+assert.equal(citationOf({ kind: 'memory-read', id: 'mem_bbbbbbbb', recordKind: 'procedure', scope: 'project', revision: 2 }, 'memory-read').entryKind, 'procedure');
+assert.equal(refMetaOf({ scope: 'project', origin: 'user_explicit' }), '项目 · 你记的');
+/** 检索引用也要带类型与更新距今，缺时间时退回两项。 */
+const aged = citationOf({ kind: 'preference', id: 'mem_cccccccc', scope: 'global', revision: 1, updated: new Date(Date.now() - 3 * 86_400_000).toISOString() }, 'memory-search');
+assert.equal(aged.entryKind, 'preference');
+assert.equal(refMetaOf(aged), '偏好 · 全局 · 你记的 · 3 天前更新');
+assert.equal(agoLabel(''), '');
+assert.equal(agoLabel(new Date(Date.now() - 40 * 86_400_000).toISOString()), '');
+
+// 解释模式按会话存在本机，缺省关闭；关着零命中不出提示，打开后才说原因。
+assert.equal(explainModeOf('s1'), false);
+const quietRefs = [];
+Object.defineProperty(quietRefs, 'noTriggerReason', { value: '当前任务不适用', enumerable: false, configurable: true });
+assert.equal(TurnMemory({ sessionId: 's1', turn: '7', useRefs: () => quietRefs }), null);
+setExplainMode('s1', true);
+assert.equal(explainModeOf('s1'), true);
+assert.equal(explainModeOf('s2'), false);
+const told = TurnMemory({ sessionId: 's1', turn: '7', useRefs: () => quietRefs });
+assert.ok(told);
+assert.equal(JSON.stringify(told).includes('当前任务不适用'), true);
+assert.equal(explainKeyOf('s1').startsWith('lite-memory:explain:'), true);
+
+console.log('client.test.mjs: 21 passed + palace');
 
