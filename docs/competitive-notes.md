@@ -330,7 +330,7 @@
 | ID | 动作 | 文件 / 函数 | 验收 |
 | --- | --- | --- | --- |
 | P0-1 | 记录增加 `validFrom` / `validUntil` / `supersededBy` / `supersedeReason` 四个可选字段；`findCurrent` 增加「未被取代且未过期」过滤；`memory_search history:true` 能取回被取代项并标注 | `store.js` `toFlat` / `fromFlat` / `applyFlat` / `findCurrent` / `archiveEntry` | 旧数据无字段仍可读；新增字段进 checksum；归档项仍可见于 history |
-| P0-2 | `memory_save` 支持 `supersedes: <id>`：写新记录、给旧记录打 `supersededBy` + `validUntil`、`versions` 保留旧正文 | `store.js` `upsertLocked` / `snapshot`；`index.js` `memory_save`（约 1544 行） | 一次调用后旧 id 在默认检索消失、在 history 出现；撤销能把两者都回滚 |
+| P0-2 | `memory_save` 支持 `supersedes: <id>`：写新记录、给旧记录打 `supersededBy` + `validUntil`、`versions` 保留旧正文 | 落地：`store.js` `applyDraft` / `stampSupersede`；`index.js` `memory_save` 的 `supersedes` 参数；`test/record.test.mjs` | 一次调用后旧 id 在默认检索消失、在 history 出现；撤销能把两者都回滚 |
 | P0-3 | 自动回忆可解释：`recallText` 返回 `reasonCode`（`no_overlap` / `budget` / `session_disabled` / `hit`）、`chars`、`limit`，并写入会话 receipts | `index.js` `recallText`（约 1510 行）、`RECALL_QUERY_CHARS`（809 行）；`store.js` `scoreQuery`、`citationKey` | 面板/日志能回答「为什么这次没提醒我」；不改变注入文本 |
 
 ### P1（下一轮）

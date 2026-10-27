@@ -98,6 +98,11 @@ window.__ModuleLoader__.load({
         origin: meta.origin === 'project_evolution' ? 'project_evolution' : 'user_explicit',
         kind,
         exposure: kind === 'memory-save' || kind === 'memory-forget' ? 'update' : 'reference',
+        /** 条目类型：读正文看 recordKind，检索看 ref 自己的 kind；工具名不是类型。 */
+        entryKind: typeof meta.kind === 'string' && Object.prototype.hasOwnProperty.call(KIND_LABEL, meta.kind)
+          ? meta.kind
+          : (typeof meta.recordKind === 'string' ? meta.recordKind : ''),
+        updated: typeof meta.updated === 'string' ? meta.updated : '',
         reason: typeof meta.reason === 'string' ? meta.reason : '',
         reasonCode: typeof meta.reasonCode === 'string' ? meta.reasonCode : '',
         noTriggerReason: typeof meta.noTriggerReason === 'string' ? meta.noTriggerReason : '',
@@ -464,7 +469,7 @@ window.__ModuleLoader__.load({
       if (ref.messageId !== undefined) return `消息 ${ref.messageId}`;
       if (ref.turn !== undefined) return `第 ${ref.turn} 轮`;
       if (ref.turnIndex !== undefined) return `第 ${ref.turnIndex} 轮`;
-      return ref.id !== undefined ? String(ref.id) : `引用 ${index + 1}`;
+      return `引用 ${index + 1}`;
     };
     const refHrefOf = (ref) => (ref && typeof ref === 'object'
       ? [ref.href, ref.url, ref.link].find((value) => typeof value === 'string' && value)
@@ -540,9 +545,24 @@ window.__ModuleLoader__.load({
     const REF_META = { display: 'flex', alignItems: 'center', gap: '6px', margin: '0 0 2px 2px', fontSize: '11px', lineHeight: '18px', color: 'var(--dsw-alias-label-secondary)' };
     const REF_BODY = { margin: '2px 0 3px', padding: '3px 0 3px 9px', display: 'flex', flexDirection: 'column', gap: '3px', fontSize: '12px', lineHeight: '1.65', maxHeight: '180px', overflowY: 'auto' };
 
-    /** 出处一句话：项目/全局、来源、状态。 */
+    /** 出处一句话：类型、项目/全局、来源、状态。 */
+    /** 只管最近一个月：更早或没时间就不占位。 */
+    const agoLabel = (value) => {
+      const at = Date.parse(value);
+      if (!Number.isFinite(at)) return '';
+      const days = Math.floor((Date.now() - at) / 86_400_000);
+      if (days <= 0) return '今天更新';
+      if (days === 1) return '昨天更新';
+      if (days < 30) return `${days} 天前更新`;
+      return '';
+    };
     const refMetaOf = (item) => {
-      const parts = [item.scope === 'global' ? '全局' : '项目', item.origin === 'project_evolution' ? '自进化' : '你记的'];
+      const kind = KIND_LABEL[item.entryKind] || '';
+      const parts = kind
+        ? [kind, item.scope === 'global' ? '全局' : '项目', item.origin === 'project_evolution' ? '自进化' : '你记的']
+        : [item.scope === 'global' ? '全局' : '项目', item.origin === 'project_evolution' ? '自进化' : '你记的'];
+      const ago = agoLabel(item.updated);
+      if (ago) parts.push(ago);
       if (item.status === 'archived') parts.push('已归档');
       const processing = PROCESSING_LABEL[item.processingStatus] || '';
       if (processing) parts.push(processing);
@@ -564,8 +584,8 @@ window.__ModuleLoader__.load({
         onMouseEnter: () => setHover(true),
         onMouseLeave: () => setHover(false),
         onClick: props.onShow, // ui-copy-ignore
-        'aria-label': `查看记忆 ${item.title || item.id}${reason ? `，${reason}` : ''}`,
-        title: reason ? `${item.title || item.id}，${reason}` : (item.title || item.id),
+        'aria-label': `查看记忆 ${item.title || '记忆'}${reason ? `，${reason}` : ''}`,
+        title: reason ? `${item.title || '记忆'}，${reason}` : (item.title || '记忆'),
         style: { // ui-copy-ignore
           display: 'flex', alignItems: 'flex-start', gap: '7px', width: '100%', minWidth: 0, textAlign: 'left',
           border: 'none', borderRadius: '8px', padding: '3px 7px', cursor: 'pointer', color: 'inherit',
@@ -575,7 +595,7 @@ window.__ModuleLoader__.load({
       },
       h('span', { 'aria-hidden': 'true', style: { flex: '0 0 auto', alignSelf: 'stretch', width: '2px', minHeight: '10px', borderRadius: '999px', background: props.tone, opacity: 0.85 } }),
       h('span', { style: { display: 'flex', flexDirection: 'column', gap: '1px', flex: '1 1 auto', minWidth: 0 } },
-        h('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, item.title || item.id),
+        h('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, item.title || '记忆'),
         h('span', { style: { display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, fontSize: '11px', lineHeight: '16px', color: 'var(--dsw-alias-label-secondary)' } },
           reason ? h('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, reason) : null,
           h('span', { style: { marginLeft: 'auto', flex: '0 0 auto', fontVariantNumeric: 'tabular-nums' } }, refMetaOf(item)),
@@ -770,6 +790,46 @@ window.__ModuleLoader__.load({
         return false;
       }
     };
+    /**
+     * 解释模式只在本机、按会话记；默认关，零命中原因不打扰。
+     * 面板开关与对话末尾共用同一条广播。
+     */
+    const explainBus = (() => {
+      const key = '__liteMemoryExplainBus'; // ui-copy-ignore
+      if (!(globalThis[key] instanceof Set)) globalThis[key] = new Set();
+      return globalThis[key];
+    })();
+    const explainKeyOf = (sessionId) => `lite-memory:explain:${sessionId || 'default'}`;
+    const explainModeOf = (sessionId) => {
+      const store = displayStoreOf();
+      if (!store) return false;
+      try {
+        return store.getItem(explainKeyOf(sessionId)) === '1';
+      } catch {
+        return false;
+      }
+    };
+    const setExplainMode = (sessionId, on) => {
+      const store = displayStoreOf();
+      if (!store) return false;
+      try {
+        store.setItem(explainKeyOf(sessionId), on === true ? '1' : '0');
+      } catch {
+        return false;
+      }
+      for (const listener of [...explainBus]) {
+        try {
+          listener();
+        } catch {
+          // 单个订阅坏掉不影响其它面板。
+        }
+      }
+      return true;
+    };
+    const watchExplain = (listener) => {
+      explainBus.add(listener);
+      return () => explainBus.delete(listener);
+    };
     /** 功能关闭时视图统一回列表，不保留一个画不出来的页签。 */
     const graphViewOf = (enabled, view) => (enabled === true && view === 'graph' ? 'graph' : 'list');
     const viewModeOf = (display, view) => {
@@ -803,6 +863,15 @@ window.__ModuleLoader__.load({
       return reduced;
     };
 
+    /** 同标题（去空白后）出现几次；体检与重复标题筛选共用。 */
+    const titleCountsOf = (records) => {
+      const counts = new Map();
+      (Array.isArray(records) ? records : EMPTY).forEach((record) => {
+        const title = typeof record.title === 'string' ? record.title.trim() : '';
+        if (title) counts.set(title, (counts.get(title) || 0) + 1);
+      });
+      return counts;
+    };
     /** 标签/话题按精确值筛选；只有自由搜索才用包含匹配。 */
     const filterRecords = (records, query, hub) => {
       const rows = Array.isArray(records) ? records : EMPTY;
@@ -814,12 +883,36 @@ window.__ModuleLoader__.load({
       if (kind === 'topic' && value) {
         return rows.filter((record) => record.topicKey === value);
       }
+      if (kind === 'duplicate' || kind === 'unread' || kind === 'noWhen') {
+        const counts = titleCountsOf(rows);
+        return rows.filter((record) => {
+          if (kind === 'unread') return !record.lastUsed;
+          if (kind === 'noWhen') return !record.when;
+          const title = typeof record.title === 'string' ? record.title.trim() : '';
+          return Boolean(title) && counts.get(title) > 1;
+        });
+      }
       const needle = typeof query === 'string' ? query.trim().toLowerCase() : '';
       if (!needle) return rows;
       return rows.filter((record) => {
         const tags = Array.isArray(record.tags) ? record.tags.join(' ') : '';
         return `${record.title || ''} ${record.summary || ''} ${tags} ${record.topicKey || ''} ${KIND_LABEL[record.kind] || ''}`.toLowerCase().includes(needle);
       });
+    };
+
+    /** 结构体检：只看现行记录，缺的数据给 null，不猜。 */
+    const checkupOf = (records, scopes, globalSelected) => {
+      const rows = Array.isArray(records) ? records : EMPTY;
+      const counts = titleCountsOf(rows);
+      let duplicate = 0;
+      counts.forEach((count) => { if (count > 1) duplicate += 1; });
+      const globalRow = (Array.isArray(scopes) ? scopes : EMPTY).find((scope) => scope && scope.kind === 'global');
+      return {
+        duplicate,
+        unread: rows.filter((record) => !record.lastUsed).length,
+        globalEntries: globalRow && Number.isInteger(globalRow.entries) ? globalRow.entries : null,
+        globalMissingWhen: globalSelected ? rows.filter((record) => !record.when).length : null,
+      };
     };
 
     /** 记忆宫殿：房间固定，槽位固定，换项目只换陈列内容。 */
@@ -1091,7 +1184,7 @@ window.__ModuleLoader__.load({
         edges.push({ from, to, type });
       };
       for (const record of rows) {
-        nodes.push({ id: record.id, kind: 'memory', label: record.title || record.id, experimental: record.experimental === true });
+        nodes.push({ id: record.id, kind: 'memory', label: record.title || '记忆', experimental: record.experimental === true });
       }
       for (const [tag, count] of tags) {
         nodes.push({ id: `tag:${tag}`, kind: 'tag', label: `#${tag}`, count });
@@ -1589,7 +1682,7 @@ window.__ModuleLoader__.load({
           color: 'inherit', padding: '4px 8px', cursor: 'pointer', minWidth: 0,
         },
       },
-      h('span', { style: { fontSize: '12px', lineHeight: '16px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, record.title || record.id),
+      h('span', { style: { fontSize: '12px', lineHeight: '16px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, record.title || '记忆'),
       h('span', { style: { ...PANEL_MUTED, display: 'flex', alignItems: 'center', gap: '5px', minWidth: 0, lineHeight: '14px' } },
         h('span', null, KIND_LABEL[record.kind] || record.kind),
         record.experimental ? h('span', { style: { color: 'var(--dsw-alias-state-warn-primary)' } }, '实验') : null,
@@ -1770,7 +1863,7 @@ window.__ModuleLoader__.load({
           style: { height: '46px', border: '1px dashed var(--dsw-alias-border-l1)', borderRadius: '8px', opacity: 0.28 },
         });
       }
-      const title = String(record.title || record.id || '记忆');
+      const title = String(record.title || '记忆');
       return h('button', {
         type: 'button', title, 'aria-label': title,
         onClick: () => props.onPick(record.id),
@@ -1951,8 +2044,10 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false);
       const [showReason, setShowReason] = React.useState(false);
       const [showSettings, setShowSettings] = React.useState(false);
+      const [explainOn, setExplainOn] = React.useState(explainModeOf(sessionId));
       const [display, setDisplay] = React.useState({ ...DISPLAY_DEFAULTS });
       const [hubFilter, setHubFilter] = React.useState(null);
+      const [checkup, setCheckup] = React.useState(false);
       const alive = React.useRef(true);
       const generation = React.useRef(0);
       const scopeRef = React.useRef('');
@@ -2109,6 +2204,25 @@ window.__ModuleLoader__.load({
         return rules.filter((rule) => rule.state === stage);
       }, [rules, stage]);
       const selectedRuleRow = selectedRule ? rules.find((rule) => rule.id === selectedRule) : null;
+      const checkupData = checkupOf(records, data && data.scopes, globalView);
+      const globalScopeRow = (data && Array.isArray(data.scopes) ? data.scopes : EMPTY).find((scope) => scope && scope.kind === 'global');
+      const checkupJump = (hub) => { setCheckup(false); setTab('memory'); setQuery(''); setHubFilter(hub); };
+      const checkupJumpGlobal = (hub) => {
+        setCheckup(false); setQuery(''); setHubFilter(hub || null);
+        if (globalScopeRow) load(globalScopeRow.key);
+        else setTab('memory');
+      };
+      const checkupRowOf = (key, label, value, unit, onClick) => h('button', {
+        key, type: 'button', onClick,
+        style: {
+          display: 'flex', alignItems: 'center', gap: '8px', width: '100%', minWidth: 0,
+          padding: '7px 9px', border: 'none', background: 'transparent', color: 'inherit',
+          font: 'inherit', textAlign: 'left', cursor: 'pointer',
+          borderBottom: '1px solid var(--dsw-alias-border-l1)',
+        },
+      },
+      h('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, label),
+      h('span', { style: { marginLeft: 'auto', flex: '0 0 auto', fontVariantNumeric: 'tabular-nums', opacity: 0.72 } }, value === null || value === undefined ? '—' : `${value} ${unit}`));
       const detailRecord = selectedMemory ? records.find((record) => record.id === selectedMemory) : null;
 
       const onPickNode = (node) => {
@@ -2219,6 +2333,18 @@ window.__ModuleLoader__.load({
         selectedKey ? () => setDisplayFlag(key, display[key] !== true) : undefined,
       );
 
+      const explainToggle = () => switchItem(
+        '解释模式',
+        explainOn ? '零命中时说明原因' : '零命中时不出提示',
+        explainOn,
+        !sessionId,
+        sessionId ? () => {
+          const next = explainOn !== true;
+          setExplainOn(next);
+          setExplainMode(sessionId, next);
+        } : undefined,
+      );
+
       const switchItem = (label, hint, on, disabled, onClick) => h('div', {
         style: { display: 'flex', flexDirection: 'column', gap: '1px', minWidth: 0, opacity: disabled && !on ? 0.55 : 1 },
       },
@@ -2238,6 +2364,7 @@ window.__ModuleLoader__.load({
           switchItem('自进化', evolutionOn ? '实验功能，会增加 token 消耗' : '从反馈里整理经验', evolutionOn, busy || !evolution || !canToggle || !memoryOn, toggleEvolution), // ui-copy-ignore 用户指定文案
           showSettings ? displayToggle('启用图谱', 'graph') : null,
           showSettings ? displayToggle('启用记忆宫殿', 'palace') : null,
+          showSettings ? explainToggle() : null,
         ),
       !globalView && !canToggle ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, '只读，切换回当前项目后可修改') : null,
       note ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px', color: 'var(--dsw-alias-state-error-primary)' } }, note) : null,
@@ -2388,7 +2515,15 @@ window.__ModuleLoader__.load({
             fontVariantNumeric: 'tabular-nums',
           },
         }, `${label} ${countText(key)}`)),
-        h('span', { style: { marginLeft: 'auto' } }, display.graph ? viewToggleOf(evolutionView, setEvolutionView, '自进化视图') : null),
+        h('span', { style: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '8px' } },
+          h('button', {
+            type: 'button', 'aria-pressed': checkup, onClick: () => setCheckup((value) => !value),
+            style: {
+              ...PANEL_LINK, height: '30px', opacity: checkup ? 0.92 : 0.68,
+              borderBottom: checkup ? '1px solid currentColor' : '1px solid transparent',
+            },
+          }, '结构体检'),
+          display.graph ? viewToggleOf(evolutionView, setEvolutionView, '自进化视图') : null),
       );
 
       const stageLabel = (stageFilters.find(([key]) => key === stage) || ['all', '全部'])[1];
@@ -2439,6 +2574,18 @@ window.__ModuleLoader__.load({
         emptyText: evolutionEmptyText, ariaLabel: '经验关系图',
         legend: '实心 经验 · 空心 条件 · 虚线 共用条件 · 点经验查看',
       }));
+      const evolutionCheckupPane = h('div', {
+        style: {
+          ...PANEL_CARD, padding: '4px', flex: '0 0 auto', minHeight: 0, overflowY: 'auto',
+          display: 'flex', flexDirection: 'column', gap: 0,
+        },
+      },
+      checkupRowOf('duplicate', '重复标题', checkupData.duplicate, '组', () => checkupJump({ kind: 'duplicate', display: '重复标题' })),
+      checkupRowOf('global', '全局条目超 200', checkupData.globalEntries, '条', () => checkupJumpGlobal()),
+      checkupRowOf('globalWhen', '全局缺适用条件', checkupData.globalMissingWhen, '条',
+        () => checkupJumpGlobal({ kind: 'noWhen', display: '全局缺适用条件' })),
+      checkupRowOf('unread', '从未读过', checkupData.unread, '条', () => checkupJump({ kind: 'unread', display: '从未读过' })));
+
       const evolutionTab = evolutionFailed ? evolutionFailed : h('div', { role: 'tabpanel', 'aria-label': '自进化', style: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: '9px' } },
         h('div', { style: { ...PANEL_CARD, padding: '9px 11px', display: 'flex', alignItems: 'flex-start', gap: '8px', flex: '0 0 auto' } },
           h('span', { style: { flex: '0 0 auto', width: '6px', height: '6px', marginTop: '5px', borderRadius: '999px', background: effectiveEnabled ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-label-secondary)', opacity: 0.8 } }),
@@ -2456,11 +2603,11 @@ window.__ModuleLoader__.load({
         h('div', {
           style: {
             flex: 1, minHeight: 0, display: 'grid', gap: '10px',
-            gridTemplateColumns: selectedRuleRow ? 'minmax(0, 1fr) minmax(280px, 340px)' : 'minmax(0, 1fr)',
+            gridTemplateColumns: !checkup && selectedRuleRow ? 'minmax(0, 1fr) minmax(280px, 340px)' : 'minmax(0, 1fr)',
           },
         },
-        evolutionViewActive === 'graph' ? evolutionGraphPane : evolutionListPane,
-        evolutionDetailPane),
+        checkup ? evolutionCheckupPane : (evolutionViewActive === 'graph' ? evolutionGraphPane : evolutionListPane),
+        checkup ? null : evolutionDetailPane),
       );
 
       const palaceLoose = activeTab === 'memory' && viewModeOf(display, memoryView) === 'palace' && !selectedMemory;
@@ -2528,12 +2675,14 @@ window.__ModuleLoader__.load({
           update: list.filter((item) => item.exposure === 'update'),
         };
       }, [refs]);
+      const [explainOn, setExplainOn] = React.useState(explainModeOf(sessionId));
+      React.useEffect(() => watchExplain(() => setExplainOn(explainModeOf(sessionId))), [sessionId]);
       const noTriggerReason = typeof props.noTriggerReason === 'string' && props.noTriggerReason
         ? props.noTriggerReason
         : (typeof refs.noTriggerReason === 'string' ? refs.noTriggerReason : '');
       if (!sessionId && refs.length === 0) return null;
       if (groups.found.length === 0 && groups.provided.length === 0 && groups.update.length === 0) {
-        return noTriggerReason
+        return explainOn && noTriggerReason
           ? h('div', { style: TAIL }, h(RefSection, { label: '搜索命中', tone: 'found', items: EMPTY, sessionId, turnKey: turn, noTriggerReason }))
           : null;
       }
@@ -2551,7 +2700,7 @@ window.__ModuleLoader__.load({
 
     // 测试缝：Node 里验引用投影，浏览器里没有任何副作用。
     if (typeof globalThis.__LITE_MEMORY_TEST__ === 'function') {
-      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf });
+      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, agoLabel, checkupOf, titleCountsOf });
     }
 
     return {

@@ -28,7 +28,7 @@ assert.equal(panel.name, 'shell.overlay');
 assert.equal(panel.order, 30);
 
 const EMPTY_CHILDREN = [];
-const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, agoLabel } = seen;
+const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, agoLabel, checkupOf, titleCountsOf } = seen;
 
 // 图谱只按真实数据画：共享标签成枢纽，显式关联成边，位置由 id 决定。
 const graph = graphOf([
@@ -306,5 +306,19 @@ assert.ok(told);
 assert.equal(JSON.stringify(told).includes('当前任务不适用'), true);
 assert.equal(explainKeyOf('s1').startsWith('lite-memory:explain:'), true);
 
+
+const checkupRows = [
+  { id: 'mem_c0000001', title: '同一件事', when: '', lastUsed: '' },
+  { id: 'mem_c0000002', title: '同一件事', when: '当 A 时', lastUsed: '2026-01-01T00:00:00.000Z' },
+  { id: 'mem_c0000003', title: '另一件', when: '当 B 时', lastUsed: '2026-01-01T00:00:00.000Z' },
+];
+const checkupScopes = [{ key: 'p', kind: 'project', entries: 3 }, { key: 'global', kind: 'global', entries: 213 }];
+assert.deepEqual(checkupOf(checkupRows, checkupScopes, false), { duplicate: 1, unread: 1, globalEntries: 213, globalMissingWhen: null });
+assert.deepEqual(checkupOf(checkupRows, checkupScopes, true), { duplicate: 1, unread: 1, globalEntries: 213, globalMissingWhen: 1 });
+assert.deepEqual(filterRecords(checkupRows, '', { kind: 'duplicate' }).map((row) => row.id), ['mem_c0000001', 'mem_c0000002']);
+assert.deepEqual(filterRecords(checkupRows, '', { kind: 'unread' }).map((row) => row.id), ['mem_c0000001']);
+assert.deepEqual(filterRecords(checkupRows, '', { kind: 'noWhen' }).map((row) => row.id), ['mem_c0000001']);
+assert.deepEqual([...titleCountsOf(checkupRows).values()], [2, 1]);
+assert.equal(checkupOf([], [], false).globalEntries, null);
 console.log('client.test.mjs: 21 passed + palace');
 
