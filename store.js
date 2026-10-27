@@ -1571,8 +1571,8 @@ export function peek(scope, query, limit = 3, options = {}) {
 }
 
 export function readEntry(scope, id, options = {}) {
-  const found = withLocks(layersFor(scope), () => {
-    for (const source of layersFor(scope)) {
+  const found = withLocks(runtimeLayers(scope), () => {
+    for (const source of runtimeLayers(scope)) {
       const index = loadIndex(source);
       const record = index.entries.find((item) => item.id === id);
       const archived = record ? null : index.archived.find((item) => item.id === id);
@@ -1593,8 +1593,9 @@ export function readEntry(scope, id, options = {}) {
     return null;
   });
   if (!found) return null;
-  /** 读过才算用过；归档的不回写（看病史不等于「在用」）。 */
-  if (!found.archived) touchUsed(found.source, [id]);
+  /** 读过才算用过；归档、被取代、过期或条件不匹配的读取都不算「在用」。 */
+  const countsAsUsage = typeof options.usage !== 'function' || options.usage(found.record) !== false;
+  if (!found.archived && countsAsUsage) touchUsed(found.source, [id]);
   return found.record;
 }
 
@@ -1682,8 +1683,8 @@ export function forget(scope, id, options = {}) {
 
 /** 直接读邻居：只给当前投影，不缓存目标正文；目标不在了就标 invalid，不拿旧版本顶上。 */
 export function readLinks(scope, id, options = {}) {
-  return withLocks(layersFor(scope), () => {
-    for (const source of layersFor(scope)) {
+  return withLocks(runtimeLayers(scope), () => {
+    for (const source of runtimeLayers(scope)) {
       const index = loadIndex(source);
       const record = index.entries.find((item) => item.id === id);
       if (!record) continue;
@@ -1702,7 +1703,7 @@ export function readLinks(scope, id, options = {}) {
 
 /** 关联目标按当前投影现场解引用：先项目层再全局层，归档和删除都算不存在。 */
 function findCurrent(id, scope, options = {}) {
-  for (const source of layersFor(scope)) {
+  for (const source of runtimeLayers(scope)) {
     let index;
     try {
       index = loadIndex(source);
@@ -1841,6 +1842,20 @@ export function findAnywhere(id) {
   return null;
 }
 
+/** 运行时只允许当前项目和全局层：别的项目仅供人类管理面只读枚举。 */
+export function runtimeLayers(scope) {
+  const out = [];
+  const seen = new Set();
+  const push = (item) => {
+    if (!item || !item.dir || seen.has(item.dir)) return;
+    seen.add(item.dir);
+    out.push(item);
+  };
+  push(scope);
+  push(globalScope());
+  return out;
+}
+
 /** 按 id 在项目层与全局层里找位置，不靠文案猜作用域；管理动作也要看得见已归档的条目。 */
 /**
  * 标题是唯一对外的句柄：当前项目找不到，就去全局和别的项目层找。
@@ -1885,7 +1900,7 @@ export function locate(scope, id, options = {}) {
 export function locateByTitle(scope, title, options = {}) {
   const wanted = normalizeText(title, 120).toLowerCase();
   if (!wanted) return null;
-  const sources = options.crossLayer ? layersFor(scope) : [scope, globalScope()];
+  const sources = options.crossLayer ? layersFor(scope) : runtimeLayers(scope);
   const want = Number.isInteger(options.revision) ? options.revision : null;
   for (const source of sources) {
     const index = loadIndex(source, options);
@@ -2647,6 +2662,14 @@ export function saveEntry(projectScope, source) {
     if (next.id) {
       const found = locateInLayers(projectScope, next.id);
       if (!found) throw new Error('没有这条记忆，改用新增');
+      /** 写了 scope 就只改那一层：同名条目在别层时不能悄悄改到别处。 */
+      const explicitScope = String(source.scope || '').trim();
+      if (explicitScope === 'global' && found.scope.key !== 'global') {
+        throw new Error('这条记忆在项目层；scope="global" 只改全局同名条目');
+      }
+      if (explicitScope === 'project' && found.scope.key === 'global') {
+        throw new Error('这条记忆在全局层；只有明确说「所有项目都这样」才改它');
+      }
       targetScope = found.scope;
     }
     /** 更新已有项目条目也必须落在确认过的根目录里。 */

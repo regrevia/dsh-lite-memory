@@ -171,7 +171,8 @@ assert.equal(render('memory_search', {}, miss), 'memory · 没有命中');
 
 const read = await exec('memory_read', { title: saved.title });
 assert.equal(read.status, 'needs_context');
-assert.ok(read.body.length > 0, '按标题读正文不受适用条件拦截，只把状态标出来');
+assert.equal(read.body, '', '条件未知时标题只能定位，不能证明适用，正文不返回');
+assert.doesNotMatch(render('memory_read', {}, read), /发版/);
 const plain = await exec('memory_read', { title: distinct.title });
 assert.equal(plain.body, '另一条');
 assert.equal(plain.revision, 1);

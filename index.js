@@ -9,6 +9,7 @@ import {
   undoChange,
   locate,
   layersFor,
+  runtimeLayers,
   findAnywhere,
   renderIndex,
   loadIndex,
@@ -810,6 +811,7 @@ const READ_PARAMS = {
   properties: {
     title: { type: 'string', description: '记忆标题，来自搜索结果或召回卡' },
     view: { type: 'string', enum: ['full', 'links'], description: '默认 full 读正文；links 只看直接相关的记忆清单，不取正文' },
+    scope: { type: 'string', enum: ['project', 'global'], description: '只在指定层解析标题；默认先当前项目再全局' },
     contextId: { type: 'string', description: '上一轮自动索引或工具结果给出的任务上下文 id；读实验规则时带上' },
   },
   additionalProperties: false,
@@ -819,6 +821,7 @@ const FORGET_PARAMS = {
   type: 'object',
   properties: {
     title: { type: 'string', description: '要忘掉的那条记忆的标题' },
+    scope: { type: 'string', enum: ['project', 'global'], description: '只在指定层解析标题；默认先当前项目再全局' },
     mode: {
       type: 'string',
       enum: ['archive', 'purge'],
@@ -834,15 +837,38 @@ function refIdOf(scope, args, label = '记忆') {
   if (id) return id;
   const title = typeof args.title === 'string' ? args.title.trim() : '';
   if (!title) throw new Error(`要读或要忘一条${label}，先给标题`);
-  /** 标题跨层解析：当前项目、全局、别的项目层都查，找到就用它的 id。 */
-  for (const target of layersFor(scope)) {
+  /** 显式指定 global 时只解析全局层：同名项目条目不会被顺手改掉。 */
+  const base = args && args.scope === 'global' ? globalScope() : scope;
+  /** 运行时只解析当前项目与全局：别的项目正文不进本会话。 */
+  for (const target of runtimeLayers(base)) {
     let index;
     try { index = loadIndex(target); } catch { continue; }
     const hit = (index.entries || []).find((entry) => entry && entry.status !== 'archived'
       && String(entry.title || '').trim() === title);
     if (hit) return hit.id;
   }
+  /** 忘掉已归档的条目也要能按标题解析到；归档不会因此重新参与召回。 */
+  for (const target of runtimeLayers(base)) {
+    let index;
+    try { index = loadIndex(target); } catch { continue; }
+    const hit = (index.archived || []).find((entry) => entry
+      && String(entry.title || '').trim() === title);
+    if (hit) return hit.id;
+  }
   throw new Error(`没有「${title}」这条记忆；先用 memory_search 对一下标题`);
+}
+
+/** 同名条目可能分布在项目层和全局层：更新前先报候选，不能先匹配。 */
+function titleCandidates(scope, title) {
+  const out = [];
+  for (const target of runtimeLayers(scope)) {
+    let index;
+    try { index = loadIndex(target); } catch { continue; }
+    const hit = (index.entries || []).find((entry) => entry && entry.status !== 'archived'
+      && String(entry.title || '').trim() === title);
+    if (hit) out.push({ id: hit.id, scope: target.key === 'global' ? 'global' : 'project' });
+  }
+  return out;
 }
 
 /** 记忆归属标记：全局 `[global]`，项目用项目目录名（如 `[DSH]`）。 */
@@ -1745,7 +1771,11 @@ export function apply(ctx, config) {
       /** 更新句柄也用标题：id 只是底层实现，模型抄标题就行。 */
       const updateTitle = String(args.updateTitle || '').trim();
       if (updateTitle) {
-        const updateId = (() => { try { return refIdOf(projectScope, { title: updateTitle }, '记忆'); } catch { return ''; } })();
+        const candidates = args.scope ? [] : titleCandidates(projectScope, updateTitle);
+        if (candidates.length > 1) {
+          return { error: `memory · 「${updateTitle}」在项目层和全局层各有一条：改全局加 scope="global"，改项目加 scope="project"` };
+        }
+        const updateId = (() => { try { return refIdOf(projectScope, { title: updateTitle, scope: args.scope }, '记忆'); } catch { return ''; } })();
         if (!updateId) return { error: `memory · 没有「${updateTitle}」这条记忆；要新增就不用 updateTitle` };
         draft.id = updateId;
       }
@@ -2089,21 +2119,20 @@ export function apply(ctx, config) {
       if (!resolved.ok) return { scope: '', status: resolved.status || 'needs_context' };
       const scope = resolved.scope;
       const scopeName = scope.key === 'global' ? '' : projectNameOf(scope);
+      /** 明确指定层时只在那一层解析标题，同名条目不会串到别的层。 */
+      const readScope = args.scope === 'global' ? globalScope() : scope;
       const context = resolved.context;
       const allowExperimental = resolved.experimental === true;
       const agent = execution?.agent;
       const win = windowOf(agent);
       const gateRuntime = resolved.held || win?.runtime
         || { projectId: scope.key, context, experimental: resolved.experimental === true };
-      /** 点名标题是小心的询问；只给 id 属于程序化取用，条件不明时不放正文。 */
-      const byTitle = Boolean(typeof args.title === 'string' && args.title.trim())
-        && !(typeof args.id === 'string' && args.id.trim());
       if (args.view === 'links') {
-        const refId = refIdOf(scope, args);
-        const source = locate(scope, refId, { crossLayer: true });
+        const refId = refIdOf(readScope, args);
+        const source = locate(readScope, refId);
         const gateOk = !source || view.eligibility(source.record, gateRuntime, 'read').ok;
-        if (!gateOk && !byTitle) return { scope: '', status: 'needs_context', links: '' };
-        const found = readLinks(scope, refId, { context, allowExperimental, runtime: gateRuntime, now: Date.now() });
+        if (!gateOk) return { scope: '', status: 'needs_context', links: '' };
+        const found = readLinks(readScope, refId, { context, allowExperimental, runtime: gateRuntime, now: Date.now() });
         if (!found) throw new Error(`没有「${String(args.title || args.id || '').trim()}」这条记忆`);
         if (found.status !== 'ok') {
           const withheld = { scope: '', status: found.status, links: '' };
@@ -2131,13 +2160,17 @@ export function apply(ctx, config) {
         }
         return value;
       }
-      const record = readEntry(scope, refIdOf(scope, args), { context, allowExperimental });
+      const record = readEntry(readScope, refIdOf(readScope, args), {
+        context,
+        allowExperimental,
+        /** 只有真正把正文交出去的读取才算用过：条件未知/被取代/过期不更新使用记录。 */
+        usage: (item) => view.eligibility(item, gateRuntime, 'read').ok,
+      });
       if (!record) throw new Error(`没有「${String(args.title || args.id || '').trim()}」这条记忆`);
       const gate = view.eligibility(record, gateRuntime, 'read');
-      const unknownByTitle = byTitle && gate.status === 'needs_context';
-      if (!gate.ok && !unknownByTitle) return { scope: record.scope, status: gate.status, body: '' };
-      /** 条件未知或不适用的条目只报状态：正文和标题都不能绕过自动召回的门槛（点名标题的询问除外）。 */
-      if (record.status !== 'ok' && record.status !== 'archived' && !unknownByTitle) {
+      if (!gate.ok) return { scope: record.scope, status: gate.status, body: '' };
+      /** 条件未知或不适用的条目只报状态：标题只能定位，不能证明适用，正文一律不先返回。 */
+      if (record.status !== 'ok' && record.status !== 'archived') {
         return { scope: record.scope, status: record.status === 'needs_context' ? 'needs_context' : 'not_applicable', body: '' };
       }
       const revision = record.revision || 1;
@@ -2151,7 +2184,6 @@ export function apply(ctx, config) {
         status: record.status,
         kind: record.kind || 'note',
         body,
-        ...(unknownByTitle ? { status: 'needs_context' } : {}),
       };
       if (win) {
         if (!affordableTool(win, 0)) return { scope: '', status: 'budget_exhausted' };
@@ -2217,6 +2249,13 @@ export function apply(ctx, config) {
       const scope = scopeOf(cwdOf(execution));
       const projectScopeName = projectNameOf(scope);
       if (!memoryEnabled(scope)) return { title: '', scope: '', mode: 'memory_disabled' };
+      const forgetTitle = String(args.title || args.id || '').trim();
+      if (!args.scope && args.mode) {
+        const candidates = titleCandidates(scope, forgetTitle);
+        if (candidates.length > 1) {
+          throw new Error(`「${forgetTitle}」在项目层和全局层各有一条：删全局加 scope="global"，删项目加 scope="project"`);
+        }
+      }
       const refId = refIdOf(scope, args);
       const located = locate(scope, refId);
       if (!located && !args.mode) throw new Error(`没有「${String(args.title || args.id || '').trim()}」这条记忆`);

@@ -234,6 +234,10 @@ export function contextWithTask(context = {}, task = {}) {
 export function eligibility(record, runtime = {}, purpose = 'read', now = Date.now()) {
   if (!record) return { ok: false, status: 'gone', reason: 'gone' };
   if (record.status === 'archived') return { ok: false, status: 'gone', reason: 'archived' };
+  /** 生命周期与手动检索共用一条：被取代或过期的条目不再像现行规则一样进入召回和正文读取。 */
+  if (record.supersededBy) return { ok: false, status: 'gone', reason: 'superseded' };
+  const validUntil = Date.parse(record.validUntil || '');
+  if (Number.isFinite(validUntil) && validUntil <= now) return { ok: false, status: 'gone', reason: 'expired' };
   const pid = runtime && runtime.projectId;
   if (pid && record.ownerProjectId && record.ownerProjectId !== pid) {
     return { ok: false, status: 'not_applicable', reason: 'owner_mismatch' };
