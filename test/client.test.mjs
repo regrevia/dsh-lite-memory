@@ -229,7 +229,7 @@ assert.equal(nodeTypes(firstPaint).includes(MemoryPalace), false);
 assert.equal(JSON.stringify(nodeTypes(firstPaint)).includes('MemoryPalace'), false);
 
 
-// 记忆宫殿：固定四间，空房隐藏，未知类型有归处。
+// 记忆宫殿：固定四间，空房保留位置，未知类型有归处。
 const palaceRecord = (id, kind, title = id) => ({ id, kind, title });
 const palaceRooms = palaceRoomsOf([
   palaceRecord('mem_1', 'note'), palaceRecord('mem_2', 'pointer'), palaceRecord('mem_3', 'procedure'),
@@ -239,7 +239,8 @@ const palaceRooms = palaceRoomsOf([
 assert.deepEqual(palaceRooms.map((room) => room.name), ['习惯与规范', '方法与经验', '资料与入口', '其他记录']);
 assert.deepEqual(palaceRooms.map((room) => room.total), [2, 2, 2, 2]);
 assert.equal(palaceRoomIdOf('unknown_kind'), 'notes');
-assert.equal(palaceRoomsOf([palaceRecord('mem_9', 'note')]).length, 1);
+assert.deepEqual(palaceRoomsOf([palaceRecord('mem_9', 'note')]).map((room) => room.total), [0, 0, 0, 1]);
+assert.equal(palaceRoomsOf([]).length, 4);
 // 每页 24 条；页码夹在有效范围内。
 const palaceMany = Array.from({ length: 25 }, (_, index) => palaceRecord(`mem_${index}`, 'preference', `P${index}`));
 assert.equal(palaceRoomsOf(palaceMany)[0].pages, 2);

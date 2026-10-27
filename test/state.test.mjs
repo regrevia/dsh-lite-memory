@@ -145,10 +145,10 @@ test('D02 响应丢了：同一 operationId 重放回执，不再写一遍', () 
   assert.throws(() => transact(scope, { operationId: 'op-1', payloadDigest: 'digest-b' }, note), /不同内容/);
 });
 
-test('D08 别家进程占着锁：报忙，不猜也不抢', () => {
+test('D08 活进程占着锁：报忙，不猜也不抢（死 pid 的残留锁另行回收）', () => {
   const scope = fresh('d08-lock');
   fs.mkdirSync(scope.dir, { recursive: true });
-  fs.writeFileSync(path.join(scope.dir, '.lock'), '999999:deadbeef');
+  fs.writeFileSync(path.join(scope.dir, '.lock'), `${process.pid}:deadbeef`);
   assert.throws(() => transact(scope, {}, addNote('一条', '正文')), (error) => error instanceof StateError && error.code === 'busy');
   assert.equal(fs.existsSync(stateFile(scope)), false);
   fs.rmSync(path.join(scope.dir, '.lock'));
@@ -479,6 +479,125 @@ test('写入重试不堆临时副本：固定临时名写前清理，成功后�
   assert.equal(next.state.generation, before.state.generation + 1);
   assert.deepEqual(fs.readdirSync(scope.dir).filter((name) => name.endsWith('.tmp')), []);
   assert.equal(JSON.parse(raw(scope)).payload.generation, next.state.generation);
+});
+
+
+/** 崩溃残留的 .lock：死 pid 能自动回收，活 pid 仍然 busy，迟到的新锁不能被误删。 */
+const lockPath = (scope) => path.join(scope.dir, '.lock');
+const writeLock = (scope, token) => {
+  fs.mkdirSync(scope.dir, { recursive: true });
+  fs.writeFileSync(lockPath(scope), token);
+};
+const deadPid = () => {
+  for (const pid of [999999, 999998, 999997, 888888]) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error.code === 'ESRCH') return pid;
+    }
+  }
+  return null;
+};
+
+test('崩溃残留的锁（死 pid）自动回收，不再卡 busy', () => {
+  const pid = deadPid();
+  if (pid === null) return;
+  const scope = fresh('stale-lock-dead');
+  writeLock(scope, `${pid}:deadbeef`);
+  const started = Date.now();
+  const result = withScopeLock(scope, () => 'locked');
+  const elapsed = Date.now() - started;
+  assert.equal(result, 'locked');
+  assert.ok(elapsed < 300, `回收要立刻重试，实际等了 ${elapsed}ms`);
+  assert.equal(fs.existsSync(lockPath(scope)), false, '退出时自己的锁要删掉');
+});
+
+test('活 pid 的锁不回收：仍然报 busy，也不删别人的锁', () => {
+  const scope = fresh('stale-lock-live');
+  const token = `${process.pid}:other`;
+  writeLock(scope, token);
+  fs.utimesSync(lockPath(scope), new Date(0), new Date(0));
+  const started = Date.now();
+  assert.throws(() => withScopeLock(scope, () => 'never'), (error) => error.code === 'busy');
+  assert.ok(Date.now() - started >= LIMITS.lockWaitMs - 50, '活锁要等满等待窗口');
+  assert.equal(fs.readFileSync(lockPath(scope), 'utf8'), token, '活进程的锁一个字节都不能动');
+});
+
+test('回收窗口里锁被换成活 token：不删别人的新锁，最终报 busy', () => {
+  const pid = deadPid();
+  if (pid === null) return;
+  const scope = fresh('stale-lock-race');
+  const stale = `${pid}:stale`;
+  const live = `${process.pid}:live`;
+  writeLock(scope, stale);
+  const originalRead = fs.readFileSync;
+  const originalWrite = fs.writeFileSync;
+  let swapped = false;
+  /**
+   * 真正注入竞态：回收函数第一次读到的还是死 pid 的 token，就在它读完之后、
+   * 二次校验之前，另一个进程把锁换成了活 token。回收必须放弃删除。
+   */
+  fs.readFileSync = function (target, ...rest) {
+    const result = originalRead.call(fs, target, ...rest);
+    if (!swapped && String(target) === lockPath(scope)) {
+      swapped = true;
+      originalWrite.call(fs, lockPath(scope), live);
+    }
+    return result;
+  };
+  try {
+    assert.throws(() => withScopeLock(scope, () => 'never'), (error) => error.code === 'busy');
+    assert.equal(swapped, true, '竞态注入没生效，用例等于没测');
+    assert.equal(originalRead.call(fs, lockPath(scope), 'utf8'), live, '换过主人的锁不能被误删');
+  } finally {
+    fs.readFileSync = originalRead;
+    fs.rmSync(lockPath(scope), { force: true });
+  }
+});
+
+test('P0-B 坏 state + 好 prev：从上一版恢复，坏字节留成副本，写入继续', () => {
+  const scope = fresh('p0b-recover');
+  transact(scope, { expectCreate: true }, addNote('第一条', '正文一'));
+  transact(scope, { expected: { generation: 1 } }, addNote('第二条', '正文二'));
+  const broken = '{"format":';
+  fs.writeFileSync(stateFile(scope), broken);
+  const first = load(scope);
+  assert.equal(first.recovered, true);
+  assert.equal(first.state.generation, 1, '采用上一版，不能凭空造新代数');
+  assert.equal(first.state.entries.length, 1);
+  assert.match(first.recovery.message, /已从上一版恢复/);
+  assert.equal(fs.readFileSync(first.recovery.corruptFile, 'utf8'), broken, '原始字节要原样保留');
+  assert.equal(fs.readFileSync(stateFile(scope), 'utf8'), broken, '读路径不许静默覆盖坏文件');
+  assert.equal(fs.readdirSync(scope.dir).filter((name) => name.startsWith('state.corrupt-')).length, 1);
+  load(scope);
+  assert.equal(fs.readdirSync(scope.dir).filter((name) => name.startsWith('state.corrupt-')).length, 1, '同一份坏字节不重复堆副本');
+  const written = transact(scope, { expected: { generation: 1 } }, addNote('第三条', '正文三'));
+  assert.equal(written.changed, true);
+  const after = load(scope);
+  assert.equal(after.recovered, false);
+  assert.equal(after.state.generation, 2);
+  assert.equal(after.state.entries.length, 2);
+  assert.doesNotThrow(() => JSON.parse(fs.readFileSync(path.join(scope.dir, 'state.prev.json'), 'utf8')), 'prev 不能被坏字节污染');
+});
+
+test('P0-B 坏 state 且没有 prev：报错给出损坏副本与可执行的恢复路径', () => {
+  const scope = fresh('p0b-noprev');
+  fs.mkdirSync(scope.dir, { recursive: true });
+  const broken = '{"format":';
+  fs.writeFileSync(stateFile(scope), broken);
+  let error = null;
+  try {
+    load(scope);
+  } catch (caught) {
+    error = caught;
+  }
+  assert.ok(error, '坏 state 不能当空库');
+  assert.equal(error.code, 'corrupt');
+  assert.match(error.message, /state\.prev\.json/, '要给出上一版路径');
+  assert.match(error.message, /恢复步骤/);
+  assert.ok(error.recovery && error.recovery.corruptFile, '要指出损坏副本');
+  assert.equal(fs.readFileSync(error.recovery.corruptFile, 'utf8'), broken);
+  assert.equal(fs.readFileSync(stateFile(scope), 'utf8'), broken);
 });
 
 for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });

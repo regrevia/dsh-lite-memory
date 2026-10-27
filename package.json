@@ -33,6 +33,9 @@
     "README.md",
     "TRIGGERS.md",
     "docs",
+    "!docs/competitive-notes.md",
+    "!docs/ha-audit.md",
+    "!docs/ROADMAP.md",
     "LICENSE",
     "bench",
     "test"

@@ -41,12 +41,12 @@ const rooms = palaceRoomsOf([
 assert.deepEqual(rooms.map((room) => room.name), ['习惯与规范', '方法与经验', '资料与入口', '其他记录']);
 assert.deepEqual(rooms.map((room) => room.total), [2, 2, 2, 2]);
 assert.equal(palaceRoomIdOf('unknown_kind'), 'notes');
-assert.equal(palaceRoomsOf([record('mem_9', 'note')]).length, 1, '空房间应隐藏');
+assert.deepEqual(palaceRoomsOf([record('mem_9', 'note')]).map((room) => room.total), [0, 0, 0, 1], '空房间保留位置');
 
 // 一页固定 24 个槽位，页码夹在有效范围内。
 const many = Array.from({ length: 25 }, (_, index) => record(`mem_${index}`, 'preference', `P${index}`));
 const manyRooms = palaceRoomsOf(many);
-assert.equal(manyRooms.length, 1);
+assert.equal(manyRooms.length, 4);
 assert.equal(manyRooms[0].total, 25);
 assert.equal(manyRooms[0].pages, 2);
 const first = palaceRoomPageOf(many, 'habits', 1);

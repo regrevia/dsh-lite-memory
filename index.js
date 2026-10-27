@@ -641,6 +641,9 @@ function refsOf(hits) {
     revision: item.revision || 1,
     status: item.status || 'ok',
     origin: item.origin === 'project_evolution' ? 'project_evolution' : 'user_explicit',
+    /** 界面要按类型分开展示（偏好/约定/流程/资料），维护字段不进正文。 */
+    kind: typeof item.kind === 'string' && item.kind ? item.kind : 'note',
+    when: typeof item.when === 'string' ? item.when : '',
   }));
 }
 
@@ -1552,6 +1555,7 @@ export function apply(ctx, config) {
         scope: value.scope || '',
         revision: value.revision || 0,
         changed: value.changed === true,
+        recordKind: typeof value.kind === 'string' && value.kind ? value.kind : '',
         mode: value.needsScope ? 'needs_scope'
           : value.existingId ? 'duplicate'
             : value.needsResolution ? 'needs_resolution'
@@ -1564,6 +1568,7 @@ export function apply(ctx, config) {
           title: { type: 'string' },
           summary: { type: 'string' },
           when: { type: 'string' },
+          kind: { type: 'string' },
           summaryShortened: { type: 'boolean' },
           fullTextSaved: { type: 'boolean' },
           revision: { type: 'integer' },
@@ -1677,9 +1682,9 @@ export function apply(ctx, config) {
         title: saved.record.title,
         summary: saved.record.summary,
         when: saved.record.when || '',
+        kind: saved.record.kind || 'note',
         summaryShortened: Boolean(saved.draft?.summaryShortened),
         fullTextSaved: Boolean(saved.draft?.fullTextSaved ?? saved.draft?.fullTextInBody),
-        summaryShortened: Boolean(saved.draft?.summaryShortened),
         revision: saved.record.revision || 1,
         merged: saved.merged,
         changed: !saved.noop,
@@ -1764,8 +1769,10 @@ export function apply(ctx, config) {
                 revision: { type: 'integer' },
                 status: { type: 'string' },
                 origin: { type: 'string' },
+                kind: { type: 'string' },
+                when: { type: 'string' },
               },
-              required: ['id', 'title', 'scope', 'revision', 'status', 'origin'],
+              required: ['id', 'title', 'scope', 'revision', 'status', 'origin', 'kind', 'when'],
               additionalProperties: false,
             },
           },
@@ -1889,6 +1896,7 @@ export function apply(ctx, config) {
           scope: { type: 'string' },
           scopeName: { type: 'string' },
           origin: { type: 'string', enum: ['user_explicit', 'project_evolution'] },
+          kind: { type: 'string' },
           status: { type: 'string', enum: ['ok', 'archived', 'needs_context', 'not_applicable', 'gone', 'budget_exhausted', 'memory_disabled'] },
           body: { type: 'string' },
           links: { type: 'string' },
@@ -1926,6 +1934,7 @@ export function apply(ctx, config) {
         scope: value.scope || '',
         revision: value.revision || 0,
         origin: value.origin === 'project_evolution' ? 'project_evolution' : 'user_explicit',
+        recordKind: typeof value.kind === 'string' && value.kind ? value.kind : '',
         status: value.status || 'ok',
       }),
     },
@@ -1990,6 +1999,7 @@ export function apply(ctx, config) {
         scope: record.scope,
         scopeName,
         status: record.status,
+        kind: record.kind || 'note',
         body,
       };
       if (win) {

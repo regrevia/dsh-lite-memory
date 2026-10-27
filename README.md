@@ -16,7 +16,7 @@ Lightweight memory for the DeepSeek Harness. No standing system prompt, nothing 
 | 场景 | 行为 |
 | --- | --- |
 | **L0** 你明确要求「记住这个」 | 立即写盘，一条确认行 |
-| **L1** 它发现有跨会话价值的经验 | 一行灰字 `memory · suggested "X" · sug_x` + 一个 `keep` 按钮；标题加一句话，看得懂才点，不点就永远不写，48 小时内不重复 |
+| **L1** 它发现有跨会话价值的经验 | 一行灰字 `memory · suggested "X" · sug_x` + 一个「保留」按钮；标题加一句话，看得懂才点，不点就永远不写，48 小时内不重复 |
 | **L2** 常识、一次性参数、凭据的值 | 永不写入 |
 
 这些行只属于产生它的那一轮：每轮按那轮自己的工具结果重建，重进会话还能看见，别的轮不会混进来。再记一次时插件自己判是更新还是新增：同层、同前置条件下，标题（或这条用过的旧标题）完全一致就更新原条目，换过说法而标题变了的旧标题记成别名以后也认得。像但不同名的不写：先在结果里回「相近：X」和它的 id，确认要更新就带那个 id 再存，确认是另一条才加 `resolution="distinct"`。更新时没给的字段保持原值，正文整段替换——旧正文只作内部撤回依据，不展示、不参与检索；前置条件不同的同一主题是两条。
@@ -32,7 +32,7 @@ Lightweight memory for the DeepSeek Harness. No standing system prompt, nothing 
 | Case | Behaviour |
 | --- | --- |
 | **L0** you ask it to remember | written immediately, one confirmation line |
-| **L1** it spots something worth keeping | one muted line `memory · suggested "X" · sug_x` with a single `keep` button — readable before you click, nothing written unless you click, at most once per two days |
+| **L1** it spots something worth keeping | one muted line `memory · suggested "X" · sug_x` with a single 「保留」 button — readable before you click, nothing written unless you click, at most once per two days |
 | **L2** common sense, one-off parameters, credential values | never written |
 
 Those lines belong to the turn that made them: each turn is rebuilt from its own tool results, so reopening the session shows them again and no other turn leaks in. Saving again updates an entry only when the title (or one of its earlier titles) matches exactly under the same precondition. A merely similar title writes nothing first: the result reports the closest entry and its id, so the caller either updates that id or re-saves with `resolution="distinct"`. An update keeps every field it was not given and replaces the body wholesale; the previous body is kept only for internal undo and never shown or searched. The same subject under different preconditions stays two entries.
@@ -43,9 +43,9 @@ Before writing, distill: the title is the conclusion and the body keeps only the
 
 ## 点一下就存 / One click, no turn
 
-`keep` 是同源直写：不产生消息、不动输入框、不打断当前回复。按钮变 `kept` 就结束了。真写过的行尾才有 `✕`，按 id 撤销：改过的条目还原成上一版（显示 `restored`），刚建的条目移入归档（显示 `archived`）；条目后来又改过就停下并说明已经变过，不覆盖后来的修改。没变、需要确认、保存失败的行没有撤销。
+「保留」是同源直写：不产生消息、不动输入框、不打断当前回复。点完按钮消失，行变成 `memory · kept`。真写过的行尾才有 `✕`，按 id 撤销：改过的条目还原成上一版（显示 `restored`），刚建的条目移入归档（显示 `archived`）；条目后来又改过就停下并说明已经变过，不覆盖后来的修改。没变、需要确认、保存失败的行没有撤销。
 
-`keep` writes straight to disk from the page: no message, no extra model turn, the input box untouched. The button turns into `kept` and that is the whole interaction. Only a row that really changed gets the `✕`, and it undoes by id: an edited entry goes back to its previous body (`restored`), a freshly created one moves to the archive (`archived`); if the entry changed again it stops and says so instead of overwriting. Noop, needs-confirmation and failed saves get no undo.
+The 「保留」 button writes straight to disk from the page: no message, no extra model turn, the input box untouched. It disappears and the row becomes `memory · kept` — that is the whole interaction. Only a row that really changed gets the `✕`, and it undoes by id: an edited entry goes back to its previous body (`restored`), a freshly created one moves to the archive (`archived`); if the entry changed again it stops and says so instead of overwriting. Noop, needs-confirmation and failed saves get no undo.
 
 ## 每轮引用条 / Per-turn references
 
@@ -119,7 +119,7 @@ Install from the DSH Plugin Manager (search `dsh-lite-memory`), or `npm pack` an
 
 `memory_save` · `memory_suggest` · `memory_search` · `memory_read` · `memory_forget`
 
-完整触发规则见 [TRIGGERS.md](TRIGGERS.md)；性能与 UI 门禁的实测数字见 [docs/BENCH.md](docs/BENCH.md)。 / Full trigger rules: [TRIGGERS.md](TRIGGERS.md); measured performance and UI-gate evidence: [docs/BENCH.md](docs/BENCH.md).
+完整触发规则见 [TRIGGERS.md](TRIGGERS.md)，内部判定契约（准入顺序、状态码、写入/更新/失败语义）见 [docs/CONVENTIONS.md](docs/CONVENTIONS.md)；性能与 UI 门禁的实测数字见 [docs/BENCH.md](docs/BENCH.md)。 / Full trigger rules: [TRIGGERS.md](TRIGGERS.md); internal decision contract: [docs/CONVENTIONS.md](docs/CONVENTIONS.md); measured performance and UI-gate evidence: [docs/BENCH.md](docs/BENCH.md).
 
 ## License
 

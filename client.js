@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
     const KEEP_OFF = { ...KEEP_STYLE, opacity: 0.45, cursor: 'default' };
     const DROP = { flex: '0 0 auto', border: 'none', background: 'transparent', color: 'inherit', padding: '0 2px', fontSize: '12px', lineHeight: '18px', opacity: 0.55, cursor: 'pointer' };
     const DOCK = { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0, fontSize: '12px', lineHeight: '1.6' };
-    const TAIL = { ...DOCK, margin: '4px 0 2px', opacity: 0.9 };
+    const TAIL = { ...DOCK, margin: '4px 0 2px' };
     const CHIP = { alignSelf: 'flex-start', border: 'none', background: 'transparent', color: 'inherit', padding: 0, fontSize: '12px', lineHeight: '1.6', opacity: 0.6, cursor: 'pointer', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
     const ITEM = { alignSelf: 'flex-start', border: 'none', background: 'transparent', color: 'inherit', padding: 0, fontSize: '12px', lineHeight: '1.6', opacity: 0.75, cursor: 'pointer', textAlign: 'left', width: '100%', minWidth: 0, maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
     const BODY = { margin: '2px 0 4px', padding: '4px 0 4px 8px', borderLeft: '1px solid currentColor', opacity: 0.7, whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '180px', overflowY: 'auto' };
@@ -528,10 +528,66 @@ window.__ModuleLoader__.load({
       return `${scope}${archived}${processing ? ` · ${PROCESSING_LABEL[processing]}` : ''}`;
     };
 
+    /**
+     * 引用三层的色调：中性 / 强调 / 成功。
+     * 三档色阶：中性 / 强调 / 成功；正文用主文本色。
+     */
+    const REF_TONE = {
+      found: 'var(--dsw-alias-label-secondary)',
+      provided: 'var(--dsw-alias-brand-primary)',
+      update: 'var(--dsw-alias-state-success-primary)',
+    };
+    const REF_META = { display: 'flex', alignItems: 'center', gap: '6px', margin: '0 0 2px 2px', fontSize: '11px', lineHeight: '18px', color: 'var(--dsw-alias-label-secondary)' };
+    const REF_BODY = { margin: '2px 0 3px', padding: '3px 0 3px 9px', display: 'flex', flexDirection: 'column', gap: '3px', fontSize: '12px', lineHeight: '1.65', maxHeight: '180px', overflowY: 'auto' };
+
+    /** 出处一句话：项目/全局、来源、状态。 */
+    const refMetaOf = (item) => {
+      const parts = [item.scope === 'global' ? '全局' : '项目', item.origin === 'project_evolution' ? '自进化' : '你记的'];
+      if (item.status === 'archived') parts.push('已归档');
+      const processing = PROCESSING_LABEL[item.processingStatus] || '';
+      if (processing) parts.push(processing);
+      return parts.join(' · ');
+    };
+
+    const RefChevron = (props) => h('svg', {
+      width: 8, height: 8, viewBox: '0 0 8 8', 'aria-hidden': 'true', focusable: 'false',
+      style: { flex: '0 0 auto', opacity: 0.65, transform: props.open ? 'rotate(90deg)' : 'none' },
+    }, h('path', { d: 'M2.5 1 L5.5 4 L2.5 7', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
+
+    /** 一条引用：标题一行、原因与来源一行，窄栏也不抢宽度。 */
+    const RefRow = (props) => {
+      const [hover, setHover] = React.useState(false);
+      const item = props.item;
+      const reason = item.noTriggerReason || item.reason || '';
+      return h('button', {
+        type: 'button', // ui-copy-ignore
+        onMouseEnter: () => setHover(true),
+        onMouseLeave: () => setHover(false),
+        onClick: props.onShow, // ui-copy-ignore
+        'aria-label': `查看记忆 ${item.title || item.id}${reason ? `，${reason}` : ''}`,
+        title: reason ? `${item.title || item.id}，${reason}` : (item.title || item.id),
+        style: { // ui-copy-ignore
+          display: 'flex', alignItems: 'flex-start', gap: '7px', width: '100%', minWidth: 0, textAlign: 'left',
+          border: 'none', borderRadius: '8px', padding: '3px 7px', cursor: 'pointer', color: 'inherit',
+          background: props.active || hover ? 'var(--dsw-alias-bg-layer-2)' : 'transparent',
+          fontSize: '12px', lineHeight: '18px',
+        },
+      },
+      h('span', { 'aria-hidden': 'true', style: { flex: '0 0 auto', alignSelf: 'stretch', width: '2px', minHeight: '10px', borderRadius: '999px', background: props.tone, opacity: 0.85 } }),
+      h('span', { style: { display: 'flex', flexDirection: 'column', gap: '1px', flex: '1 1 auto', minWidth: 0 } },
+        h('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, item.title || item.id),
+        h('span', { style: { display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, fontSize: '11px', lineHeight: '16px', color: 'var(--dsw-alias-label-secondary)' } },
+          reason ? h('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, reason) : null,
+          h('span', { style: { marginLeft: 'auto', flex: '0 0 auto', fontVariantNumeric: 'tabular-nums' } }, refMetaOf(item)),
+        ),
+      ));
+    };
+
     /** 一段引用：点开是名字，再点是当前正文。 */
     const RefSection = (props) => {
       const items = Array.isArray(props.items) ? props.items : EMPTY;
       const sessionId = typeof props.sessionId === 'string' ? props.sessionId : '';
+      const tone = REF_TONE[props.tone] || REF_TONE.found;
       const [open, setOpen] = React.useState(false);
       const [shown, setShown] = React.useState(null);
       const [note, setNote] = React.useState('');
@@ -549,7 +605,7 @@ window.__ModuleLoader__.load({
       }, [sessionId, props.turnKey]);
       if (items.length === 0) {
         const reason = typeof props.noTriggerReason === 'string' ? props.noTriggerReason : '';
-        return reason ? h('div', { style: DOCK }, `${props.label ? `${props.label} 0 条 · ` : ''}${reason}`) : null;
+        return reason ? h('div', { style: { ...REF_META, margin: 0 } }, reason) : null;
       }
       const close = () => {
         generation.current += 1;
@@ -594,30 +650,28 @@ window.__ModuleLoader__.load({
           });
         });
       };
-      const rows = open ? items.map((item) => {
-        const reason = item.noTriggerReason || item.reason;
-        const label = `${scopeTag(item.scope)} ${item.title || item.id}${item.origin === 'project_evolution' ? ' · 实验' : ''}${reason ? ` · ${SHORT(reason, 36)}` : ''}`;
-        return h('button', {
-          key: `${item.scope}|${item.id}|${item.revision}`, // ui-copy-ignore
-          type: 'button', // ui-copy-ignore
-          onClick: () => show(item), // ui-copy-ignore
-          'aria-label': `查看记忆 ${item.title || item.id}${reason ? `，${reason}` : ''}`,
-          title: reason || item.title || item.id,
-          style: ITEM, // ui-copy-ignore
-        }, label);
-      }) : [];
+      const rows = open ? items.map((item) => h(RefRow, {
+        key: `${item.scope}|${item.id}|${item.revision}`, // ui-copy-ignore
+        item, tone, active: Boolean(shown && shown.id === item.id),
+        onShow: () => show(item),
+      })) : [];
       const detail = shown && shown.ref && items.some((item) => item.id === shown.id && item.revision === shown.ref.revision)
-        ? h('div', { style: BODY },
-          shown.loading ? '读取中' : null,
-          shown.gone ? '这条记忆已删除' : null,
-          shown.invalid ? '读取失败，点名字重试' : null,
+        ? h('div', { style: { ...REF_BODY, borderLeft: `2px solid ${tone}` } },
+          shown.loading ? h('span', { style: REF_META }, '读取中…') : null,
+          shown.gone ? h('span', { style: REF_META }, '这条记忆已删除') : null,
+          shown.invalid ? h('span', { style: REF_META }, '读不到正文，点名字重试') : null,
           !shown.loading && !shown.gone && !shown.invalid ? h(React.Fragment, null,
-            shown.title && shown.title !== shown.ref.title ? h('div', { style: { opacity: 0.9 } }, shown.title) : null,
-            h('div', null, versionLine(shown)),
-            shown.when ? h('div', null, shown.when) : null,
-            shown.body ? h('div', null, shown.body) : null,
+            shown.title && shown.title !== shown.ref.title
+              ? h('div', { style: { fontSize: '12px', lineHeight: '1.55', fontWeight: 600 } }, shown.title)
+              : null,
+            h('div', { style: REF_META }, versionLine(shown)),
+            shown.when ? h('div', { style: REF_META }, shown.when) : null,
+            shown.body
+              ? h('div', { style: { color: 'var(--dsw-alias-label-primary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, shown.body)
+              : null,
             h(DetailExtras, { payload: { ...shown.ref, ...shown.payload } }),
           ) : null,
+          note ? h('span', { style: REF_META }, note) : null,
         )
         : null;
       return h('div', { style: DOCK, 'data-memory-section': props.label },
@@ -625,12 +679,20 @@ window.__ModuleLoader__.load({
           type: 'button',
           onClick: () => { if (open) close(); else setOpen(true); },
           'aria-expanded': open,
-          'aria-label': `${open ? '收起' : '展开'}${props.label}`,
-          style: CHIP,
-        }, `${props.label} ${items.length} 条${open ? ' · 收起' : ''}`),
+          'aria-label': `${open ? '收起' : '展开'}${props.label}，${items.length} 条`,
+          style: {
+            alignSelf: 'flex-start', display: 'inline-flex', alignItems: 'center', gap: '6px',
+            border: 'none', background: 'transparent', padding: '1px 0', cursor: 'pointer',
+            color: 'var(--dsw-alias-label-secondary)', fontSize: '11px', lineHeight: '18px',
+          },
+        },
+        h('span', { 'aria-hidden': 'true', style: { width: '2px', height: '10px', borderRadius: '999px', background: tone, opacity: 0.9 } }),
+        h('span', null, props.label),
+        h('span', { style: { fontVariantNumeric: 'tabular-nums', opacity: 0.8 } }, String(items.length)),
+        h(RefChevron, { open }),
+        ),
         ...rows,
         detail,
-        note ? h('div', { style: BODY }, note) : null,
       );
     };
 
@@ -639,7 +701,7 @@ window.__ModuleLoader__.load({
     /** 大脑：两瓣轮廓加一条中线，状态只靠透明度和面板文字。 */
     const BrainIcon = () => h('svg', {
       width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none',
-      stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round',
+      stroke: 'currentColor', 'stroke-width': 1.5, 'stroke-linecap': 'round', 'stroke-linejoin': 'round',
       'aria-hidden': 'true', focusable: 'false',
     },
     h('path', { d: 'M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z' }),
@@ -648,7 +710,7 @@ window.__ModuleLoader__.load({
 
     const CloseIcon = () => h('svg', {
       width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none',
-      stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round',
+      stroke: 'currentColor', 'stroke-width': 1.6, 'stroke-linecap': 'round',
       'aria-hidden': 'true', focusable: 'false',
     }, h('path', { d: 'M6 6l12 12M18 6L6 18' }));
 
@@ -762,7 +824,7 @@ window.__ModuleLoader__.load({
 
     /** 记忆宫殿：房间固定，槽位固定，换项目只换陈列内容。 */
     const PALACE_PAGE_SIZE = 24;
-    const PALACE_PREVIEW = 3;
+    const PALACE_PREVIEW = 4;
     const PALACE_ROOMS = Object.freeze([
       Object.freeze({ id: 'habits', name: '习惯与规范', kinds: Object.freeze(['preference', 'convention']) }),
       Object.freeze({ id: 'methods', name: '方法与经验', kinds: Object.freeze(['procedure', 'pitfall']) }),
@@ -781,7 +843,7 @@ window.__ModuleLoader__.load({
       return PALACE_ROOMS.map((room) => {
         const items = rows.filter((record) => palaceRoomIdOf(record && record.kind) === room.id);
         return { id: room.id, name: room.name, items, total: items.length, pages: Math.max(1, Math.ceil(items.length / PALACE_PAGE_SIZE)) };
-      }).filter((room) => room.total > 0);
+      });
     };
     const palaceRoomPageOf = (records, roomId, page) => {
       const room = palaceRoomsOf(records).find((row) => row.id === roomId);
@@ -1103,6 +1165,26 @@ window.__ModuleLoader__.load({
     };
 
     /** 关系图只画真实关系；节点沿用原始 id，位置由 id 决定。 */
+    /** 图谱缩放：28px 命中区，悬停/聚焦才给底色。 */
+    const ZoomButton = (props) => {
+      const [hover, setHover] = React.useState(false);
+      return h('button', {
+        type: 'button', onClick: props.onClick, disabled: props.disabled,
+        'aria-label': props.label, title: props.label,
+        onMouseEnter: () => setHover(true),
+        onMouseLeave: () => setHover(false),
+        onFocus: () => setHover(true),
+        onBlur: () => setHover(false),
+        style: {
+          width: '28px', height: '28px', padding: 0, display: 'inline-flex',
+          alignItems: 'center', justifyContent: 'center', border: 'none',
+          borderRadius: '8px', background: hover && !props.disabled ? 'var(--dsw-alias-bg-layer-2)' : 'transparent',
+          color: 'inherit', opacity: props.disabled ? 0.35 : hover ? 0.95 : 0.72,
+          cursor: props.disabled ? 'default' : 'pointer',
+        },
+      }, props.children);
+    };
+
     const MemoryGraph = (props) => {
       const primaryKind = props.primaryKind || 'memory';
       const selectedId = props.selectedId;
@@ -1193,11 +1275,11 @@ window.__ModuleLoader__.load({
         let minX = Infinity; let maxX = -Infinity; let minY = Infinity; let maxY = -Infinity;
         for (const node of list) {
           const wide = node.kind === primaryKind && (graph.people <= 12 || hubCount === 0 || node.id === selectedId);
-          const half = node.kind === primaryKind ? (wide ? 62 : 10) : 38;
+          const half = node.kind === primaryKind ? (wide ? 62 : 54) : 38;
           minX = Math.min(minX, node.x - half);
           maxX = Math.max(maxX, node.x + half);
           minY = Math.min(minY, node.y - 16);
-          maxY = Math.max(maxY, node.y + (wide ? 28 : node.kind === primaryKind ? 12 : 24));
+          maxY = Math.max(maxY, node.y + (node.kind === primaryKind ? (wide ? 30 : 28) : 26));
         }
         const width = Math.max(380, maxX - minX + 36);
         const height = Math.max(250, maxY - minY + 36);
@@ -1210,38 +1292,79 @@ window.__ModuleLoader__.load({
       }
       const viewWidth = frame.width / zoom;
       const viewHeight = frame.height / zoom;
-      const zoomButton = (label, delta, icon) => h('button', {
-        type: 'button', onClick: () => stepZoom(delta),
-        disabled: delta > 0 ? zoom >= MAX_ZOOM : zoom <= MIN_ZOOM,
-        'aria-label': label, title: label,
-        style: {
-          width: '26px', height: '26px', padding: 0, display: 'inline-flex',
-          alignItems: 'center', justifyContent: 'center', border: 'none',
-          borderRadius: '6px', background: 'transparent', color: 'inherit',
-          opacity: delta > 0 ? (zoom >= MAX_ZOOM ? 0.28 : 0.68) : (zoom <= MIN_ZOOM ? 0.28 : 0.68),
-          cursor: 'pointer',
-        },
+      const zoomButton = (label, delta, icon) => h(ZoomButton, {
+        key: label, label, disabled: delta > 0 ? zoom >= MAX_ZOOM : zoom <= MIN_ZOOM,
+        onClick: () => stepZoom(delta),
       }, icon);
       const magnifier = (sign) => h('svg', {
         width: '15', height: '15', viewBox: '0 0 16 16', fill: 'none',
-        stroke: 'currentColor', strokeWidth: '1.4', strokeLinecap: 'round',
+        stroke: 'currentColor', 'stroke-width': '1.4', 'stroke-linecap': 'round',
         'aria-hidden': 'true',
       },
       h('circle', { cx: '6.8', cy: '6.8', r: '4.5' }),
       h('line', { x1: '10.1', y1: '10.1', x2: '14', y2: '14' }),
       h('line', { x1: '4.8', y1: '6.8', x2: '8.8', y2: '6.8' }),
       sign > 0 ? h('line', { x1: '6.8', y1: '4.8', x2: '6.8', y2: '8.8' }) : null);
+      /** 标签避让：hub 常显、选中/悬停优先，记忆标签按度数贪心排布，重叠就省掉（悬停仍出标题）。 */
+      const labelLayout = React.useMemo(() => {
+        const nodes = graph.nodes;
+        const fsOf = (primary) => (primary ? 10.5 : 10);
+        const widthOf = (text, fs) => {
+          let width = 0;
+          for (const ch of text) width += ch.charCodeAt(0) > 255 ? fs : fs * 0.56;
+          return width;
+        };
+        const rank = (node) => (node.id === selectedId ? 0 : node.id === hoveredId ? 1
+          : nearIds.has(node.id) ? 2 : node.kind === primaryKind ? 4 : 3);
+        const boxes = [];
+        const placed = new Map();
+        const hits = (box) => boxes.some((other) => !(box.x2 < other.x1 || box.x1 > other.x2 || box.y2 < other.y1 || box.y1 > other.y2));
+        const list = nodes.slice().sort((a, b) => rank(a) - rank(b) || (b.degree || 0) - (a.degree || 0));
+        /** 条目多时不全标，用度数最高的十条记忆给方向感。 */
+        const topIds = new Set(list.filter((node) => node.kind === primaryKind).slice(0, 10).map((node) => node.id));
+        for (const node of list) {
+          const isPrimary = node.kind === primaryKind;
+          if (isPrimary && !labelSet && rank(node) > 2 && !topIds.has(node.id)) continue;
+          const chars = rank(node) <= 1 ? 16 : isPrimary ? (labelSet ? 10 : 8) : 13;
+          const text = SHORT(node.label, chars);
+          const fs = fsOf(isPrimary);
+          const width = widthOf(text, fs);
+          const gap = isPrimary ? 12 : 13;
+          let spot = null;
+          for (const below of [true, false]) {
+            const baseline = below ? node.y + node.radius + gap : node.y - node.radius - gap + fs;
+            const box = { x1: node.x - width / 2 - 3, x2: node.x + width / 2 + 3, y1: baseline - fs - 2, y2: baseline + 3 };
+            if (box.y1 < 3 || box.y2 > graph.height - 3) continue;
+            if (hits(box)) continue;
+            spot = { box, baseline, below };
+            break;
+          }
+          if (!spot) continue;
+          boxes.push(spot.box);
+          placed.set(node.id, { text, isPrimary, baseline: spot.baseline, fs, width });
+        }
+        return placed;
+      }, [graph, primaryKind, selectedId, hoveredId, labelSet, nearIds]);
       return h('div', { style: { position: 'relative', flex: 1, minHeight: 0, display: 'flex' } },
         h('div', {
           style: {
-            position: 'absolute', top: '6px', right: '6px', zIndex: 2,
-            display: 'flex', alignItems: 'center', gap: '1px', padding: '2px',
+            position: 'absolute', top: '8px', right: '8px', zIndex: 2,
+            display: 'flex', alignItems: 'center', gap: '2px', padding: '2px',
             border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '8px',
             background: 'var(--dsw-alias-bg-layer-1)',
           },
         },
         zoomButton('缩小图谱', -0.25, magnifier(-1)),
-        zoomButton('放大图谱', 0.25, magnifier(1))),
+        zoomButton('放大图谱', 0.25, magnifier(1)),
+        h('button', {
+          type: 'button', onClick: () => setZoom(1),
+          'aria-label': '重置缩放', title: '重置缩放',
+          style: {
+            minWidth: '44px', height: '28px', padding: '0 6px', border: 'none', borderRadius: '8px',
+            background: 'transparent', color: 'var(--dsw-alias-label-secondary)',
+            fontSize: '11px', lineHeight: '28px', fontVariantNumeric: 'tabular-nums', cursor: 'pointer',
+          },
+        }, `${Math.round(zoom * 100)}%`)),
         h('svg', {
           ref: svgRef,
           viewBox: `${frame.x + frame.width / 2 - viewWidth / 2 + pan.x} ${frame.y + frame.height / 2 - viewHeight / 2 + pan.y} ${viewWidth} ${viewHeight}`,
@@ -1268,9 +1391,9 @@ window.__ModuleLoader__.load({
           return h('line', {
             key: `e${index}`, x1: from.x, y1: from.y, x2: to.x, y2: to.y,
             stroke: linked ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-label-secondary)',
-            strokeWidth: linked ? 1.4 : 1,
+            'stroke-width': linked ? 1.4 : 1,
             opacity: linked ? 0.72 : dimmed ? 0.08 : edge.type === 'link' ? 0.38 : 0.16,
-            strokeDasharray: edge.type === 'link' ? undefined : '2 4',
+            'stroke-dasharray': edge.type === 'link' ? undefined : '2 4',
           });
         })),
         h('g', null, orderedNodes.map((node) => {
@@ -1280,13 +1403,16 @@ window.__ModuleLoader__.load({
           const near = nearIds.has(node.id);
           const dimmed = Boolean(selectedId) && !near;
           const pick = isPrimary ? props.onPick : (pickHub || undefined);
-          const fill = !isPrimary ? 'var(--dsw-alias-label-secondary)'
-            : node.state ? (STAGE_TONE[node.state] || 'var(--dsw-alias-brand-primary)')
-              : node.experimental ? 'var(--dsw-alias-state-warn-primary)' : 'var(--dsw-alias-brand-primary)';
-          const busy = graph.people > 12;
-          /** 没有标签/主题 hub 时不能因为条目多就把名称全藏掉。 */
-          const showLabel = active || hovered || near || !isPrimary || (isPrimary && labelSet && (!busy || hubCount === 0));
-          const nameChars = active || hovered ? 15 : isPrimary ? (busy && hubCount === 0 ? 10 : 8) : 12;
+          /** 记忆是主体：实心、可读；主题/标签 hub 是背景：空心、只留轮廓。 */
+          const fill = active ? 'var(--dsw-alias-brand-primary)'
+            : isPrimary ? 'var(--dsw-alias-label-secondary)'
+              : 'none';
+          const stroke = active ? 'none'
+            : hovered || near ? 'var(--dsw-alias-brand-primary)'
+              : node.experimental ? 'var(--dsw-alias-state-warn-primary)'
+                : isPrimary ? 'none' : 'var(--dsw-alias-label-secondary)';
+          const strokeWidth = !active && (hovered || near) ? 1.3 : node.experimental ? 1 : isPrimary ? 0 : 1;
+          const label = labelLayout.get(node.id) || null;
           return h('g', {
             key: node.id,
             'data-node': 'true',
@@ -1309,20 +1435,20 @@ window.__ModuleLoader__.load({
             style: { cursor: pick ? 'pointer' : 'default', outline: 'none' },
           },
           h('circle', { r: Math.max(isPrimary ? 14 : 18, node.radius + 6), fill: 'transparent' }),
-          active ? h('circle', { r: node.radius + 5, fill: 'none', stroke: 'var(--dsw-alias-brand-primary)', strokeWidth: 1.4, opacity: 0.5 }) : null,
+          active ? h('circle', { r: node.radius + 5, fill: 'none', stroke: 'var(--dsw-alias-brand-primary)', 'stroke-width': 1.4, opacity: 0.45 }) : null,
           h('circle', {
             r: node.radius, fill,
-            opacity: active ? 1 : dimmed ? (isPrimary ? 0.3 : 0.12) : isPrimary ? 0.88 : 0.68,
-            stroke: hovered || near ? 'var(--dsw-alias-brand-primary)' : 'none',
-            strokeWidth: hovered || near ? 1.2 : 0,
+            opacity: active ? 1 : dimmed ? (isPrimary ? 0.32 : 0.14) : isPrimary ? 0.92 : 0.34,
+            stroke, 'stroke-width': strokeWidth,
           }),
-          showLabel ? h('text', {
-            y: node.radius + (isPrimary ? 11 : 13), textAnchor: 'middle',
-            fill: active || !isPrimary ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-secondary)',
-            fontSize: isPrimary ? 8.5 : 10.5,
-            fontWeight: isPrimary ? 400 : 600,
-            opacity: active ? 0.95 : isPrimary ? 0.7 : 0.82,
-          }, SHORT(node.label, nameChars)) : null,
+          label ? h('text', {
+            y: label.baseline, 'text-anchor': 'middle',
+            fill: label.isPrimary ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-secondary)',
+            'font-size': label.fs,
+            'font-weight': 500,
+            opacity: active ? 1 : dimmed ? 0.2 : label.isPrimary ? 0.9 : 0.72,
+            stroke: 'var(--dsw-alias-bg-layer-1)', 'stroke-width': 2.6, 'stroke-linejoin': 'round', 'paint-order': 'stroke',
+          }, label.text) : null,
           h('title', null, node.title || node.label),
           );
         }))),
@@ -1334,7 +1460,7 @@ window.__ModuleLoader__.load({
             color: 'var(--dsw-alias-label-secondary)', fontSize: '11px', lineHeight: '1.5',
             pointerEvents: 'none',
           },
-        }, props.legend || '圆点 记忆 · 小点 标签/主题 · 虚线 关联'),
+        }, props.legend || '实心 记忆 · 空心 标签/主题 · 虚线 归类'),
         truncated ? h('div', {
           style: {
             position: 'absolute', right: '10px', bottom: '8px', zIndex: 1,
@@ -1450,22 +1576,49 @@ window.__ModuleLoader__.load({
 
     const MemoryRow = (props) => {
       const record = props.record;
+      const [hover, setHover] = React.useState(false);
       return h('button', {
         type: 'button', onClick: props.onClick,
+        onMouseEnter: () => setHover(true),
+        onMouseLeave: () => setHover(false),
         style: {
-          display: 'flex', flexDirection: 'column', gap: '2px', width: '100%', textAlign: 'left',
-          border: 'none', borderBottom: '1px solid var(--dsw-alias-border-l1)',
-          background: props.active ? 'var(--dsw-alias-bg-layer-2)' : 'transparent',
-          color: 'inherit', padding: '8px 7px', cursor: 'pointer', minWidth: 0,
+          display: 'flex', flexDirection: 'column', gap: 0, width: '100%', textAlign: 'left',
+          border: 'none', borderBottom: '1px solid var(--dsw-alias-border-l1)', borderRadius: '6px',
+          borderLeft: `2px solid ${props.active ? 'var(--dsw-alias-brand-primary)' : 'transparent'}`,
+          background: props.active || hover ? 'var(--dsw-alias-bg-layer-2)' : 'transparent',
+          color: 'inherit', padding: '4px 8px', cursor: 'pointer', minWidth: 0,
         },
       },
-      h('span', { style: { fontSize: '12px', lineHeight: '1.45', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: 0.92 } }, record.title || record.id),
-      h('span', { style: { ...PANEL_MUTED, display: 'flex', alignItems: 'center', gap: '5px', minWidth: 0 } },
+      h('span', { style: { fontSize: '12px', lineHeight: '16px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, record.title || record.id),
+      h('span', { style: { ...PANEL_MUTED, display: 'flex', alignItems: 'center', gap: '5px', minWidth: 0, lineHeight: '14px' } },
         h('span', null, KIND_LABEL[record.kind] || record.kind),
         record.experimental ? h('span', { style: { color: 'var(--dsw-alias-state-warn-primary)' } }, '实验') : null,
         h('span', { style: { marginLeft: 'auto', flex: '0 0 auto', fontVariantNumeric: 'tabular-nums' } }, EVO_DATE(record.updated)),
       ),
       );
+    };
+
+    /** 一条经验：状态用小标签，标题独占一行。 */
+    const EvolutionRow = (props) => {
+      const rule = props.rule;
+      const [hover, setHover] = React.useState(false);
+      return h('button', {
+        type: 'button', onClick: props.onClick,
+        onMouseEnter: () => setHover(true),
+        onMouseLeave: () => setHover(false),
+        style: {
+          display: 'flex', flexDirection: 'column', gap: '1px', width: '100%', textAlign: 'left',
+          border: 'none', borderRadius: '8px', minWidth: 0,
+          borderLeft: `2px solid ${props.active ? 'var(--dsw-alias-brand-primary)' : 'transparent'}`,
+          background: props.active || hover ? 'var(--dsw-alias-bg-layer-2)' : 'transparent',
+          color: 'inherit', padding: '6px 9px', cursor: 'pointer',
+        },
+      },
+      h('span', { style: { fontSize: '12px', lineHeight: '18px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, rule.title),
+      h('span', { style: { ...PANEL_MUTED, display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, lineHeight: '16px' } },
+        h(StagePill, { state: rule.state }),
+        h('span', { style: { marginLeft: 'auto', flex: '0 0 auto', fontVariantNumeric: 'tabular-nums' } }, EVO_DATE(rule.updated)),
+      ));
     };
 
     const EvolutionDetail = (props) => {
@@ -1608,75 +1761,65 @@ window.__ModuleLoader__.load({
       );
     };
 
-    /** 2.5D 房间只画墙、地面和地毯，展品用原生按钮叠在上面。 */
-    const PalaceRoomArt = (props) => h('svg', {
-      'aria-hidden': 'true', viewBox: '0 0 320 170', preserveAspectRatio: 'none',
-      style: { position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' },
-    },
-    h('polygon', { points: '28,12 292,12 308,112 12,112', fill: 'var(--dsw-alias-bg-layer-2)', stroke: 'var(--dsw-alias-border-l1)', strokeWidth: '1' }),
-    h('polygon', { points: '28,12 12,112 0,132 0,28', fill: 'var(--dsw-alias-bg-layer-1)', stroke: 'var(--dsw-alias-border-l1)', strokeWidth: '1', opacity: '0.9' }),
-    h('polygon', { points: '292,12 308,112 320,132 320,28', fill: 'var(--dsw-alias-bg-layer-1)', stroke: 'var(--dsw-alias-border-l1)', strokeWidth: '1', opacity: '0.9' }),
-    h('polygon', { points: '12,112 308,112 320,156 0,156', fill: 'var(--dsw-alias-bg-base)', stroke: 'var(--dsw-alias-border-l1)', strokeWidth: '1' }),
-    h('path', { d: 'M96 112 L82 156 M160 112 L160 156 M224 112 L238 156', stroke: 'var(--dsw-alias-border-l1)', strokeWidth: '1', opacity: '0.45' }),
-    h('path', { d: 'M48 112 L30 156 M112 112 L100 156 M208 112 L220 156 M272 112 L290 156', stroke: 'var(--dsw-alias-border-l1)', strokeWidth: '1', opacity: '0.28' }),
-    h('path', { d: 'M18 134 H302', stroke: 'var(--dsw-alias-border-l1)', strokeWidth: '1', opacity: '0.3' }),
-    h('path', { d: 'M12 112 H308', stroke: 'var(--dsw-alias-border-l2)', strokeWidth: '1', opacity: '0.4' }),
-    h('polygon', { points: '124,120 196,120 214,144 106,144', fill: 'var(--dsw-alias-brand-primary)', opacity: props.expanded ? '0.16' : '0.1' }),
-    h('path', { d: 'M132 110 V62 Q160 40 188 62 V110', fill: 'var(--dsw-alias-bg-base)', stroke: 'var(--dsw-alias-border-l1)', strokeWidth: '1', opacity: '0.85' }),
-    h('path', { d: 'M160 62 V110', stroke: 'var(--dsw-alias-border-l1)', strokeWidth: '1', opacity: '0.5' }),
-    );
 
     const PalaceSlot = (props) => {
       const record = props.record;
       if (!record) {
         return h('div', {
           'aria-hidden': 'true',
-          style: { height: '50px', border: '1px dashed var(--dsw-alias-border-l1)', borderRadius: '8px', opacity: 0.32 },
+          style: { height: '46px', border: '1px dashed var(--dsw-alias-border-l1)', borderRadius: '8px', opacity: 0.28 },
         });
       }
       const title = String(record.title || record.id || '记忆');
-      const kindLabel = KIND_LABEL[record.kind] || record.kind || '记忆';
       return h('button', {
-        type: 'button', title, 'aria-label': `${title}，${kindLabel}`,
+        type: 'button', title, 'aria-label': title,
         onClick: () => props.onPick(record.id),
         style: {
-          height: '50px', minWidth: 0, display: 'flex', flexDirection: 'column', justifyContent: 'center',
-          gap: '1px', padding: '4px 7px', textAlign: 'left', cursor: 'pointer',
+          height: '46px', minWidth: 0, display: 'flex', flexDirection: 'column', justifyContent: 'center',
+          padding: '4px 7px', textAlign: 'left', cursor: 'pointer',
           border: `1px solid ${props.active ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-border-l1)'}`,
           borderRadius: '8px', color: 'inherit',
           background: props.active ? 'var(--dsw-alias-bg-layer-2)' : 'var(--dsw-alias-bg-base)',
         },
       },
-      h('span', { style: { fontSize: '11px', lineHeight: '1.35', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: 0.9 } }, SHORT(title, 20)),
-      h('span', { style: { ...PANEL_MUTED, fontSize: '11px' } }, kindLabel),
+      h('span', {
+        style: {
+          fontSize: '11px', lineHeight: '15px', height: '30px', overflow: 'hidden',
+          display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', wordBreak: 'break-word',
+        },
+      }, title),
       );
     };
 
     const PalaceRoomCard = (props) => {
       const room = props.room;
+      const empty = room.total === 0;
       const preview = room.items.slice(0, PALACE_PREVIEW);
       const slots = Array.from({ length: PALACE_PREVIEW }, (_, index) => preview[index] || null);
       return h('div', {
         role: 'listitem',
-        style: { ...PANEL_CARD, padding: 0, position: 'relative', overflow: 'hidden', minHeight: '172px', display: 'flex', width: '100%', flexDirection: 'column' },
+        style: { ...PANEL_CARD, padding: 0, position: 'relative', overflow: 'hidden', display: 'flex', width: '100%', flexDirection: 'column' },
       },
-      h(PalaceRoomArt, { expanded: props.expanded }),
-      h('div', { style: { position: 'relative', display: 'flex', flexDirection: 'column', gap: '9px', padding: '10px', boxSizing: 'border-box' } },
+      h('div', { style: { position: 'relative', display: 'flex', flexDirection: 'column', gap: '8px', padding: '9px 10px 10px', boxSizing: 'border-box' } },
         h('button', {
-          type: 'button', 'aria-expanded': props.expanded, 'aria-controls': `lite-palace-room-${room.id}`,
-          onClick: () => props.onToggle(room.id),
+          type: 'button', 'aria-expanded': empty ? undefined : props.expanded, 'aria-controls': empty ? undefined : `lite-palace-room-${room.id}`,
+          disabled: empty,
+          onClick: () => { if (!empty) props.onToggle(room.id); },
           style: { ...PANEL_LINK, width: '100%', display: 'flex', alignItems: 'center', gap: '7px', textAlign: 'left', opacity: 1 },
         },
-        h('span', { style: { fontSize: '12px', lineHeight: '1.4', fontWeight: 600 } }, room.name),
-        h('span', { style: { ...PANEL_MUTED, fontVariantNumeric: 'tabular-nums' } }, `${room.total} 条`),
-        h('span', { style: { ...PANEL_MUTED, marginLeft: 'auto' } }, props.expanded ? '收起' : '展开'),
+        h('span', { style: { fontSize: '12px', lineHeight: '18px', fontWeight: 600, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, room.name),
+        h('span', { style: { ...PANEL_MUTED, flex: '0 0 auto', fontVariantNumeric: 'tabular-nums' } }, `${room.total} 条`),
+        empty ? null : h('span', { style: { ...PANEL_MUTED, flex: '0 0 auto', marginLeft: 'auto', opacity: 0.6 } }, props.expanded ? '收起' : '展开'),
         ),
-        h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '6px' } },
-          slots.map((record, index) => h(PalaceSlot, {
-            key: record ? record.id : `slot-${room.id}-${index}`,
-            record, active: Boolean(record && record.id === props.selectedId), onPick: props.onPick,
-          }))),
-      ));
+        empty
+          ? h('span', { style: { ...PANEL_MUTED, padding: '2px 0 4px' } }, '还没有记录')
+          : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(96px, 1fr))', gap: '6px' } },
+            slots.map((record, index) => h(PalaceSlot, {
+              key: record ? record.id : `slot-${room.id}-${index}`,
+              record, active: Boolean(record && record.id === props.selectedId), onPick: props.onPick,
+            }))),
+      ),
+      );
     };
 
     const MemoryPalace = (props) => {
@@ -1702,7 +1845,7 @@ window.__ModuleLoader__.load({
         ], { duration: motion.duration, easing: motion.easing });
       }, [expanded, page, motion.duration, motion.easing]);
 
-      if (rooms.length === 0) {
+      if (rows.length === 0) {
         return h('div', { style: { ...PANEL_CARD, padding: '14px', minHeight: 0 } },
           h('div', { style: PANEL_MUTED }, props.emptyText || '这个项目还没有记忆'));
       }
@@ -1719,8 +1862,8 @@ window.__ModuleLoader__.load({
         'aria-current': current ? 'page' : undefined, 'aria-label': `第 ${target} 页`,
         onClick: () => goPage(target),
         style: {
-          ...PANEL_LINK, minWidth: '24px', height: '24px', padding: '0 6px', borderRadius: '6px',
-          border: '1px solid var(--dsw-alias-border-l1)', opacity: disabled ? 0.35 : current ? 0.92 : 0.62,
+          ...PANEL_LINK, minWidth: '22px', height: '22px', padding: '0 5px', borderRadius: '6px',
+          border: 'none', opacity: disabled ? 0.28 : current ? 0.85 : 0.5,
           background: current ? 'var(--dsw-alias-bg-layer-2)' : 'transparent',
           fontVariantNumeric: 'tabular-nums', cursor: disabled ? 'default' : 'pointer',
         },
@@ -1749,19 +1892,19 @@ window.__ModuleLoader__.load({
             goPage(pageInfo.pages);
           }
         },
-        style: { ...PANEL_CARD, padding: '10px', minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '10px' },
+        style: { ...PANEL_CARD, padding: '10px', minHeight: 0, flex: '0 0 auto', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '10px' },
       },
       h('div', {
         role: 'list',
         'aria-label': '记忆房间',
-        style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '9px' },
+        style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(232px, 1fr))', gap: '9px' },
       },
         rooms.map((room) => h(PalaceRoomCard, {
           key: room.id, room, expanded: room.id === expanded, selectedId: props.selectedId,
           onPick: props.onPick, onToggle: toggle,
         }))),
       h('div', { 'aria-live': 'polite', style: { ...PANEL_MUTED, marginTop: '-2px' } }, `${rooms.length} 个房间 · ${rows.length} 条`),
-      activeRoom && pageInfo
+      activeRoom && activeRoom.total > 0 && pageInfo
         ? h('section', {
           id: `lite-palace-room-${activeRoom.id}`, 'aria-label': activeRoom.name, ref: panelRef,
           style: { borderTop: '1px solid var(--dsw-alias-border-l1)', paddingTop: '9px', display: 'flex', flexDirection: 'column', gap: '8px' },
@@ -1774,7 +1917,7 @@ window.__ModuleLoader__.load({
             style: { ...PANEL_LINK, marginLeft: 'auto', height: '24px', padding: '0 7px', borderRadius: '6px', border: '1px solid var(--dsw-alias-border-l1)' },
           }, '收起'),
         ),
-        h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(6, minmax(0, 1fr))', gap: '6px' } },
+        h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(96px, 1fr))', gap: '6px' } },
           pageSlots.map((record, index) => h(PalaceSlot, {
             key: record ? record.id : `page-${pageInfo.page}-slot-${index}`,
             record, active: Boolean(record && record.id === props.selectedId), onPick: props.onPick,
@@ -2071,42 +2214,33 @@ window.__ModuleLoader__.load({
       ),
       );
 
-      const displayToggleRow = (label, key) => h('div', {
-        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', minHeight: '32px' },
-      },
-      h('span', { style: { fontSize: '12px', lineHeight: '1.4' } }, label),
-      h(Toggle, {
-        ariaLabel: label, on: display[key] === true, busy: !selectedKey,
-        onClick: selectedKey ? () => setDisplayFlag(key, display[key] !== true) : undefined,
-      }));
-      const displayBar = showSettings
-        ? h('div', {
-          role: 'group', 'aria-label': '显示设置',
-          style: { display: 'flex', flexDirection: 'column', padding: '4px 18px 8px', borderBottom: '1px solid var(--dsw-alias-border-l1)', flex: '0 0 auto' },
-        }, displayToggleRow('启用图谱', 'graph'), displayToggleRow('启用记忆宫殿', 'palace'))
-        : null;
+      const displayToggle = (label, key) => switchItem(
+        label, '', display[key] === true, !selectedKey,
+        selectedKey ? () => setDisplayFlag(key, display[key] !== true) : undefined,
+      );
 
-      const memorySwitch = h('div', { style: { ...PANEL_CARD, flex: '1 1 300px', display: 'flex', flexDirection: 'column', gap: '4px', padding: '9px 11px' } },
-        h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' } },
-          h('span', { style: { fontSize: '12px', lineHeight: '1.4', fontWeight: 600 } }, '启用记忆'),
-          h(Toggle, { ariaLabel: '启用记忆', on: memoryOn, busy: busy || !canToggle, onClick: canToggle ? toggleControl : undefined }),
+      const switchItem = (label, hint, on, disabled, onClick) => h('div', {
+        style: { display: 'flex', flexDirection: 'column', gap: '1px', minWidth: 0, opacity: disabled && !on ? 0.55 : 1 },
+      },
+      h('span', { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
+        h('span', { style: { fontSize: '12px', lineHeight: '20px', fontWeight: 600, whiteSpace: 'nowrap' } }, label),
+        h(Toggle, { ariaLabel: label, on, busy: busy || disabled, onClick: disabled ? undefined : onClick }),
+      ),
+      hint ? h('span', { style: { ...PANEL_MUTED, lineHeight: '16px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, hint) : null);
+      const evolutionOn = Boolean(memoryOn && evolution && evolution.enabled === true);
+      const switchBar = h('div', {
+        style: { display: 'flex', flexDirection: 'column', gap: '3px', padding: '7px 18px 8px', borderBottom: '1px solid var(--dsw-alias-border-l1)', flex: '0 0 auto' },
+      },
+      globalView
+        ? h('div', { style: { ...PANEL_MUTED, lineHeight: '20px' } }, '全局记忆只读')
+        : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '4px 18px' } },
+          switchItem('启用记忆', memoryOn ? '读取项目和全局记忆' : '记忆已关闭，内容只读', memoryOn, busy || !canToggle, toggleControl),
+          switchItem('自进化', evolutionOn ? '实验功能，会增加 token 消耗' : '从反馈里整理经验', evolutionOn, busy || !evolution || !canToggle || !memoryOn, toggleEvolution), // ui-copy-ignore 用户指定文案
+          showSettings ? displayToggle('启用图谱', 'graph') : null,
+          showSettings ? displayToggle('启用记忆宫殿', 'palace') : null,
         ),
-        h('div', { style: PANEL_MUTED }, '读取项目和全局记忆'), // ui-copy-ignore 用户指定文案
-      );
-      const evolutionSwitch = h('div', { style: { ...PANEL_CARD, flex: '1 1 300px', display: 'flex', flexDirection: 'column', gap: '4px', padding: '9px 11px', opacity: memoryOn ? 1 : 0.55 } },
-        h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' } },
-          h('span', { style: { fontSize: '12px', lineHeight: '1.4', fontWeight: 600 } }, '自进化'),
-          h(Toggle, { ariaLabel: '自进化', on: Boolean(memoryOn && evolution && evolution.enabled === true), busy: busy || !evolution || !canToggle || !memoryOn, onClick: canToggle && memoryOn ? toggleEvolution : undefined }),
-        ),
-        h('div', { style: PANEL_MUTED }, '从反馈中整理经验，按需使用'), // ui-copy-ignore 用户指定文案
-        h('div', { style: PANEL_MUTED }, '实验功能，会增加 token 消耗'), // ui-copy-ignore 用户指定文案
-      );
-      const switchBar = h('div', { style: { display: 'flex', alignItems: 'stretch', gap: '10px', flexWrap: 'wrap', padding: '12px 18px', borderBottom: '1px solid var(--dsw-alias-border-l1)', flex: '0 0 auto' } },
-        globalView ? h('div', { style: { ...PANEL_MUTED, padding: '2px 0' } }, '全局记忆只读') : memorySwitch,
-        globalView ? null : evolutionSwitch,
-        !memoryOn && !globalView ? h('div', { style: { ...PANEL_MUTED, flexBasis: '100%' } }, '记忆已关闭，内容只读') : null,
-        !globalView && !canToggle ? h('div', { style: { ...PANEL_MUTED, flexBasis: '100%' } }, '只读，切换回当前项目后可修改') : null,
-        note ? h('div', { style: { ...PANEL_MUTED, flexBasis: '100%', color: 'var(--dsw-alias-state-error-primary)' } }, note) : null,
+      !globalView && !canToggle ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, '只读，切换回当前项目后可修改') : null,
+      note ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px', color: 'var(--dsw-alias-state-error-primary)' } }, note) : null,
       );
 
       const switchTab = (key) => {
@@ -2130,10 +2264,14 @@ window.__ModuleLoader__.load({
         globalView ? null : tabButton('evolution', '自进化'),
       );
 
+      const filteredNow = Boolean(query || hubFilter);
       const memoryList = loading
-        ? h('div', { style: { ...PANEL_MUTED, padding: '12px 4px' } }, '读取中…')
+        ? h('div', { style: { ...PANEL_MUTED, padding: '14px 9px' } }, '读取中…')
         : filtered.length === 0
-          ? h('div', { style: { ...PANEL_MUTED, padding: '12px 4px' } }, query || hubFilter ? '没有匹配的记忆' : '还没有记忆')
+          ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '14px 9px', minWidth: 0 } },
+            h('span', { style: { ...PANEL_MUTED, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, filteredNow ? '没有匹配的记忆' : '还没有记忆'),
+            filteredNow ? h(Action, { onClick: () => { setHubFilter(null); setQuery(''); } }, '清除搜索') : null,
+          )
           : filtered.map((record) => h(MemoryRow, {
             key: record.id, record, active: record.id === selectedMemory,
             onClick: () => { setSelectedMemory(record.id); setSelectedRule(''); },
@@ -2190,6 +2328,7 @@ window.__ModuleLoader__.load({
       const memoryListPane = h('div', {
         style: {
           ...PANEL_CARD, padding: '2px 4px', minHeight: 0, overflowY: 'auto',
+          display: 'flex', flexDirection: 'column', gap: 0,
         },
       }, memoryList);
       const memoryGraphPane = h('div', {
@@ -2200,7 +2339,7 @@ window.__ModuleLoader__.load({
         selectedId: selectedMemory, onPick: onPickNode,
         onPickHub,
         emptyText: query || hubFilter ? '没有匹配的记忆' : '还没有记忆', ariaLabel: '记忆关系图',
-        legend: '大点 标签/主题 · 小点 记忆 · 虚线 关联 · 点标签筛选，点记忆看正文',
+        legend: '实心 记忆 · 空心 标签/主题 · 虚线 归类 · 点标签筛选，点记忆看正文',
       }));
       const memoryPalacePane = h(MemoryPalace, {
         key: selectedKey, records: filtered, selectedId: selectedMemory,
@@ -2259,21 +2398,14 @@ window.__ModuleLoader__.load({
             : rules.length === 0 ? (countsUnknown ? '数量未知' : '还没有整理出经验')
               : `没有${stageLabel}的经验`;
       const evolutionList = filteredRules.length === 0
-        ? h('div', { style: { ...PANEL_MUTED, padding: '12px 4px' } }, evolutionEmptyText)
-        : filteredRules.map((rule) => h('button', {
-          key: rule.id, type: 'button', onClick: () => { setSelectedRule(rule.id); setSelectedMemory(''); setShowReason(false); },
-          style: {
-            display: 'flex', flexDirection: 'column', gap: '3px', width: '100%', textAlign: 'left',
-            border: 'none', borderBottom: '1px solid var(--dsw-alias-border-l1)',
-            background: rule.id === selectedRule ? 'var(--dsw-alias-bg-layer-2)' : 'transparent',
-            color: 'inherit', padding: '8px 7px', cursor: 'pointer', minWidth: 0,
-          },
-        },
-        h('span', { style: { fontSize: '12px', lineHeight: '1.45', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: 0.92 } }, rule.title),
-        h('span', { style: { ...PANEL_MUTED, display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 } },
-          h(StagePill, { state: rule.state }),
-          h('span', { style: { marginLeft: 'auto', flex: '0 0 auto', fontVariantNumeric: 'tabular-nums' } }, EVO_DATE(rule.updated)),
-        )));
+        ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '14px 9px', minWidth: 0 } },
+          h('span', { style: { ...PANEL_MUTED, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, evolutionEmptyText),
+          stage !== 'all' && (memoryOn && evolution && evolution.enabled === true) ? h(Action, { onClick: () => setStage('all') }, '看全部') : null,
+        )
+        : filteredRules.map((rule) => h(EvolutionRow, {
+          key: rule.id, rule, active: rule.id === selectedRule,
+          onClick: () => { setSelectedRule(rule.id); setSelectedMemory(''); setShowReason(false); },
+        }));
 
       const evolutionReady = selectedKey === currentKey;
       const evolutionFailed = !evolutionReady || failed
@@ -2294,7 +2426,8 @@ window.__ModuleLoader__.load({
         : null;
       const evolutionListPane = h('div', {
         style: {
-          ...PANEL_CARD, padding: '2px 4px', minHeight: 0, overflowY: 'auto',
+          ...PANEL_CARD, padding: '4px', minHeight: 0, overflowY: 'auto',
+          display: 'flex', flexDirection: 'column', gap: '2px',
         },
       }, evolutionList);
       const evolutionGraphPane = h('div', {
@@ -2304,7 +2437,7 @@ window.__ModuleLoader__.load({
         records: filteredRules, total: filteredRules.length, graphOf: ruleGraphOf, primaryKind: 'rule',
         selectedId: selectedRule, onPick: onPickRuleNode,
         emptyText: evolutionEmptyText, ariaLabel: '经验关系图',
-        legend: '大点 条件 · 小点 经验 · 虚线 共用条件 · 点经验查看',
+        legend: '实心 经验 · 空心 条件 · 虚线 共用条件 · 点经验查看',
       }));
       const evolutionTab = evolutionFailed ? evolutionFailed : h('div', { role: 'tabpanel', 'aria-label': '自进化', style: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: '9px' } },
         h('div', { style: { ...PANEL_CARD, padding: '9px 11px', display: 'flex', alignItems: 'flex-start', gap: '8px', flex: '0 0 auto' } },
@@ -2330,7 +2463,13 @@ window.__ModuleLoader__.load({
         evolutionDetailPane),
       );
 
-      const content = h('section', { style: { flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, padding: '14px', gap: '10px' } },
+      const palaceLoose = activeTab === 'memory' && viewModeOf(display, memoryView) === 'palace' && !selectedMemory;
+      const content = h('section', {
+        style: {
+          flex: palaceLoose ? '0 1 auto' : 1, display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0,
+          padding: '12px 18px 14px', gap: '10px', overflowY: palaceLoose ? 'auto' : 'visible',
+        },
+      },
         tabBar,
         activeTab === 'memory' ? memoryTab : evolutionTab,
       );
@@ -2341,14 +2480,16 @@ window.__ModuleLoader__.load({
       },
       h('div', {
         role: 'dialog', 'aria-modal': 'true', 'aria-label': '记忆面板',
-        style: { ...PANEL_DIALOG, width: 'min(1120px, 100%)', height: 'min(760px, 100%)', boxSizing: 'border-box' },
+        style: {
+          ...PANEL_DIALOG, width: 'min(1120px, 100%)', boxSizing: 'border-box',
+          height: palaceLoose ? 'auto' : 'min(760px, 100%)', maxHeight: 'min(760px, 100%)',
+        },
       }, ...children));
 
       if (!sessionId) return null;
       if (!data) {
         return shell([
           header,
-          displayBar,
           h('div', { style: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '10px', color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' } },
             h('span', null, loading ? '读取中…' : '读不到记忆'),
             loading || !note ? null : h(Action, { onClick: () => load() }, '重试'),
@@ -2357,7 +2498,7 @@ window.__ModuleLoader__.load({
         ]);
       }
 
-      return shell([header, displayBar, switchBar, content]);
+      return shell([header, switchBar, content]);
     };
 
     /** 面板浮层。 */
@@ -2393,13 +2534,16 @@ window.__ModuleLoader__.load({
       if (!sessionId && refs.length === 0) return null;
       if (groups.found.length === 0 && groups.provided.length === 0 && groups.update.length === 0) {
         return noTriggerReason
-          ? h('div', { style: TAIL }, h(RefSection, { label: '搜索命中', items: EMPTY, sessionId, turnKey: turn, noTriggerReason }))
+          ? h('div', { style: TAIL }, h(RefSection, { label: '搜索命中', tone: 'found', items: EMPTY, sessionId, turnKey: turn, noTriggerReason }))
           : null;
       }
+      const section = (label, items, tone) => (items.length === 0
+        ? null
+        : h(RefSection, { key: label, label, tone, items, sessionId, turnKey: turn }));
       return h('div', { style: TAIL },
-        h(RefSection, { label: '搜索命中', items: groups.found, sessionId, turnKey: turn }),
-        h(RefSection, { label: '读过正文', items: groups.provided, sessionId, turnKey: turn }),
-        h(RefSection, { label: '本轮更新', items: groups.update, sessionId, turnKey: turn }),
+        section('搜索命中', groups.found, 'found'),
+        section('读过正文', groups.provided, 'provided'),
+        section('本轮更新', groups.update, 'update'),
       );
     };
 
@@ -2407,7 +2551,7 @@ window.__ModuleLoader__.load({
 
     // 测试缝：Node 里验引用投影，浏览器里没有任何副作用。
     if (typeof globalThis.__LITE_MEMORY_TEST__ === 'function') {
-      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, MemoryPalace, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf });
+      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf });
     }
 
     return {

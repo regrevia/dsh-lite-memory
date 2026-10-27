@@ -10,7 +10,7 @@ const state = await import('../state.js');
 const { upsert, search, readEntry, forget, undoChange, acceptCandidate, rejectCandidate,
   suggestionGate, noteSuggestion, findSuggestion, renderIndex, normalizeDraft, loadIndex,
   scopeOf, globalScope, LIMITS, recordCitations, listCitations, readCitationBody,
-  evolutionStatus, setEvolution } = store;
+  evolutionStatus, setEvolution, saveIndex } = store;
 
 let passed = 0;
 const test = (name, fn) => {
@@ -1211,6 +1211,117 @@ test('整理器规则顺序与开始整理时一致，按状态/最近使用排�
   const again = store.beginLearningAttempt(scope, { episodeId: '', operationId: 'order-start-2' });
   assert.equal(again.ok, true, again.reason);
   assert.deepEqual(again.rules.map((row) => row.id), organizer, '两处必须同一个顺序');
+});
+
+/** 冷存是归档正文唯一的家：写入必须和 state.json 一样 fsync 文件 + 目录，失败要整次保存失败。 */
+const traceDurability = () => {
+  const opened = new Map();
+  const synced = [];
+  const realOpen = fs.openSync;
+  const realFsync = fs.fsyncSync;
+  fs.openSync = (file, flags, ...rest) => {
+    const fd = realOpen.call(fs, file, flags, ...rest);
+    opened.set(fd, String(file));
+    return fd;
+  };
+  fs.fsyncSync = (fd) => {
+    synced.push(opened.get(fd) || '');
+    return realFsync.call(fs, fd);
+  };
+  return {
+    opened,
+    synced,
+    restore() {
+      fs.openSync = realOpen;
+      fs.fsyncSync = realFsync;
+    },
+  };
+};
+
+test('归档正文写冷存时 fsync 文件和目录（与 state.json 同一落盘序列）', () => {
+  const scope = fresh('cold-fsync-trace');
+  const created = upsert(scope, { title: '落盘冷存', summary: '冷存落盘序列', kind: 'note' }, {});
+  const trace = traceDurability();
+  try {
+    const result = forget(scope, created.record.id, { mode: 'archive' });
+    assert.equal(result.mode, 'archive');
+  } finally {
+    trace.restore();
+  }
+  const coldDir = path.join(scope.dir, 'cold');
+  assert.ok(trace.synced.some((file) => file === coldDir), `冷存目录要 fsync：${JSON.stringify(trace.synced)}`);
+  assert.ok(trace.synced.some((file) => file.startsWith(path.join(coldDir, '.')) && file.endsWith('.tmp')),
+    `冷存临时文件要先 fsync 再 rename：${JSON.stringify(trace.synced)}`);
+  const file = path.join(coldDir, `${created.record.id}.json`);
+  assert.equal(fs.existsSync(file), true);
+  assert.equal(fs.existsSync(`${file}.tmp`), false);
+});
+
+test('冷存 fsync 失败时保存失败、不发布状态、不留半个冷存文件', () => {
+  const scope = fresh('cold-fsync-fail');
+  const body = '归档正文必须能读回来';
+  const created = upsert(scope, { title: '写不进去的冷存', summary: '冷存 fsync 失败', body, kind: 'note' }, {});
+  const trace = traceDurability();
+  const coldDir = path.join(scope.dir, 'cold');
+  try {
+    const opened = trace.opened;
+    const real = fs.fsyncSync;
+    fs.fsyncSync = (fd) => {
+      const file = opened.get(fd) || '';
+      if (file.startsWith(path.join(coldDir, '.')) && file.endsWith('.tmp')) {
+        const error = new Error('injected fsync failure');
+        error.code = 'EIO';
+        throw error;
+      }
+      return real.call(fs, fd);
+    };
+    assert.throws(() => forget(scope, created.record.id, { mode: 'archive' }),
+      (error) => error.code === 'unavailable' && /归档正文没写进冷存/.test(error.message));
+  } finally {
+    trace.restore();
+  }
+  assert.equal(fs.existsSync(path.join(coldDir, `${created.record.id}.json`)), false, 'fsync 没成功就不能有权威冷存文件');
+  const tmpLeft = fs.existsSync(coldDir) ? fs.readdirSync(coldDir).filter((name) => name.endsWith('.tmp')) : [];
+  assert.deepEqual(tmpLeft, [], '失败的临时文件要清掉');
+  assert.equal(bodyOf(scope, created.record.id), body, '发布失败时热状态原样保留正文');
+  const retried = forget(scope, created.record.id, { mode: 'archive' });
+  assert.equal(retried.mode, 'archive');
+  const healed = readEntry(scope, created.record.id);
+  assert.equal(healed.status, 'archived');
+  assert.equal(healed.body, body);
+});
+
+
+test('一条冷存文件损坏不再拖死整层写入：退回热正文并重写好文件', () => {
+  const scope = fresh('cold-corrupt-heal');
+  const body = '归档正文还能从热状态找回来';
+  const created = upsert(scope, { title: '冷存坏了', summary: '损坏自愈', body, kind: 'note' }, {});
+  const coldFile = path.join(scope.dir, 'cold', `${created.record.id}.json`);
+  fs.mkdirSync(path.dirname(coldFile), { recursive: true });
+  fs.writeFileSync(coldFile, '{"broken":');
+  const index = loadIndex(scope);
+  /** 模拟预算腾位：正文还在热状态，索引里只留归档占位（没有 coldBody，必须去读冷存）。 */
+  index.archived = [{ id: created.record.id, title: '冷存坏了', status: 'archived' }];
+  index.entries = index.entries.filter((row) => row.id !== created.record.id);
+  saveIndex(scope, index);
+  const healed = readEntry(scope, created.record.id);
+  assert.equal(healed.status, 'archived');
+  assert.equal(healed.body, body, '自愈后正文要读得回来');
+  assert.equal(JSON.parse(fs.readFileSync(coldFile, 'utf8')).body, body, '坏文件要被重写成好文件');
+});
+
+test('冷存坏了且热状态也没有正文：仍然明确报 cold_corrupt，不冒充空正文', () => {
+  const scope = fresh('cold-corrupt-fail');
+  upsert(scope, { title: '占位', summary: '保持状态存在', body: '正常正文', kind: 'note' });
+  const orphan = 'mem_999999999999';
+  const coldFile = path.join(scope.dir, 'cold', `${orphan}.json`);
+  fs.mkdirSync(path.dirname(coldFile), { recursive: true });
+  fs.writeFileSync(coldFile, 'not json');
+  const index = loadIndex(scope);
+  index.archived = [{ id: orphan, title: '孤儿归档', status: 'archived' }];
+  assert.throws(() => saveIndex(scope, index), (error) => error.code === 'cold_corrupt');
+  assert.equal(fs.readFileSync(coldFile, 'utf8'), 'not json', '救不回来时不动那个坏文件');
+  assert.equal(index.entries.length, 1, '失败时不能悄悄丢掉别的条目');
 });
 
 console.log(`store.test.mjs: ${passed} passed`);

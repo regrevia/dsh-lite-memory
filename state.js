@@ -366,6 +366,43 @@ export function knownProjectScopes(limit = 40) {
 
 const stateFile = (scope) => path.join(scope.dir, 'state.json');
 const prevFile = (scope) => path.join(scope.dir, 'state.prev.json');
+
+/**
+ * 损坏的 state.json 先留一份原始字节，再谈恢复：只复制、不改名、不删除，
+ * 同一份坏字节重复遇到时复用已有副本，避免每次读都堆一个新文件。
+ */
+function quarantineCorrupt(scope, file) {
+  let raw;
+  try {
+    raw = fs.readFileSync(file);
+  } catch {
+    return null;
+  }
+  let names;
+  try {
+    names = fs.readdirSync(scope.dir);
+  } catch {
+    return null;
+  }
+  for (const name of names) {
+    if (!name.startsWith('state.corrupt-') || !name.endsWith('.json')) continue;
+    const candidate = path.join(scope.dir, name);
+    try {
+      if (fs.readFileSync(candidate).equals(raw)) return candidate;
+    } catch {
+      /* 再试下一个副本 */
+    }
+  }
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').replace(/\..+/, '');
+  let copy = path.join(scope.dir, `state.corrupt-${stamp}.json`);
+  if (fs.existsSync(copy)) copy = path.join(scope.dir, `state.corrupt-${stamp}-${crypto.randomBytes(3).toString('hex')}.json`);
+  try {
+    writeDurable(copy, raw);
+  } catch {
+    return null;
+  }
+  return copy;
+}
 const lockFile = (scope) => path.join(scope.dir, '.lock');
 const migrationIntentFile = (scope) => path.join(scope.dir, 'migration.intent.json');
 const purgeIntentFile = (scope) => path.join(scope.dir, 'purge.intent.json');
@@ -388,6 +425,40 @@ function sleepSync(ms) {
 }
 
 const lockDepth = new Map();
+
+/** pid 还在不在：EPERM 说明进程存在但不属于当前用户，按「活着」处理，绝不回收。 */
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+
+/**
+ * 崩溃残留的锁：token 里的 pid 已经不在、且文件内容没被换过，才允许删。
+ * 活进程（含当前进程）的锁一律不动，迟到的新锁也不会被误删。
+ */
+function reclaimStaleLock(file) {
+  let owner;
+  try {
+    owner = fs.readFileSync(file, 'utf8').trim();
+  } catch {
+    return false;
+  }
+  if (!owner) return false;
+  const pid = Number.parseInt(owner.split(':')[0], 10);
+  if (!Number.isInteger(pid) || pid === process.pid || pidAlive(pid)) return false;
+  try {
+    if (fs.readFileSync(file, 'utf8').trim() !== owner) return false;
+    fs.rmSync(file, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * 跨进程一把锁：.lock 用 wx 创建，写 owner token，只释放自己那把。
@@ -414,6 +485,8 @@ export function withScopeLock(scope, fn) {
       fd = fs.openSync(file, 'wx');
     } catch (error) {
       if (error.code !== 'EEXIST') throw new StateError('unavailable', `记忆库加锁失败（${error.code || 'IO'}）：${file}`);
+      /** 锁主人已经不在了（崩溃/被 kill）：回收后立刻重试，不把用户卡在 500ms 的 busy 上。 */
+      if (reclaimStaleLock(file)) continue;
       if (Date.now() > deadline) {
         throw new StateError('busy', `记忆库正忙（另一个进程在写），稍后再试；若确认没有写入进程，删掉 ${file}`);
       }
@@ -645,7 +718,7 @@ export function cleanStateResidue(scope) {
   }
 }
 
-function writeDurable(file, text) {
+export function writeDurable(file, text) {
   const dir = path.dirname(file);
   fs.mkdirSync(dir, { recursive: true });
   const tmp = tempOf(file);
@@ -1078,8 +1151,39 @@ export function load(scope, options = {}) {
   try {
     data = readEnvelope(current);
   } catch (error) {
-    // 校验和/结构坏了时有 prev 也不自动回滚：回滚会掩盖一次真实损坏。
-    throw error;
+    /**
+     * 损坏的 current 不当空库覆盖：先把原始字节留成 state.corrupt-<时间戳>.json，
+     * 再试 state.prev.json；prev 过了同一套校验才采用。两处都不可用就报出可执行的恢复路径。
+     */
+    if (!error || error.code !== 'corrupt') throw error;
+    const copy = quarantineCorrupt(scope, current);
+    const prev = prevFile(scope);
+    let recovered = null;
+    try {
+      recovered = readEnvelope(prev);
+    } catch {
+      recovered = null;
+    }
+    if (recovered) {
+      return {
+        state: recovered,
+        exists: true,
+        recovered: true,
+        recovery: {
+          corruptFile: copy,
+          prevFile: prev,
+          message: `记忆状态已损坏，已从上一版恢复（${prev}）；损坏副本保留在 ${copy}`,
+        },
+      };
+    }
+    const hint = new StateError('corrupt', [
+      `记忆状态已损坏，上一版也不可用，已停止读写：${current}`,
+      `损坏副本已保留：${copy || '（原文件读不出来，未生成副本）'}`,
+      `上一版路径：${prev}`,
+      `恢复步骤：先备份 ${current} 和 ${prev}；确认 ${prev} 可独立复原后把它复制成 state.json，或把损坏的 state.json 移走后重试；不要直接覆盖原文件`,
+    ].join('；'));
+    hint.recovery = { corruptFile: copy, prevFile: prev };
+    throw hint;
   }
   if (!data) {
     const hasLegacy = LEGACY_MARKERS.some((name) => fs.existsSync(path.join(scope.dir, name)));
@@ -1153,7 +1257,8 @@ export function transact(scope, options, work) {
       }].slice(-LIMITS.receipts);
     }
     validateState(draft);
-    const published = publish(scope, draft, loaded.exists);
+    /** 从 prev 恢复出来的这一轮，current 是坏的：不要把它当「上一版」写进 prev，先让好文件顶回去。 */
+    const published = publish(scope, draft, loaded.exists && !loaded.recovered);
     return { changed: true, state: draft, result: outcome.result, archived: evicted, durability: published.durability };
   });
 }

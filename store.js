@@ -207,6 +207,7 @@ export function loadIndex(scope, options = {}) {
     __tasks: anchor.normalizeTasks(state.evolutionOf(loaded.state).tasks),
     __control: state.controlOf(loaded.state),
     __exists: loaded.exists === true,
+    __recovery: loaded.recovery || null,
   };
   index.__meta = {
     exists: loaded.exists,
@@ -479,14 +480,18 @@ function coldPayload(scope, record) {
   };
 }
 
-/** 冷存写失败就报错：宁可整次保存失败，也不能把正文悄悄丢掉。 */
+/**
+ * 冷存写失败就报错：宁可整次保存失败，也不能把正文悄悄丢掉。
+ * 落盘序列与 state.json 一致（fsync 文件 → rename → fsync 目录）：归档正文只在这里，
+ * 少一步 fsync，崩溃后就是「热状态说有归档、冷存文件是空的」。
+ */
 function writeCold(scope, record) {
-  const dir = coldDirOf(scope);
-  fs.mkdirSync(dir, { recursive: true });
   const file = coldFileOf(scope, record.id);
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify(coldPayload(scope, record))}\n`);
-  fs.renameSync(tmp, file);
+  try {
+    state.writeDurable(file, `${JSON.stringify(coldPayload(scope, record))}\n`);
+  } catch (error) {
+    throw new state.StateError('unavailable', `归档正文没写进冷存（${path.basename(file)}）：${(error && error.message) || 'IO 错误'}`);
+  }
 }
 
 /**
@@ -529,12 +534,19 @@ function coldStored(scope, record) {
   if (body || known !== null) {
     body = body || known;
   } else {
-    const payload = readCold(scope, record.id);
-    if (payload && typeof payload.body === 'string' && payload.body) body = payload.body;
+    /** 冷存是唯一权威副本；它坏了先退回热状态里的正文（保存时会重写成好文件），两处都没有才报错。 */
+    let coldError = null;
+    try {
+      const payload = readCold(scope, record.id);
+      if (payload && typeof payload.body === 'string' && payload.body) body = payload.body;
+    } catch (error) {
+      coldError = error;
+    }
     if (!body) {
       const found = state.readEntryBody(scope, record.id);
       if (found && typeof found.body === 'string') body = found.body;
     }
+    if (coldError && !body) throw coldError;
   }
   /** 正文和冷存里的一致就不重写：五百条归档每次保存只动真变过的那几条。 */
   const cached = record.cold === true && known !== null && known === body;
