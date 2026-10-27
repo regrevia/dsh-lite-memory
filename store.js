@@ -370,7 +370,7 @@ export function normalizeDraft(source, options = {}) {
   const topicKey = has('topicKey') ? textField(draft.topicKey, LIMITS.tagChars, '主题') : undefined;
   /** 凭据扫描必须覆盖完整原文：截短后的摘要看不出凭据，原文里有也不行。 */
   const secret = detectSecret([title, summary, rawSummary, when, body, tags.join(' '), topicKey || ''].join('\n'));
-  if (secret) throw new Error(`疑似凭据（${secret}），只记位置，不记值`);
+  if (secret) throw new state.StateError('unsafe', `疑似凭据（${secret}），只记位置，不记值：正文里写「去哪取、怎么取」，不抄值`);
   return {
     id,
     title,
@@ -812,7 +812,16 @@ export function similarEntries(entries, title, summary, limit = 2) {
     const titleScore = Math.max(0, ...names.map((name) => similarity(name, title)));
     const summaryScore = similarity(item.summary, summary);
     const score = Math.max(titleScore, summaryScore);
-    if (score >= MERGE.near) rows.push({ id: item.id, title: item.title, summary: item.summary, when: item.when || '', score });
+    if (score >= MERGE.near) rows.push({
+      id: item.id,
+      title: item.title,
+      summary: item.summary,
+      when: item.when || '',
+      /** 候选要能自己解释「为什么像」：标题相近，还是同一主题槽位。 */
+      updated: item.updated || item.created || '',
+      reason: titleScore >= MERGE.near ? 'similar_title' : 'similar_summary',
+      score,
+    });
   }
   rows.sort((a, b) => b.score - a.score);
   return rows.slice(0, limit);
@@ -951,6 +960,7 @@ function mergedFields(draft, record, oldBody, index, writeMode = 'patch', foreig
  */
 function applyDraft(scope, index, source, now, options = {}) {
   const draft = normalizeDraft(source);
+  scanUnsafe(draft);
   const foreign = options.foreignEntries || [];
   const distinct = source && source.resolution === 'distinct';
   let record = draft.id ? index.entries.find((item) => item.id === draft.id) : null;
@@ -968,7 +978,15 @@ function applyDraft(scope, index, source, now, options = {}) {
       const slot = index.entries.find((item) => (item.topicKey || '') === draft.topicKey
         && view.conditionsKey(item.conditions) === view.conditionsKey(draft.conditions));
       if (slot) {
-        const row = { id: slot.id, title: slot.title, summary: slot.summary || '', revision: slot.revision || 1 };
+        const row = {
+          id: slot.id,
+          title: slot.title,
+          summary: slot.summary || '',
+          when: slot.when || '',
+          updated: slot.updated || slot.created || '',
+          reason: 'same_topic',
+          revision: slot.revision || 1,
+        };
         return { needsResolution: true, sameTopic: true, similarList: [row], similar: row, draft, record: null, merged: false, previousBody: null, archived: [] };
       }
       similarList = similarEntries(index.entries, draft.title, draft.summary, 2);
@@ -1080,6 +1098,38 @@ function applyDraft(scope, index, source, now, options = {}) {
   writeBody(scope, created.id, created.body);
   index.entries.push(created);
   return { record: created, merged: false, mergedFrom: null, similar: similarList[0] || null, similarList, draft, noop: false, previousBody: null, archived };
+}
+
+/**
+ * 写入前兜底扫描：记忆会被 memory_read 原样喂回模型，所以只拦形状明确的三类——
+ * 提示注入指令、凭据原文、不可见 Unicode；提到「凭据 / 指令」的正文不算。
+ */
+const UNSAFE_TEXT = [
+  { code: 'injection', why: '像提示注入的指令', fix: '把「指令」改成对规则的描述', test: /ignore\s+(?:all\s+)?(?:previous|prior|above)\s+(?:instructions?|rules?|prompts?)/i },
+  { code: 'injection', why: '像提示注入的指令', fix: '把「指令」改成对规则的描述', test: /忽略(?:上面|以上|此前|之前)?(?:的)?(?:所有)?(?:指令|指示|要求|规则)/ },
+  { code: 'injection', why: '像提示注入的指令', fix: '把「指令」改成对规则的描述', test: /<\/?(?:system|instructions?|prompt|tool_call)[^>]*>/i },
+  { code: 'injection', why: '像提示注入的指令', fix: '把「指令」改成对规则的描述', test: /(?:^|\n)\s*(?:system|assistant)\s*[:：]/i },
+];
+const INVISIBLE = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]|[\u{E0000}-\u{E007F}]/u;
+const SCAN_FIELD_NAMES = { title: '标题', summary: '摘要', when: '适用场景', body: '正文', tags: '标签', triggers: '触发词', conditions: '条件', selection: '适用范围' };
+
+function scanUnsafe(draft) {
+  const fields = [
+    ['title', draft.title], ['summary', draft.summary], ['when', draft.when], ['body', draft.body],
+    ['tags', (draft.tags || []).join('\n')], ['triggers', (draft.triggers || []).join('\n')],
+    ['conditions', JSON.stringify(draft.conditions || [])], ['selection', JSON.stringify(draft.selection || null)],
+  ];
+  for (const [field, raw] of fields) {
+    const text = typeof raw === 'string' ? raw : '';
+    if (!text) continue;
+    const name = SCAN_FIELD_NAMES[field] || field;
+    if (INVISIBLE.test(text)) {
+      throw new state.StateError('unsafe', `${name}里有看不见的字符（零宽或方向控制）；它们会跟着记忆原样回到模型，删掉再存`);
+    }
+    for (const rule of UNSAFE_TEXT) {
+      if (rule.test.test(text)) throw new state.StateError('unsafe', `${name}${rule.why}；${rule.fix}`);
+    }
+  }
 }
 
 /**
@@ -2353,6 +2403,9 @@ function crossLayerSimilar(projectScope, targetScope, draft) {
     id: item.id,
     title: item.title,
     summary: item.summary || '',
+    when: item.when || '',
+    updated: item.updated || '',
+    reason: item.reason || 'similar_title',
     revision: item.revision || 1,
     scope: other.key === 'global' ? 'global' : 'project',
   }));

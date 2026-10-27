@@ -5,6 +5,8 @@
 
 结论先说：**数据只会丢在「冷存写入未落盘」这一处**（P0-A）。其余风险是「单点坏了整层不可用、只能人工修」的可用性问题（P0-B、P1-C/D），以及若干可观测性/降级缺口（P2）。
 
+状态（0.18.0）：P0-A、P0-B、P1-C、P1-D 已修并各有回归测试（`test/ha.test.mjs`、`test/safety.test.mjs`）；P1-E 仍按 P2 观察。
+
 ## 分级
 
 | 级别 | 判定 |
@@ -14,6 +16,8 @@
 | P2 | 行为可接受但语义模糊/有冗余副作用/可观测性不足，记录不改 |
 
 ## P0-A 冷存写入没有落盘保证（真实数据丢失窗口）
+
+状态：已修。`writeCold` 改走 `state.writeDurable`（fsync 文件 → rename → fsyncDir），失败清 tmp 并报 `unavailable`。测试：`test/ha.test.mjs` 的 writeDurable / 冷存节。
 
 证据：`store.js:483` `writeCold` 只做 `writeFileSync(tmp)` → `renameSync(tmp, file)`，没有 `fsync` 文件、也没有 `fsync` 目录。对比 `state.js:648` `writeDurable`（fsync 文件 → rename → fsyncDir）与 `state.js:673` `publish`。
 
@@ -28,6 +32,8 @@
 
 ## P0-B 状态损坏没有隔离，也没有自助恢复路径
 
+状态：已修。`state.load` 对损坏 current 先隔离成 `state.corrupt-*.json` 再试 prev（恢复成功才 `recovered:true`），两处都坏时 `fail()` 给出「改名成 .bad → 自动从 state.prev.json 恢复」的可执行步骤。测试：`test/ha.test.mjs` 两个 corrupt 用例。
+
 证据：`state.js:1069` `load` 对 `readEnvelope` 错误原样 rethrow（注释明确「有 prev 也不自动回滚：回滚会掩盖一次真实损坏」），`state.js:566` `fail()` 的消息只描述损坏（已损坏 / 校验和不一致 / 格式不认 / 版本对不上），不含恢复动作。`index.js` 全文只有一处 `error.code` 分支（`2079`，`purge_pending`），`corrupt` / `busy` / `unavailable` / `migration_required` / `cold_*` 都以原始异常抛给工具调用方。
 
 影响：坏一次 `state.json`，该层所有读写（含 `memory_search`）直接失败；恢复动作（把 `state.json` 改名后让 `load` 走 `state.prev.json` 的 `recovered:true` 分支）只存在于代码里，用户和模型都看不到。数据不丢（prev 完好时），但可用性完全依赖人工。
@@ -36,6 +42,8 @@
 
 ## P1-C 崩溃残留 `.lock` 没有回收，读写都会 `busy`
 
+状态：已修。`reclaimStaleLock` 读 token 的 pid，`process.kill(pid,0)` 抛 ESRCH 且内容未变才 unlink 重试；活 pid（含当前进程）与 EPERM 一律不动。测试：`test/ha.test.mjs` 两个锁用例。
+
 证据：`state.js:396-445` `withScopeLock`：`wx` 建锁、`EEXIST` 等到 `LIMITS.lockWaitMs = 500` 后抛 `busy`；token 写了 `${pid}:${rand}` 但只作注释用（「token is advisory; the lock file itself is the mutex」），退出时按 token 相等才删。没有 pid 存活检查、没有 mtime 阈值回收。
 
 影响：进程崩溃（含被 kill -9）后锁文件残留，该层读（`search`/`read` 都走 `withLocks`）和写全部 500ms 后失败。错误信息里给了删除路径（可自助），但每个新用户/新会话都要重蹈，且模型无法自己执行删除。
@@ -43,6 +51,8 @@
 修复：`EEXIST` 时读 token 的 pid，若同机进程不存在（`process.kill(pid,0)` 抛 `ESRCH`）→ 重读 token 确认未变后 unlink 并重试；不做纯 mtime 回收（会误删活进程的锁）。测试：伪造 `deadpid:xxxx` 锁文件 → 正常加锁；伪造活 pid（当前进程 pid）→ 仍然 `busy`。
 
 ## P1-D 冷存损坏会阻塞整层写入，且不会自愈
+
+状态：已修。`coldStored` 读冷存失败先退回热状态正文并重写冷存，两处都没有才抛原错误；`readCold` 对损坏一律报 `cold_corrupt`，不拿空正文顶上。测试：`test/ha.test.mjs` 冷存节。
 
 与 P0-A 同源但与落盘无关：即使冷存文件是被外部改坏/手工截断，`coldStored` 也对每条归档记录 `readCold` 且不吞错，`applyFlat` 在事务内执行 → 一条坏文件让每次 `saveIndex` 抛 `cold_corrupt`。
 

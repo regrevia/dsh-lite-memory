@@ -795,6 +795,29 @@ function withTag(value, text) {
   return tag ? `${tag} ${text}` : text;
 }
 
+/** 候选要能自己解释「什么时候的、为什么像」，模型才好判断是更新还是另一条。 */
+function humanAge(iso) {
+  const at = Date.parse(String(iso || ''));
+  if (!Number.isFinite(at)) return '';
+  const days = Math.floor((Date.now() - at) / 86400000);
+  if (days <= 0) return '今天';
+  if (days === 1) return '昨天';
+  if (days < 30) return `${days} 天前`;
+  if (days < 365) return `${Math.floor(days / 30)} 个月前`;
+  return `${Math.floor(days / 365)} 年前`;
+}
+
+function describeCandidate(item, options = {}) {
+  const age = humanAge(item.updated);
+  const why = options.sameTopic ? '' : item.reason === 'similar_summary' ? '摘要相近' : '标题相近';
+  const parts = [`${item.id}「${item.title}」`];
+  if (age) parts.push(`${age}更新`);
+  if (item.when) parts.push(item.when);
+  if (why) parts.push(why);
+  if (item.summary) parts.push(item.summary);
+  return parts.join(' · ');
+}
+
 function statusLabel(status) {
   if (status === 'archived') return ' · 已归档';
   if (status === 'needs_context') return ' · 适用范围待确认';
@@ -1672,7 +1695,7 @@ export function apply(ctx, config) {
           crossLayer: Boolean(saved.crossLayer),
           sameTopic: Boolean(saved.sameTopic),
           similarIds: saved.similarList.map((item) => item.id).join('、'),
-          similar: saved.similarList.map((item) => `${item.id}「${item.title}」${item.summary ? `｜${item.summary}` : ''}`).join('；'),
+          similar: saved.similarList.map((item) => describeCandidate(item, { sameTopic: saved.sameTopic })).join('；'),
           archived: '',
         };
       }

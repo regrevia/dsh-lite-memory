@@ -540,8 +540,11 @@ export function emptyState(scope) {
   };
 }
 
+/** 坏文件不自动覆盖（可能还能人工找回），但错误里必须给出下一步，不能只说「坏了」。 */
 function fail(file, why, code = 'corrupt') {
-  return new StateError(code, `记忆状态${why}，已停止读写：${file}`);
+  const name = path.basename(file);
+  const prev = name === 'state.json' ? 'state.prev.json' : `${name}.prev`;
+  return new StateError(code, `记忆状态${why}，已停止读写：${file}。恢复：把 ${name} 改名成 ${name}.bad 后重试，会自动从上一份完好的 ${prev} 恢复；${prev} 也不在就删掉整个目录重建（旧文件可人工找回）`);
 }
 
 function validEntry(entry) {
