@@ -2114,7 +2114,7 @@ export function renderIndex(entries, budget = 400) {
     const stateTag = item.state === 'archived' ? ' · 已归档' : item.state === 'needs_context' ? ' · 适用范围待确认' : item.state === 'not_applicable' ? ' · 当前条件不适用' : '';
     const originTag = item.origin === 'project_evolution' ? ' · 实验' : '';
     const tag = item.scope === 'global' ? '[global]' : item.scopeName ? `[${item.scopeName}]` : '';
-    const head = `${tag ? `${tag} ` : ''}${item.id} ${item.title}${item.when ? `（${item.when}）` : ''}${originTag}${stateTag}`;
+    const head = `${tag ? `${tag} ` : ''}「${item.title}」${item.when ? `（${item.when}）` : ''}${originTag}${stateTag}`;
     const line = stale ? `- ${head}` : `- ${head}｜${item.summary}`;
     if (used + line.length > budget) break;
     lines.push(line);

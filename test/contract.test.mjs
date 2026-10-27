@@ -67,13 +67,15 @@ const json = (body) => JSON.parse(body);
 // ── tool contract ────────────────────────────────────────────────────────────
 const names = ['memory_save', 'memory_suggest', 'memory_search', 'memory_read', 'memory_forget'];
 assert.deepEqual([...defs.keys()].sort(), [...names].sort());
+const TITLE_ADDRESSED = ['memory_read', 'memory_forget'];
 for (const name of names) {
   const def = defs.get(name);
   assert.equal(def.parameters.type, 'object');
   assert.equal(def.parameters.additionalProperties, false);
   assert.equal(typeof def.output.render, 'function');
   assert.equal(typeof def.output.schema, 'object');
-  assert.ok(def.parameters.required.length >= 1);
+  assert.ok(Object.keys(def.parameters.properties).length >= 1);
+  if (TITLE_ADDRESSED.includes(name)) assert.equal('title' in def.parameters.properties, true, `${name} 按标题定位`);
 }
 
 const saveParams = defs.get('memory_save').parameters.properties;
@@ -134,11 +136,13 @@ const probe = await exec('memory_save', { title: '发布顺序是啥', summary: 
 assert.equal(probe.needsResolution, true);
 assert.equal(probe.id, '');
 assert.equal(probe.revision, 0);
-assert.ok(probe.similarIds.length > 0);
+assert.ok(probe.similarTitles.length > 0);
+assert.doesNotMatch(probe.similarTitles, /mem_[a-z0-9]{6,}/, '相近候选按标题点名');
 const probeText = render('memory_save', {}, probe);
 assert.match(probeText.split('\n')[0], /^memory · 需要确认：「发布顺序是啥」与已有条目相近$/);
-assert.match(probeText, /要更新它，用 id 重存/);
-assert.match(probeText, new RegExp(saved.id));
+assert.match(probeText, /要更新它，用同一个标题再存一次/);
+assert.match(probeText, /「发布顺序」/);
+assert.doesNotMatch(probeText, /mem_[a-z0-9]{6,}/, '相近提示只给标题');
 const distinct = await exec('memory_save', { title: '发布顺序是啥', summary: '发版前要按顺序做的事', body: '另一条', resolution: 'distinct' });
 assert.equal(distinct.needsResolution, false);
 assert.equal(distinct.merged, false);
@@ -149,7 +153,8 @@ const hits = await exec('memory_search', { query: '发布流程' });
 assert.ok(hits.count >= 1);
 assert.ok(hits.chars > 0);
 const hitText = render('memory_search', {}, hits);
-assert.match(hitText, new RegExp(`^memory · 命中 ${hits.count} 条 · 引用 ${hits.chars} 字\\n- \\[[^\\]]+\\] mem_`));
+assert.match(hitText, new RegExp(`^memory · 命中 ${hits.count} 条 · 引用 ${hits.chars} 字\\n- \\[[^\\]]+\\] 「`));
+assert.doesNotMatch(hitText, /mem_[a-z0-9]{6,}/, '检索结果只给标题与适用范围');
 assert.doesNotMatch(hitText, /第 .* 版/);
 /** 「发版当天」这类自由文本条件没有可信上下文，不能当成适用条目塞给模型。 */
 const miss = await exec('memory_search', { query: '完全没有出现过的主题' });
@@ -165,6 +170,12 @@ assert.equal(plain.body, '另一条');
 assert.equal(plain.revision, 1);
 assert.match(render('memory_read', {}, plain), /^memory · \[[^\]]+\] 「发布顺序是啥」/);
 assert.ok(!render('memory_read', {}, plain).includes(distinct.id));
+
+/* 界面与工具文本一律不出现内部编号：id 只是存储地址。 */
+for (const [name, value] of [['memory_save', saved], ['memory_save', merged], ['memory_save', patch],
+  ['memory_search', hits], ['memory_read', plain], ['memory_save', probe]]) {
+  assert.doesNotMatch(render(name, {}, value), /\b(mem|sug|cf)_[a-z0-9]{6,}/, `${name} 文案里没有内部编号`);
+}
 
 // 没点明归档还是彻底忘掉时不动盘，先返回待确认
 const undecided = await exec('memory_forget', { id: distinct.id });
@@ -238,7 +249,7 @@ assert.equal(global.scope, 'global');
 assert.match(render('memory_save', {}, global), /^memory · saved \[global\] "回复用中文"$/);
 const globalSearch = await exec('memory_search', { query: '回复用中文' });
 assert.equal(globalSearch.count, 1);
-assert.match(render('memory_search', {}, globalSearch), /\[global\] mem_/);
+assert.match(render('memory_search', {}, globalSearch), /\[global\] 「/);
 assert.equal(typeof globalThis.__liteMemoryStats, 'function');
 const stats = globalThis.__liteMemoryStats(cwd);
 assert.ok(stats.count >= 1);
@@ -346,8 +357,22 @@ const sig1 = new AbortController().signal;
 const hitsBefore = store.loadIndex(store.scopeOf(cwd)).entries.find((item) => item.id === hinted.id).hits;
 await preStep({ agent: recallAgent, signal: sig1, turn: '2' }, pass('又弹钥匙串窗口了，怎么弄', 'h1'));
 const hintText = recall.text({ agent: recallAgent, signal: sig1 });
-assert.match(hintText, new RegExp(hinted.id));
+assert.doesNotMatch(hintText, /mem_[a-z0-9]{6,}/, '召回卡只给标题，不给内部编号');
 assert.match(hintText, /需要细节用 memory_read/);
+sessionCwds.set('session-recall', cwd);
+const recallReceipt = await call('/lite-memory/overview', { sessionId: 'session-recall' });
+assert.equal(recallReceipt.status, 200);
+assert.equal(recallReceipt.body.current.recall.reason, 'hit', '面板能回答这次为什么提醒');
+assert.equal(recallReceipt.body.current.recall.limit, 3);
+assert.equal(recallReceipt.body.current.recall.cards, 1);
+assert.ok(recallReceipt.body.current.recall.chars > 0);
+assert.ok(!/mem_[a-z0-9]{6,}/.test(JSON.stringify(recallReceipt.body.current.recall)), '判断依据不带内部编号');
+const missTurn = await preStep({ agent: recallAgent, signal: sig1, turn: '3' }, pass('明早路过菜市场买点香菜', 'h2'));
+assert.equal(missTurn.kind, 'enter');
+assert.equal(recall.text({ agent: recallAgent, signal: sig1 }), '');
+const missReceipt = await call('/lite-memory/overview', { sessionId: 'session-recall' });
+assert.ok(['no_overlap', 'needs_context'].includes(missReceipt.body.current.recall.reason), '没提醒时也说明依据');
+assert.equal(missReceipt.body.current.recall.cards, 0);
 const hitsAfter = store.loadIndex(store.scopeOf(cwd)).entries.find((item) => item.id === hinted.id).hits;
 assert.equal(hitsAfter, hitsBefore);
 
@@ -813,6 +838,7 @@ assert.equal(ov.body.ok, true);
 assert.equal(ov.body.current.key, store.scopeOf(ovCwd).key);
 assert.equal(ov.body.current.label, path.basename(ovCwd));
 assert.equal(ov.body.current.evolution.enabled, false);
+assert.equal(ov.body.current.recall, null, '没发生过自动召回时不给判断依据');
 assert.equal(ov.body.selected.key, ov.body.current.key);
 assert.equal(ov.body.selected.kind, 'project');
 assert.equal(ov.body.selected.evolution.enabled, false);

@@ -169,7 +169,7 @@ const scopeOf = (dir) => store.scopeOf(dir);
   const text = runtime.text(agent, sig);
   assert.match(text, /项目实验规则/);
   assert.match(text, /先给结论再解释/);
-  assert.ok(text.includes(id));
+  assert.ok(!text.includes(id), '实验规则也只给标题，不给内部编号');
   assert.doesNotMatch(text, /第 .* 版/);
 }
 
@@ -185,7 +185,7 @@ const scopeOf = (dir) => store.scopeOf(dir);
   const sig = signal();
   await runtime.preStep({ agent, signal: sig, turn: 't1' }, enter(human('这期口播怎么做')));
   const text = runtime.text(agent, sig);
-  assert.ok(text.includes(id));
+  assert.ok(!text.includes(id), '实验规则也只给标题，不给内部编号');
   assert.match(text, /memory_read/);
   assert.equal(text.includes('先做这一步再检查'), false);
   assert.equal(Buffer.byteLength(text) <= 1200 + 200, true);

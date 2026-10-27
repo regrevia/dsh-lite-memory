@@ -219,8 +219,8 @@ test('search finds Chinese queries, when clauses and reports counts', () => {
   const when = search(scope, 'CI 容器');
   assert.ok(when.some((item) => item.title === '文案检查'));
   const rendered = renderIndex(hits);
-  assert.match(rendered.text, /^- mem_[a-z0-9]+ 发布顺序/);
-  assert.match(rendered.text, /mem_[a-z0-9]+ 发布顺序/);
+  assert.match(rendered.text, /^- 「发布顺序」/);
+  assert.doesNotMatch(rendered.text, /mem_[a-z0-9]+/);
   assert.doesNotMatch(rendered.text, /第 .* 版/);
   assert.ok(rendered.chars <= 400);
   assert.deepEqual(search(scope, '完全无关的主题词'), []);
@@ -236,7 +236,8 @@ test('archived or 90-day-stale entries render without a summary', () => {
   assert.equal(hits.length, 1);
   const rendered = renderIndex(hits);
   assert.ok(!rendered.text.includes('｜'), rendered.text);
-  assert.equal(rendered.text.split('\n')[0].includes(item.record.id), true);
+  assert.equal(rendered.text.split('\n')[0].includes(item.record.id), false, '索引行只给标题');
+  assert.match(rendered.text.split('\n')[0], /「旧条目」/);
 });
 
 test('search and read leave hits and lastUsed alone', () => {
@@ -485,7 +486,8 @@ test('projects and the global layer stay separate', () => {
   assert.equal(global.length, 1);
   assert.equal(global[0].scope, 'global');
   const rendered = renderIndex(global);
-  assert.match(rendered.text, /^- \[global\] mem_/);
+  assert.match(rendered.text, /^- \[global\] 「全局条目」/);
+  assert.doesNotMatch(rendered.text, /mem_[a-z0-9]{6,}/);
   const removed = forget(b, 'mem_000000000000', { mode: 'archive' });
   assert.equal(removed, null);
 });

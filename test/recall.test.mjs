@@ -8,8 +8,9 @@ const { apply } = await import('../index.js');
 const store = await import('../store.js');
 
 const HEADER = '已有记忆可能相关';
-const CARD_LINE = /^- \[[^\]]+\] 「.+?」.* · mem_[a-z0-9]+(?:｜.*)?$/;
+const CARD_LINE = /^- \[[^\]]+\] 「.+?」(?:｜.*)?$/;
 const CARD_LINE_M = new RegExp(CARD_LINE.source, 'm');
+const INTERNAL_ID = /mem_[a-z0-9]{6,}/;
 
 const effect = (fn) => {
   const dispose = fn();
@@ -332,10 +333,11 @@ assert.notEqual(bootA.provider.text({ agent: agentB, signal: signalB }), prepare
   const agent = makeAgent('agent-purge', cwdD);
   const sig = signal();
   await bootA.preStep({ agent, signal: sig, turn: 't1' }, enter(human('插件改完怎么让它生效？')));
-  assert.match(bootA.provider.text({ agent, signal: sig }), new RegExp(doomed.id));
-  const purged = await bootA.exec('memory_forget', { id: doomed.id, mode: 'purge' }, agent);
+  assert.match(bootA.provider.text({ agent, signal: sig }), /插件改完要重启应用/);
+  const purged = await bootA.exec('memory_forget', { title: '插件改完要重启应用', mode: 'purge' }, agent);
   assert.equal(purged.mode, 'purged');
-  assert.match(bootA.provider.text({ agent, signal: sig }), new RegExp(doomed.id), '已提交的旧快照不回头改写');
+  assert.match(bootA.provider.text({ agent, signal: sig }), /插件改完要重启应用/, '已提交的旧快照不回头改写');
+  assert.doesNotMatch(bootA.provider.text({ agent, signal: sig }), /mem_[a-z0-9]{6,}/, '召回卡从不带内部编号');
   const sig2 = signal();
   await bootA.preStep({ agent, signal: sig2, turn: 't2' }, enter(human('插件改完怎么让它生效？')));
   const after = bootA.provider.text({ agent, signal: sig2 });
@@ -359,7 +361,7 @@ assert.notEqual(bootA.provider.text({ agent: agentB, signal: signalB }), prepare
   const agent = makeAgent('agent-global-purge', cwdA);
   const sig = signal();
   await bootA.preStep({ agent, signal: sig, turn: 't1' }, enter(human('发布前跑文案检查')));
-  assert.match(bootA.provider.text({ agent, signal: sig }), new RegExp(globalNote.id));
+  assert.match(bootA.provider.text({ agent, signal: sig }), /全局发布前文案核对/);
   const purged = store.forget(global, globalNote.id, { mode: 'purge' });
   assert.equal(purged.mode, 'purged');
   /** 同一 turn 的续步没有新真人消息：不重新问人，但盘上变了必须换掉快照。 */

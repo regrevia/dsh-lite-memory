@@ -594,7 +594,7 @@ export function newestUserQuery(messages) {
 export function projectionText(view) {
   if (!view) return '';
   const rows = [];
-  rows.push(`${view.title || view.id}${view.when ? `（${view.when}）` : ''} · ${view.id}`);
+  rows.push(`${view.title || '这条记忆'}${view.when ? `（${view.when}）` : ''}`);
   if (view.conditions && view.conditions.length) rows.push(`条件：${view.conditions.map((item) => `${item.key}=${item.value}`).join('，')}`);
   if (view.selection) rows.push(`仅对 ${view.selection} 生效`);
   if (view.state === 'needs_context') rows.push('适用范围待确认');
