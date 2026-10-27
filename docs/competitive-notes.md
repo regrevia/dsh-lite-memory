@@ -110,15 +110,15 @@
 | 冲突 | mcp-memory 置信度 + 矛盾检测标 superseded；Graphiti 失效旧边 | 有「近似标题 → `needsResolution` + 候选 id」，**但没有「新旧并存 + 谁取代谁」的持久语义** |
 | 过期 | Graphiti 双时态窗口；Hermes 靠容量淘汰；mcp-memory 受控遗忘 | 只有建议/抑制的 TTL 与自进化 trial 的 `expireLearning(..., {by:'ttl', reason:'trial_expired'})`；**事实本身没有有效期** |
 | 撤销 / 遗忘 | Letta git 可回滚；mem0 不删只追加 | 有：`✕` 撤销（带版本校验）、forget=归档不删除、`versions` 最多留 2 份 |
-| 替换链 | Graphiti `invalidated_by` 语义；mcp-memory `superseded` 标注 | **缺**：旧版本存在 `versions` 里，但没有「被谁替换、何时、为什么」的一等字段 |
+| 替换链 | Graphiti `invalidated_by` 语义；mcp-memory `superseded` 标注 | 有（0.18.0）：`validFrom` / `validUntil` / `supersededBy` / `supersedeReason` 四个可选字段，旧正文同时进新记录 `versions` 链头；默认检索过滤被取代/过期，`history:true` 与按 id 阅读仍可达 |
 | 审计 | Graphiti episodes 溯源；Hermes 拦截记录；Letta commit 历史 | 有：`updatedAt` / `createdAt` / `lastUsed`（`touchUsed`，超阈值才回写）、citation receipts、`sourceExcerpt`（自进化变更里） |
 
 ### 3.3 对 dsh-lite-memory 的结论
 
 | # | 结论 | 判定 | 理由 | 优先级 | 落点 |
 | --- | --- | --- | --- | --- | --- |
-| 2.1 | **给记录加「有效期 + 取代链」最小字段**：`validFrom`（默认写入时间）、`validUntil`（可空）、`supersededBy`（可空）、`supersedeReason`（`user_replaced` / `contradicted` / `expired`） | 改造后采纳 | 这是 Graphiti 与 mcp-memory 共同指向的能力，而我们只有 `versions`。注意**不做双时态图**：只在记录层加 4 个可选字段，`findCurrent` 的默认过滤逻辑加一条「`validUntil` 未过且未被取代」 | **P0** | `store.js` `toFlat`/`fromFlat`/`applyFlat`、`findCurrent`、`archiveEntry`；`index.js` `memory_forget`、`memory_save` |
-| 2.2 | **显式 `replace` 语义**：`memory_save` 支持传 `supersedes: <id>`（或 `resolution` 之外新增 `replace_id`），写入时给旧记录打 `supersededBy`/`validUntil`，新记录进 `versions` 链头 | 采纳 | 现在靠「同标题就覆盖」，用户看不到「上一版说了什么」。带 `supersededBy` 后 `memory_search history:true` 能展示演化；面板可显示「3 次更新」 | **P0** | `store.js` `upsertLocked`、`snapshot`、`versions` 写入路径；`client.js` `TurnMemory` 的 `update` 分组 |
+| 2.1 | **给记录加「有效期 + 取代链」最小字段**：`validFrom`（默认写入时间）、`validUntil`（可空）、`supersededBy`（可空）、`supersedeReason`（`user_replaced` / `contradicted` / `expired`） | 改造后采纳（0.18.0 已完成） | 这是 Graphiti 与 mcp-memory 共同指向的能力，而我们只有 `versions`。注意**不做双时态图**：只在记录层加 4 个可选字段，`findCurrent` 的默认过滤逻辑加一条「`validUntil` 未过且未被取代」 | **P0**（0.18.0 已完成，含 `test/record.test.mjs` 回归） | `store.js` `toFlat`/`fromFlat`、`applyDraft`、`search`、`findCurrent`；`index.js` `memory_save` |
+| 2.2 | **显式 `replace` 语义**：`memory_save` 支持传 `supersedes: <id>`（或 `resolution` 之外新增 `replace_id`），写入时给旧记录打 `supersededBy`/`validUntil`，新记录进 `versions` 链头 | 采纳 | 现在靠「同标题就覆盖」，用户看不到「上一版说了什么」。带 `supersededBy` 后 `memory_search history:true` 能展示演化；面板可显示「3 次更新」 | **P0**（0.18.0 已完成，含回归测试） | `store.js` `applyDraft` / `stampSupersede`；`index.js` `memory_save` 的 `supersedes` 参数；`client.js` `TurnMemory` 的 `update` 分组 |
 | 2.3 | **冲突从「阻断」升级为「阻断 + 候选解释」**：`needsResolution` 返回时附带每个候选的 `updatedAt`、`when`、首行摘要与相似缘由（标题近似 / 主题槽相同） |改造后采纳（0.18.0 已完成，含回归测试）| 现在只给 id，调用方（模型）无法判断该合并还是另建。mcp-memory 用置信度解决同一问题；我们不引置信度，改用「人类可读的差异线索」 | P1 | `store.js` `exactDuplicate` / `crossLayerSimilar` / `bindSameTopic` |
 | 2.4 | **写入前的注入/外泄扫描**（Hermes 做法）：拦截提示注入模式、凭据外泄模式、不可见 Unicode |采纳（0.18.0 已完成，含回归测试）| 我们的记忆会被 `memory_read` 原样喂回模型，一旦有人把恶意文本写进项目记忆就是持久化提示注入。成本低、收益高；与 README 的 L2「凭据不记」互补（L2 是策略，扫描是兜底） | P1 | `store.js` `assertFits` 附近新增 `scanUnsafe(text)`；`index.js` `memory_save` / `memory_suggest` |
 | 2.5 | **不引入写入时的 LLM 归并（add/update/delete 分类器）** | 拒绝 | 我们刻意用「标题 + when + 显式 id」做确定性归并，语义相似不授权覆盖（README/TRIGGERS 已规定）。加 LLM 归并会把可预期行为变成不可预期 | — | — |

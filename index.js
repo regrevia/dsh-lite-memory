@@ -657,6 +657,10 @@ const SAVE_PARAMS = {
     when: { type: 'string', description: `前置条件或适用场景（「在哪台机器 / 哪个环境 / 什么情况下」），不超过 ${LIMITS.whenChars} 字。同一标题但前置条件不同，会存成两条，不合并；更新时不给就保留原值` },
     kind: { type: 'string', enum: ['preference', 'convention', 'procedure', 'pointer', 'pitfall', 'credential_hint', 'note'], description: '条目类型；更新时不给就保留原值' },
     tags: { type: 'array', items: { type: 'string' }, description: '最多 5 个标签；更新时不给就保留原值' },
+    supersedes: {
+      type: 'string',
+      description: '要取代的记忆 id：新内容写成新条目，旧条目标为已被取代并保留在历史里；同层才有效，已被取代过的不能再取代',
+    },
     resolution: {
       type: 'string',
       enum: ['distinct'],
@@ -1608,6 +1612,7 @@ export function apply(ctx, config) {
           sameTopic: { type: 'boolean' },
           similarIds: { type: 'string' },
           similar: { type: 'string' },
+          supersededId: { type: 'string' },
           archived: { type: 'string' },
         },
         required: ['id', 'title', 'summary', 'when', 'revision', 'merged', 'changed', 'scope', 'needsResolution', 'archived'],
@@ -1627,7 +1632,7 @@ export function apply(ctx, config) {
           ? `memory · 需要确认：「${value.title}」与已有条目相近${value.crossLayer ? '（在另一层）' : ''}${value.sameTopic ? '（同一主题槽位）' : ''}\n${value.similar}\n要更新它，用 id 重存；确实是另一条，加 resolution="distinct"`
           : value.changed === false
             ? `memory · unchanged ${withTag(value, `"${value.title}"`)} · ${value.id}`
-            : `memory · ${value.merged ? 'merged' : 'saved'} ${withTag(value, `"${value.title}"`)}${value.when ? `（${value.when}）` : ''} · ${value.id}${value.similar ? ` · 相近：${value.similar}` : ''}${value.archived ? ` · 已归档「${value.archived}」腾位` : ''}${value.fullTextSaved ? ' · 完整原句已另存' : ''}`,
+            : `memory · ${value.merged ? 'merged' : 'saved'} ${withTag(value, `"${value.title}"`)}${value.when ? `（${value.when}）` : ''} · ${value.id}${value.similar ? ` · 相近：${value.similar}` : ''}${value.archived ? ` · 已归档「${value.archived}」腾位` : ''}${value.fullTextSaved ? ' · 完整原句已另存' : ''}${value.supersededId ? ` · 已取代 ${value.supersededId}` : ''}`,
       }],
     },
     execute: async (args, execution) => {
@@ -1716,6 +1721,7 @@ export function apply(ctx, config) {
         needsScope: false,
         needsResolution: false,
         similarIds: saved.similarList.map((item) => item.id).join('、'),
+        supersededId: String(args.supersedes || ''),
         archived: (saved.archived || []).map((item) => item.title).join('、'),
         ...(saved.similar ? { similar: `${saved.similar.id}「${saved.similar.title}」` } : {}),
       };

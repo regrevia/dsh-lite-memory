@@ -103,6 +103,10 @@ function toFlat(entry) {
     reviewState: maintenance.reviewState || 'active',
     created: entry.createdAt || '',
     updated: entry.updatedAt || '',
+    validFrom: typeof entry.validFrom === 'string' && entry.validFrom ? entry.validFrom : (entry.createdAt || ''),
+    validUntil: typeof entry.validUntil === 'string' ? entry.validUntil : '',
+    supersededBy: typeof entry.supersededBy === 'string' ? entry.supersededBy : '',
+    supersedeReason: typeof entry.supersedeReason === 'string' ? entry.supersedeReason : '',
     lastUsed: maintenance.lastUsed || entry.updatedAt || entry.createdAt || '',
     revision: Number(entry.revision) || 1,
     status: entry.status === 'archived' ? 'archived' : 'active',
@@ -130,6 +134,10 @@ function fromFlat(record, status) {
     ownerProjectId: record.ownerProjectId || '',
     createdAt: record.created || at,
     updatedAt: at,
+    validFrom: typeof record.validFrom === 'string' && record.validFrom ? record.validFrom : (record.created || at),
+    validUntil: typeof record.validUntil === 'string' ? record.validUntil : '',
+    supersededBy: typeof record.supersededBy === 'string' ? record.supersededBy : '',
+    supersedeReason: typeof record.supersedeReason === 'string' ? record.supersedeReason : '',
     current: {
       title: record.title || '',
       summary: record.summary || '',
@@ -321,6 +329,7 @@ export function normalizeDraft(source, options = {}) {
   const has = (key) => Object.prototype.hasOwnProperty.call(draft, key) && draft[key] !== undefined;
   const id = typeof draft.id === 'string' && /^mem_[a-z0-9]+$/.test(draft.id) ? draft.id : '';
   if (has('id') && !id) throw new Error('id 格式不对');
+  if (has('supersedes') && !/^mem_[a-z0-9]+$/.test(String(draft.supersedes ?? ''))) throw new Error('supersedes 要给被取代的 id');
   const when = has('when') ? textField(draft.when, LIMITS.whenChars, '前置条件') : '';
   const title = textField(cleanTitle(draft.title), LIMITS.titleChars, '标题');
   /** 带 id 是更新：省略的字段保持原值，标题也一样。 */
@@ -392,6 +401,8 @@ export function normalizeDraft(source, options = {}) {
     links,
     applicability,
     topicKey,
+    /** 显式取代：新记录写好后再给旧记录打 supersededBy/validUntil。 */
+    supersedes: has('supersedes') ? textField(draft.supersedes, 60, '取代目标') : '',
     has: {
       title: has('title') && Boolean(title),
       summary: has('summary'),
@@ -405,6 +416,7 @@ export function normalizeDraft(source, options = {}) {
       links: links !== undefined,
       applicability: applicability !== undefined,
       topicKey: topicKey !== undefined,
+      supersedes: has('supersedes'),
     },
   };
 }
@@ -955,6 +967,26 @@ function mergedFields(draft, record, oldBody, index, writeMode = 'patch', foreig
   return next;
 }
 
+/** 已被取代或过了有效期：默认检索看不见，明确要 history 时仍可查到并读正文。 */
+function staleRecord(record, now = Date.now()) {
+  if (record.supersededBy) return true;
+  const until = Date.parse(record.validUntil || '');
+  return Number.isFinite(until) && until <= now;
+}
+
+/** 给旧记录打上取代链：正文快照交回调用方，放进新记录的 versions 链头。 */
+function stampSupersede(scope, target, nextId, now) {
+  if (target.supersededBy) {
+    throw new state.StateError('conflict', `这条记忆已经被 ${target.supersededBy} 取代，不能再取代一次`);
+  }
+  if (target.id === nextId) throw new Error('不能取代自己');
+  const versions = snapshot(target, readBody(scope, target.id));
+  target.validUntil = now;
+  target.supersededBy = nextId;
+  target.supersedeReason = 'user_replaced';
+  return versions;
+}
+
 /**
  * 一次写入的纯业务部分：校验、身份、字节预算、版本。不改盘（正文写入由调用方在同一把锁里做）。
  */
@@ -963,19 +995,28 @@ function applyDraft(scope, index, source, now, options = {}) {
   scanUnsafe(draft);
   const foreign = options.foreignEntries || [];
   const distinct = source && source.resolution === 'distinct';
+  /** 取代/过期记录不参与合并判断：新内容不该再合进一条已经不是现行的记录。 */
+  const live = index.entries.filter((item) => !staleRecord(item));
+  const supersedeTarget = (selfId) => {
+    if (!draft.supersedes) return null;
+    const target = index.entries.find((item) => item.id === draft.supersedes);
+    if (!target) throw new Error(`要取代的记忆不在这一层：${draft.supersedes}`);
+    if (target.id === selfId) throw new Error('不能取代自己');
+    return target;
+  };
   let record = draft.id ? index.entries.find((item) => item.id === draft.id) : null;
   if (draft.id && !record) throw new Error('没有这条记忆，改用新增');
   let mergedFrom = null;
   let similarList = [];
   if (!record) {
     /** distinct 是用户明确说的「这是另一条」：同名也另起一条，不被规范化后的精确同名吞掉。 */
-    const hit = distinct ? null : resolveTarget(index.entries, draft);
+    const hit = distinct ? null : resolveTarget(live, draft);
     if (hit) {
       record = hit.target;
       mergedFrom = hit.target.title === draft.title ? null : hit.target.title;
     } else if (draft.has.topicKey && draft.topicKey && !distinct) {
       /** 同一槽位只留一条现行规范：同层同 topicKey + 同条件必须确认是更新还是另一条。 */
-      const slot = index.entries.find((item) => (item.topicKey || '') === draft.topicKey
+      const slot = live.find((item) => (item.topicKey || '') === draft.topicKey
         && view.conditionsKey(item.conditions) === view.conditionsKey(draft.conditions));
       if (slot) {
         const row = {
@@ -989,11 +1030,11 @@ function applyDraft(scope, index, source, now, options = {}) {
         };
         return { needsResolution: true, sameTopic: true, similarList: [row], similar: row, draft, record: null, merged: false, previousBody: null, archived: [] };
       }
-      similarList = similarEntries(index.entries, draft.title, draft.summary, 2);
+      similarList = similarEntries(live, draft.title, draft.summary, 2);
     } else {
-      similarList = similarEntries(index.entries, draft.title, draft.summary, 2);
+      similarList = similarEntries(live, draft.title, draft.summary, 2);
       /** 同名不同前置条件是用户明确表达的另一条，不走确认；只有换个说法的相近标题才拦。 */
-      const sameName = index.entries.some((item) => [item.title, ...(item.aliases || [])]
+      const sameName = live.some((item) => [item.title, ...(item.aliases || [])]
         .some((name) => String(name || '').toLowerCase() === draft.title.toLowerCase()));
       if (similarList.length > 0 && !distinct && !sameName) {
         return { needsResolution: true, similarList, similar: similarList[0], draft, record: null, merged: false, previousBody: null, archived: [] };
@@ -1007,6 +1048,7 @@ function applyDraft(scope, index, source, now, options = {}) {
     }
   }
   if (record) {
+    const target = supersedeTarget(record.id);
     const oldBody = readBody(scope, record.id);
     const next = mergedFields(draft, record, oldBody, index, writeMode, foreign);
     /** 正文原样保存：摘要再长也不往正文里补尾巴；完整原句进维护区。 */
@@ -1027,7 +1069,7 @@ function applyDraft(scope, index, source, now, options = {}) {
       && next.applicability === (record.applicability || 'all_in_scope')
       && next.body === oldBody
       && summaryFull === (typeof record.summaryFull === 'string' ? record.summaryFull : '');
-    if (noop) {
+    if (noop && !target) {
       return { record, merged: true, mergedFrom: null, similar: null, similarList, draft, noop: true, previousBody: oldBody, archived: [] };
     }
     const versions = snapshot(record, oldBody);
@@ -1054,10 +1096,18 @@ function applyDraft(scope, index, source, now, options = {}) {
     const archived = assertFits(scope, index, nextRecord);
     writeBody(scope, record.id, next.body);
     Object.assign(record, nextRecord);
-    return { record, merged: true, mergedFrom, similar: null, similarList, draft, noop: false, previousBody: oldBody, archived };
+    /** 更新让这条重新成为现行版本：旧的取代链标记要摘掉。 */
+    delete record.supersededBy;
+    record.validUntil = '';
+    if (target) {
+      const chain = stampSupersede(scope, target, record.id, now);
+      record.versions = [...chain, ...(record.versions || [])].slice(0, 2);
+    }
+    return { record, merged: true, mergedFrom, similar: null, similarList, draft, noop: Boolean(noop), previousBody: oldBody, archived };
   }
   if (writeMode === 'replace_current') throw new Error('整份替换要先指明是哪条，不能用来新增');
   /** 新建也只用调用方给的正文：超长摘要的完整原句进维护区，不混进正文。 */
+  const target = supersedeTarget('');
   const createdBody = draft.body;
   draft.fullTextInBody = false;
   draft.fullTextSaved = Boolean(draft.summaryFull);
@@ -1080,6 +1130,10 @@ function applyDraft(scope, index, source, now, options = {}) {
     aliases: [],
     created: now,
     updated: now,
+    validFrom: now,
+    validUntil: '',
+    supersededBy: '',
+    supersedeReason: '',
     lastUsed: now,
     revision: 1,
     status: 'active',
@@ -1097,6 +1151,7 @@ function applyDraft(scope, index, source, now, options = {}) {
   const archived = assertFits(scope, index, created);
   writeBody(scope, created.id, created.body);
   index.entries.push(created);
+  if (target) created.versions = stampSupersede(scope, target, created.id, now);
   return { record: created, merged: false, mergedFrom: null, similar: similarList[0] || null, similarList, draft, noop: false, previousBody: null, archived };
 }
 
@@ -1409,6 +1464,8 @@ export function search(scope, query, limit = 4, options = {}) {
       const collect = (pool, archived) => {
         for (const item of pool) {
           if (!readableRecord(item, options, index)) continue;
+          /** 被取代/过期待记录默认不出现；history:true 才列出，供模型看演化。 */
+          if (options.history !== true && staleRecord(item, options.now || Date.now())) continue;
           /** 已暂停、已过期或待确认的学习规则不进入检索结果，除非明确要病史。 */
           if (options.allowExperimental === true && options.history !== true
             && isExperimentalRecord(item) && !view.experimentalUsable(item, options.now)) continue;
@@ -1644,6 +1701,8 @@ function findCurrent(id, scope, options = {}) {
       summary: record.summary || '',
       scope: source.key === 'global' ? 'global' : 'project',
       revision: record.revision || 1,
+      validUntil: record.validUntil || '',
+      supersededBy: record.supersededBy || '',
       status: 'ok',
     };
   }
