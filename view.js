@@ -308,6 +308,10 @@ function wordsOf(text) {
   return out.slice(0, 24);
 }
 
+/** 纯英文查询按整词判断：git 不该命中 digital。自动召回和手动搜索共用这一条。 */
+export const asciiWordsOf = (text) => plain(text, 400).toLowerCase().match(/[a-z][a-z0-9_-]{1,}/g) || [];
+export const wordIn = (pool, word) => new RegExp(`(^|[^a-z0-9])${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^a-z0-9])`).test(pool);
+
 const WEIGHT = { title: 3, keywords: 4, summary: 1.5, when: 1 };
 
 /**
@@ -370,6 +374,13 @@ export function matchScore(record, query) {
   }
   const whenScore = hit(record.when, WEIGHT.when);
   if (whenScore > 0) score += whenScore;
+  /** 纯英文查询必须整词命中，别让语料里的字面巧合把不相关的记忆带进自动提示。 */
+  const ascii = asciiWordsOf(raw);
+  if (ascii.length && !/[\u4e00-\u9fff]/.test(raw)) {
+    const pool = [record.title, (record.aliases || []).join(' '), ...(record.tags || []), ...(record.triggers || []), record.summary, record.when]
+      .filter(Boolean).join('\n').toLowerCase();
+    if (!ascii.some((word) => wordIn(pool, word))) return { score: 0, hints: [] };
+  }
   return { score, hints };
 }
 

@@ -710,9 +710,9 @@ const STOP_GRAMS = new Set([
   '的话', '这里', '那里', '一个', '一些', '这样', '那样', '看看', '帮我看', '继续',
 ]);
 
-const asciiWordsOf = (text) => normalizeText(text, 400).toLowerCase().match(/[a-z][a-z0-9_-]{1,}/g) || [];
-
-const wordIn = (pool, word) => new RegExp(`(^|[^a-z0-9])${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^a-z0-9])`).test(pool);
+/** 英文整词规则只有一份，放在 view：自动召回和手动搜索必须同一个判断。 */
+const asciiWordsOf = view.asciiWordsOf;
+const wordIn = view.wordIn;
 
 /** 查询按空格/标点切成段：多段按关键词处理，整句仍按相关度处理。 */
 function queryRuns(query) {

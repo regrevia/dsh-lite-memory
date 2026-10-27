@@ -461,3 +461,16 @@ console.log('recall.test.mjs: ok');
   assert.equal(links.status, 'needs_context');
   assert.doesNotMatch(JSON.stringify(links), /发布前要检查什么/);
 }
+
+// A24：纯英文查询按整词判断，自动注入和手动搜索必须给同一个结论。
+{
+  const cwdEn = mkdir('en');
+  const scopeEn = store.scopeOf(cwdEn);
+  save(scopeEn, { title: 'Digital asset catalog', summary: '图形素材目录' });
+  const agent = makeAgent('agent-en', cwdEn);
+  const runtime = boot();
+  const sig = signal();
+  await runtime.preStep({ agent, signal: sig, turn: 't1' }, enter(human('git')));
+  assert.doesNotMatch(runtime.provider.text({ agent, signal: sig }), /Digital asset catalog/);
+  assert.equal(store.search(scopeEn, 'git', 5).length, 0, '手动搜索也不给这条');
+}

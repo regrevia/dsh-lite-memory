@@ -78,7 +78,7 @@
 
 | # | 结论 | 判定 | 理由 | 优先级 | 落点 |
 | --- | --- | --- | --- | --- | --- |
-| 1.1 | **不改成常驻注入**，保留「不写 system prompt、按需在 runtime context 露标题」 | 拒绝常驻 | 产品契约就是不站岗：无系统提示、无每轮注入、不扫文件。常驻方案把记忆变成「隐含规则」，与我们「记忆是历史笔记」的定位冲突；且会让前缀缓存与上下文预算不可控 | — | `index.js` `lite-memory:recall` 槽（order 60, interpolate false）保持不变 |
+| 1.1 | **不改成常驻注入**，保留「不常驻 system prompt、按需在 runtime context 露卡片」 | 拒绝常驻 | 产品契约就是不站岗：无系统提示、无每轮注入、不扫文件。常驻方案把记忆变成「隐含规则」，与我们「记忆是历史笔记」的定位冲突；且会让前缀缓存与上下文预算不可控 | — | `index.js` `lite-memory:recall` 槽（order 60, interpolate false）保持不变 |
 | 1.2 | **recall 输出补「预算与截断」可观测字段**：返回 `{titles, chars, limit, truncated, reasonCode}`，`reasonCode` 区分「无重叠」「超预算」「跨 scope 命中 global」 | 改造后采纳 | 现在的自动命中（`RECALL_QUERY_CHARS = 400`，最多 3 条标题）在超预算/无命中时对外只有一个空串，排障只能靠猜。Hermes 的百分比表头证明「预算是产品功能」 | P1 | `index.js` `recallText(holder)`（约 1510 行）；`RECALL_QUERY_CHARS`（809 行） |
 | 1.3 | **自动命中要留「命中原因」**：把命中的 bigram/run 与 score 档位写进本次会话的 citation receipts，供面板与 `memory_search` 的 `noTriggerReason` 复用 | 采纳 | 现在 `memory_search` 有 `noTriggerReason`，但自动 recall 没有对应物；两边口径不一致时无法解释「为什么这次没提醒我」 | P1 | `store.js` `scoreQuery` / `queryRuns` / `matchesRun`；`store.js` `citationFile`/`citationKey`/`resolveCitation` |
 | 1.4 | **会话级开关**：允许本会话关闭自动回忆或关闭自动建议（类似 Codex `/memories` 的按会话开关） | 采纳 | 低干扰的最后一环是「我现在不想被打断」。实现成本低：会话状态里一个 flag，`recallText` 直接返回空并在 receipts 记 `session_disabled` | P2 | `index.js` `recallText` + 会话状态；`client.js` 头部工具区（`conversation.session.header.utilities` 槽已有） |

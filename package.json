@@ -1,7 +1,7 @@
 {
   "name": "dsh-lite-memory",
-  "version": "0.18.1",
-  "description": "On-demand memory for the DeepSeek Harness: nothing in the system prompt, one muted line only when something is saved, hit or suggested.",
+  "version": "0.18.2",
+  "description": "On-demand memory for the DeepSeek Harness: nothing resident, at most three small cards on a real hit, bodies read on demand.",
   "type": "module",
   "main": "index.js",
   "engines": {
@@ -66,6 +66,9 @@
   "bugs": {
     "url": "https://github.com/regrevia/dsh-lite-memory/issues"
   },
-  "author": "regrevia",
+  "author": {
+    "name": "regrevia",
+    "url": "https://github.com/regrevia"
+  },
   "license": "MIT"
 }

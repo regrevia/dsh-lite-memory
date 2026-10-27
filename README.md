@@ -1,15 +1,15 @@
 # dsh-lite-memory
 
-**没有常驻的记忆正文：不写系统提示，不逐轮注入，命中才读。**
-**No memory in the prompt: nothing injected per turn, read only on a hit.**
+**全库不常驻：没有命中的轮次不追加记忆内容，命中时最多三条卡片，正文按需读。**
+**Nothing resident: a turn that misses adds no memory text; a hit adds at most three cards, bodies read on demand.**
 
 ---
 
 ## 它是什么 / What it is
 
-给 DeepSeek Harness 的轻量记忆：不写常驻系统提示、不逐轮注入、不扫描文件。记忆只在两种时刻出现——你说「记一下」，或者这句话跟已有条目真有关（最多三条标题，正文仍按需读）。
+给 DeepSeek Harness 的轻量记忆：全库不进常驻提示、不逐轮注入、不扫描文件。记忆只在两种时刻出现——你说「记一下」，或者这句话跟已有条目真有关（最多三条卡片：标题、编号、摘要、前提，正文仍按需读）。
 
-Lightweight memory for the DeepSeek Harness. No standing system prompt, nothing injected per turn, no file scanning. Memory appears at exactly two moments: you ask it to remember, or the message genuinely overlaps an existing entry (at most three titles; bodies are read on demand).
+Lightweight memory for the DeepSeek Harness. Nothing resident: no standing prompt, no per-turn injection, no file scanning. Memory appears at exactly two moments: you ask it to remember, or the message genuinely overlaps an existing entry (at most three cards with title, id, summary and preconditions; bodies are read on demand).
 
 ## 触发方式 / Triggers
 
