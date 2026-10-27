@@ -58,6 +58,14 @@
 
 修复：`coldStored` 读冷存失败时先回退到热状态正文（`state.readEntryBody`，该条在热状态里还有正文时就是权威副本），拿到正文就重写冷存（自愈）；拿不到才抛原错误。这样「一条坏归档」不再拖死整层，且不掩盖真正没救的损坏。测试：手工写坏 `cold/<id>.json` 后 `memory_save` 仍成功、该条 `memory_read` 恢复。
 
+## P0-F 从上一版恢复时不会自己把授权带回来
+
+证据：`state.js` `load()` 在 `state.json` 损坏或丢失时采用 `state.prev.json`，原实现直接返回 prev 的 `control`。prev 是关闭总开关之前拍的快照，于是「用户已关闭记忆」会被一次损坏恢复悄悄翻回开启。
+
+修复：`withRecoveryMarker()` 在两条恢复路径上把 `control` 改成 `{ enabled:false, recoveryPending:true }`；`controlOf()` 把 `recoveryPending` 视为关闭，并把这个事实返回给上层。用户重新开启走 `applyControl`，写入新配置（无 `recoveryPending`），状态回到正常。`index.js` 的 `memoryOffCopy()` 让面板与工具文案区分「你自己关的」和「刚恢复、需要你重新开启」。
+
+测试：`test/ha.test.mjs`「recovery does not bring a closed memory switch back on its own」。
+
 ## P1-E 归档正文在「腾挪」后短暂只在热状态里
 
 证据：`state.js:740` `enforceBudget` 把 victim 置 `archived` 但正文仍留在热状态；`store.js:254-258` 只把 `{id,title,status:'archived'}` 补进 `index.archived`；真正的 `coldStored`（写冷存 + 摘空）发生在下一次 `applyFlat`。`coldStored` 在缺正文时会回退 `state.readEntryBody` 从磁盘热状态找回（`store.js:536-538`），所以不会丢。

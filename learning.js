@@ -356,13 +356,20 @@ export function pendingChangeFrom(feedback = {}) {
   if (!currentText) return null;
   const first = (lines[0] || currentText).split(/[，。！？；]/)[0].trim();
   const topicKey = String(feedback.cue?.dimension || first || currentText).slice(0, 60);
+  /**
+   * 兜底不是授权：只在文本自己说到全项目时才按全项目收，否则保留它原本的适用范围
+   * （有任务种类就挂条件，没有就待确认），不能让一句「以后开头先给结论」变成全库规则。
+   */
+  const projectWide = /(所有|全都|一律|任何|默认|整个项目|这个项目|本项目)/.test(currentText);
+  const taskKind = String(feedback.cue?.taskKind || '').trim();
+  const applicability = projectWide ? 'all_in_scope' : taskKind ? 'conditional' : 'unresolved';
   return {
     target: 'new',
     feedbackType: 'spec_change',
     topicKey,
     currentText,
-    applicability: 'all_in_scope',
-    conditions: [],
+    applicability,
+    conditions: applicability === 'conditional' ? [{ key: 'taskKind', value: taskKind }] : [],
     evidence: ['u0'],
     persistence: 'project_candidate',
     /** 摘录从候选一路带到提交路径，模型返回空时也不丢来源。 */

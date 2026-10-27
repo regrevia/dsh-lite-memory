@@ -67,6 +67,23 @@ test('P0-B: a corrupt state.json falls back to state.prev.json and says so', () 
   assert.match(loaded.recovery.message, /已从上一版恢复/);
 });
 
+test('P0-B: recovery does not bring a closed memory switch back on its own', () => {
+  const scope = fresh('recover-auth');
+  store.upsert(scope, { title: '关闭前的一条', summary: '先有数据', body: '正文' });
+  store.setMemoryEnabled(scope, false, { operationId: 'op-close' });
+  // 关闭这一版是 current；prev 还是开启状态。current 坏掉后恢复的是 prev。
+  assert.equal(store.controlStatus(scope).enabled, false);
+  fs.writeFileSync(currentOf(scope), '{"format":"broken"');
+  const loaded = state.load(scope);
+  assert.equal(loaded.recovered, true);
+  assert.equal(loaded.state.control.recoveryPending, true);
+  assert.equal(store.controlStatus(scope).enabled, false, '恢复出来仍是关闭，不能自己恢复授权');
+  const reopened = store.setMemoryEnabled(scope, true, { operationId: 'op-reopen' });
+  assert.equal(reopened.ok, true);
+  assert.equal(store.controlStatus(scope).enabled, true);
+  assert.equal(store.controlStatus(scope).recoveryPending, false, '用户明确开启后不再待确认');
+});
+
 test('P0-B: both files unreadable gives a recovery step, not just a path', () => {
   const scope = fresh('both-bad');
   store.upsert(scope, { title: '第一条', summary: '先写一条', body: '正文一' });

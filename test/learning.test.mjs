@@ -962,6 +962,18 @@ test('L03b 明确长期要求整理为空时也留下规则', () => {
   assert.equal(learning.pendingChangeFrom({ text: '   ' }), null);
 });
 
+test('L03c 兜底不把没说范围的要求抬成全项目规则', () => {
+  const vague = learning.pendingChangeFrom({ text: '以后口播开头先给结论。', cue: { explicitLongTerm: true } });
+  assert.equal(vague.applicability, 'unresolved');
+  assert.deepEqual(vague.conditions, []);
+  const scoped = learning.pendingChangeFrom({ text: '以后口播开头先给结论。', cue: { explicitLongTerm: true, taskKind: 'video' } });
+  assert.equal(scoped.applicability, 'conditional');
+  assert.deepEqual(scoped.conditions, [{ key: 'taskKind', value: 'video' }]);
+  const global = learning.pendingChangeFrom({ text: '以后这个项目默认用 pnpm。', cue: { explicitLongTerm: true } });
+  assert.equal(global.applicability, 'all_in_scope');
+  assert.deepEqual(global.conditions, []);
+});
+
 test('L04 先算目标状态再查配额，过期候选可恢复', () => {
   const base = { existing: null, evidence: { episodeId: 'e1', messageIds: ['m1'], sourceExcerpt: '以后都用参数化查询' }, pending: 12, rules: 0, now: 1000 };
   const active = learning.admitChange({ ...base, change: NEW_CHANGE, explicitLongTerm: true });

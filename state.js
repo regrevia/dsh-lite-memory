@@ -106,12 +106,13 @@ export function evolutionOf(state) {
 export function controlOf(state) {
   const raw = state && state.control;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    return { enabled: true, epoch: '', changedAt: '', compatible: true };
+    return { enabled: true, epoch: '', changedAt: '', recoveryPending: false, compatible: true };
   }
   return {
-    enabled: raw.enabled !== false,
+    enabled: raw.enabled !== false && raw.recoveryPending !== true,
     epoch: typeof raw.epoch === 'string' ? raw.epoch : '',
     changedAt: typeof raw.changedAt === 'string' ? raw.changedAt : '',
+    recoveryPending: raw.recoveryPending === true,
     compatible: true,
   };
 }
@@ -1142,6 +1143,20 @@ export function migrateLegacy(scope, options = {}) {
   });
 }
 
+/** 恢复出来的状态把总开关留在关闭态并记下原因，避免用一份旧快照静默恢复授权。 */
+function withRecoveryMarker(payload) {
+  const raw = payload && payload.control && typeof payload.control === 'object' && !Array.isArray(payload.control) ? payload.control : {};
+  return {
+    ...payload,
+    control: {
+      enabled: false,
+      epoch: typeof raw.epoch === 'string' ? raw.epoch : '',
+      changedAt: new Date().toISOString(),
+      recoveryPending: true,
+    },
+  };
+}
+
 /**
  * 读当前状态：只有「完全没有」才算新库；坏文件、未知版本、迁移痕迹都报错，
  * 绝不用空库覆盖。
@@ -1173,7 +1188,7 @@ export function load(scope, options = {}) {
     }
     if (recovered) {
       return {
-        state: recovered,
+        state: withRecoveryMarker(recovered),
         exists: true,
         recovered: true,
         recovery: {
@@ -1204,7 +1219,7 @@ export function load(scope, options = {}) {
     const prev = readEnvelope(prevFile(scope));
     if (prev) {
       // current 丢了但 prev 完好：恢复 prev，并标记需要重写 current。
-      return { state: prev, exists: false, recovered: true };
+      return { state: withRecoveryMarker(prev), exists: false, recovered: true };
     }
     return { state: emptyState(scope), exists: false, recovered: false };
   }

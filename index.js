@@ -88,6 +88,17 @@ function memoryEnabled(scope) {
   }
 }
 
+/** 关着的原因决定下一步：恢复出来的状态要用户重新开启，而不是让人以为是自己关的。 */
+function memoryOffCopy(scope) {
+  try {
+    return controlStatus(scope).recoveryPending
+      ? '本项目记忆刚从损坏里恢复，需要你重新开启'
+      : '本项目记忆已关闭，先在面板打开';
+  } catch {
+    return '本项目记忆已关闭，先在面板打开';
+  }
+}
+
 function memoryEnabledFor(execution) {
   return memoryEnabled(scopeOf(cwdOf(execution)));
 }
@@ -575,7 +586,7 @@ function keepHandler(webServer, cwdForSession) {
 
     /** 总开关关闭时面板只能看：保留、拒绝、搬移、撤销都不落盘。 */
     if (!controlStatus(scope).enabled) {
-      return sendJson(res, 409, { ok: false, reason: '本项目记忆已关闭，先在面板打开', code: 'memory_disabled' });
+      return sendJson(res, 409, { ok: false, reason: memoryOffCopy(scope), code: 'memory_disabled' });
     }
 
     if (action === 'move' || action === 'resume-move') {
@@ -1637,7 +1648,7 @@ export function apply(ctx, config) {
         type: 'text',
         text: value.needsScope
           ? value.reason === 'memory_disabled'
-            ? 'memory · 本项目记忆已关闭，先在面板打开'
+            ? `memory · ${memoryOffCopy(projectScope)}`
             : value.reason === 'unconfirmed_project'
             ? `memory · 当前目录还不能确认属于哪个项目：「${value.title}」\n先确认项目根目录，或显式 scope="global"`
             : `memory · 归属还没定：「${value.title}」\n补 memoryClass（personal_preference / project_fact / environment_fact / portable_procedure）或显式 scope；设备事实还要给设备条件`
@@ -1657,6 +1668,7 @@ export function apply(ctx, config) {
         return {
           id: '', title: String(args.title || ''), summary: '', when: '', revision: 0,
           merged: false, changed: false, scope: '', needsScope: true, reason: 'memory_disabled',
+          recoveryPending: controlStatus(projectScope).recoveryPending,
           needsResolution: false, similarIds: '', similar: '', archived: '',
         };
       }
