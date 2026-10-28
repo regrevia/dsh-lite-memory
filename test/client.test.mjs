@@ -281,16 +281,17 @@ assert.equal(palacePicked, 'mem_a');
 const palaceEmpty = MemoryPalace({ records: [], selectedId: '', onPick: () => {}, emptyText: '这个项目还没有记忆' });
 assert.equal(expandNodes(palaceEmpty).some((node) => node.children.includes('这个项目还没有记忆')), true);
 
-// 每条引用带类型：搜索命中用条目的 kind，读过正文用 recordKind；缺了就只写范围与来源。
+// 引用行只标层与来源：类型留在数据里给检索用，不上会话界面。
 const typedSearch = citationOf({ title: 'A', scope: 'global', revision: 1, status: 'ok', kind: 'preference' }, 'memory-search');
 assert.equal(typedSearch.entryKind, 'preference');
-assert.equal(refMetaOf(typedSearch), '偏好 · 全局 · 你记的');
+assert.equal(refMetaOf(typedSearch), '[全局]');
 assert.equal(citationOf({ kind: 'memory-read', title: 'P', recordKind: 'procedure', scope: 'project', revision: 2 }, 'memory-read').entryKind, 'procedure');
-assert.equal(refMetaOf({ scope: 'project', origin: 'user_explicit' }), '项目 · 你记的');
-/** 检索引用也要带类型与更新距今，缺时间时退回两项。 */
+assert.equal(refMetaOf({ scope: 'project', origin: 'user_explicit' }), '[项目]');
+assert.equal(refMetaOf({ scope: 'global', origin: 'project_evolution' }), '[全局][自进化]');
+/** 更新距今照旧，只是不再拼类型与「你记的」。 */
 const aged = citationOf({ kind: 'preference', title: 'C', scope: 'global', revision: 1, updated: new Date(Date.now() - 3 * 86_400_000).toISOString() }, 'memory-search');
 assert.equal(aged.entryKind, 'preference');
-assert.equal(refMetaOf(aged), '偏好 · 全局 · 你记的 · 3 天前更新');
+assert.equal(refMetaOf(aged), '[全局] · 3 天前更新');
 assert.equal(agoLabel(''), '');
 assert.equal(agoLabel(new Date(Date.now() - 40 * 86_400_000).toISOString()), '');
 

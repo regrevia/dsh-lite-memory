@@ -598,16 +598,15 @@ window.__ModuleLoader__.load({
       return '';
     };
     const refMetaOf = (item) => {
-      const kind = KIND_LABEL[item.entryKind] || '';
-      const parts = kind
-        ? [kind, item.scope === 'global' ? '全局' : '项目', item.origin === 'project_evolution' ? '自进化' : '你记的']
-        : [item.scope === 'global' ? '全局' : '项目', item.origin === 'project_evolution' ? '自进化' : '你记的'];
+      /** 会话里只标层与来源：类型留给面板和工具，不占引用行的宽度。 */
+      const layer = `${item.scope === 'global' ? '[全局]' : '[项目]'}${item.origin === 'project_evolution' ? '[自进化]' : ''}`;
+      const parts = [];
       const ago = agoLabel(item.updated);
       if (ago) parts.push(ago);
       if (item.status === 'archived') parts.push('已归档');
       const processing = PROCESSING_LABEL[item.processingStatus] || '';
       if (processing) parts.push(processing);
-      return parts.join(' · ');
+      return [layer, ...parts].join(' · ');
     };
 
     const RefChevron = (props) => h('svg', {

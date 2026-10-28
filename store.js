@@ -2399,11 +2399,15 @@ export function readCitationBodyByTitle(sessionId, title, options = {}) {
   if (!wanted) return null;
   const data = readSessionFile(sessionId);
   const want = Number.isInteger(options.revision) ? options.revision : null;
-  const rows = ((data && data.items) || []).filter((item) => item
-    && normalizeText(item.title || '', 120).toLowerCase() === wanted);
-  if (rows.length === 0) return null;
-  const row = (want !== null && rows.find((item) => (Number(item.revision) || 1) === want)) || rows[0];
-  return readCitationRow(sessionId, row);
+  /** 引用行只存身份，标题要从当前索引解析出来再比；行上没有 title 字段。 */
+  const matches = ((data && data.items) || [])
+    .map((row) => ({ row, found: resolveCitation(row) }))
+    .filter((item) => item.found
+      && normalizeText(item.found.row.title || '', 120).toLowerCase() === wanted);
+  if (matches.length === 0) return null;
+  const chosen = (want !== null
+    && matches.find((item) => (Number(item.found.entry.revision) || 1) === want)) || matches[0];
+  return readCitationRow(sessionId, chosen.row);
 }
 
 function readCitationRow(sessionId, row) {
@@ -2420,6 +2424,7 @@ function readCitationRow(sessionId, row) {
   }
   return {
     ...found.row,
+    status: found.entry.status || 'active',
     scopeLabel: found.scope.key === 'global' ? '全局' : path.basename(found.scope.cwd || '') || found.scope.key,
     body: body.slice(0, LIMITS.entryBytes),
   };

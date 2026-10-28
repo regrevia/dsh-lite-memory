@@ -286,6 +286,12 @@ assert.equal(cites.body.items.some((item) => 'path' in item), false);
 const opened = await call('/lite-memory/body', { sessionId: 'session-contract', id: citedRow.id });
 assert.equal(opened.status, 200);
 assert.match(opened.body.body, /引用正文第一行/);
+/** 界面只有标题：按标题也要能点开，不能因为引用行不存 title 就报已删除。 */
+const openedByTitle = await call('/lite-memory/body', { sessionId: 'session-contract', title: '引用测试', revision: opened.body.revision });
+assert.equal(openedByTitle.status, 200);
+assert.equal(openedByTitle.body.status, 'active');
+assert.match(openedByTitle.body.body, /引用正文第一行/);
+assert.equal((await call('/lite-memory/body', { sessionId: 'session-contract', title: '没有这条' })).body.status, 'gone');
 assert.equal(opened.body.scopeLabel, path.basename(cwd));
 const gone = await call('/lite-memory/body', { sessionId: 'session-contract', id: 'mem_999999999999' });
 assert.equal(gone.status, 200);
