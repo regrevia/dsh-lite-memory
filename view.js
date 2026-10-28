@@ -309,15 +309,35 @@ function wordsOf(text) {
   } catch {
     for (const word of plainText.split(/[^\p{L}\p{N}]+/u)) if (word && !STOPWORDS.has(word)) out.push(word);
   }
-  /** 本机 ICU 缺中文词典时整句会被切成单字；补上二元组，别让「这」这种单字当整词。 */
-  if (!/[a-z]/i.test(plainText) && out.some((word) => [...word].length === 1)) {
-    const chars = plainText.replace(/[^\p{L}\p{N}]+/gu, '');
-    for (let i = 0; i + 1 < chars.length; i += 1) {
-      const gram = chars.slice(i, i + 2);
-      if (!STOPWORDS.has(gram)) out.push(gram);
+  /** 本机 ICU 缺中文词典时中文会被切成单字；只在出现单字时才补中文二元组，别让二元组把查询的实词数量撑大。 */
+  if (out.some((word) => [...word].length === 1 && /[\u4e00-\u9fff]/.test(word))) {
+    for (const run of plainText.split(/[^\u4e00-\u9fff]+/)) {
+      for (let i = 0; i + 1 < run.length; i += 1) {
+        const gram = run.slice(i, i + 2);
+        if (!STOPWORDS.has(gram)) out.push(gram);
+      }
     }
   }
   return out.slice(0, 48);
+}
+
+/** 只取切词给出的多字实词：本机 ICU 切成单字时返回空，说明这句子没有可靠词边界。 */
+function contentWordsOf(text) {
+  const plainText = plain(text, 400).toLowerCase();
+  const out = [];
+  try {
+    const segmenter = new Intl.Segmenter('zh', { granularity: 'word' });
+    for (const part of segmenter.segment(plainText)) {
+      const word = part.segment.trim();
+      if ([...word].length < 2 || !/[\p{L}\p{N}]/u.test(word)) continue;
+      if (!STOPWORDS.has(word)) out.push(word);
+    }
+  } catch {
+    for (const word of plainText.split(/[^\p{L}\p{N}]+/u)) {
+      if ([...word].length >= 2 && !STOPWORDS.has(word)) out.push(word);
+    }
+  }
+  return out;
 }
 
 /** 纯英文查询按整词判断：git 不该命中 digital。自动召回和手动搜索共用这一条。 */
@@ -357,7 +377,8 @@ export function matchScore(record, query, corpus = null) {
     return { score: 1000, hints: ['id'] };
   }
   const grams = gramsOf(raw);
-  const words = wordsOf(raw);
+  /** 本机切词会同时给出整词和补的二元组，去重后同一个词才只算一次。 */
+  const words = [...new Set(wordsOf(raw))];
   const hints = [];
   let score = 0;
   const hit = (text, weight) => {
@@ -402,21 +423,38 @@ export function matchScore(record, query, corpus = null) {
     const df = corpus.df.get(text) || 0;
     return df > Math.max(3, corpus.total * 0.15);
   };
-  let titleWordHit = false;
-  let keywordWordHit = false;
-  /** 标题里同时命中的不同实词：两个以上独立概念都落在标题，比只沾一个词更说明在说同一件事。 */
+  /**
+   * 查询里有两个以上实词时，只沾上一个不算在说同一件事。
+   * 「启动服务器」只碰到「启动失败」里的「启动」，不能把改包名的记忆带进自动提示。
+   * 单实词查询（「发版」「样式」）不设这个门槛。
+   */
+  const distinctContent = [...new Set(contentWordsOf(raw).filter((word) => /[\u4e00-\u9fff]/.test(word) && !common(word)))];
+  const keywordWords = new Set();
   const titleWords = new Set();
   for (const word of words) {
     if ([...word].length < 2) continue;
     const plainWord = word.toLowerCase();
     if (common(plainWord)) continue;
-    if (keywordTexts.some((text) => plain(text, 400).toLowerCase().includes(plainWord))) { keywordWordHit = true; continue; }
+    if (keywordTexts.some((text) => plain(text, 400).toLowerCase().includes(plainWord))) {
+      keywordWords.add(plainWord);
+      continue;
+    }
     if (plain(record.title, 400).toLowerCase().includes(plainWord)
       || (record.aliases || []).some((name) => plain(name, 400).toLowerCase().includes(plainWord))) {
-      titleWordHit = true;
       titleWords.add(plainWord);
     }
   }
+  const wholeText = [record.title, (record.aliases || []).join(' '), (record.tags || []).join(' '),
+    (record.triggers || []).join(' '), record.summary, record.when, record.body]
+    .map((text) => plain(text, 400).toLowerCase()).filter(Boolean).join('\n');
+  const matchedContent = distinctContent.filter((word) => wholeText.includes(word)).length;
+  const enoughContent = distinctContent.length < 2 || matchedContent >= 2;
+  if (!enoughContent) {
+    keywordWords.clear();
+    titleWords.clear();
+  }
+  const titleWordHit = titleWords.size > 0;
+  const keywordWordHit = keywordWords.size > 0;
   if (!keywordWordHit && titleWordHit) { score += WEIGHT.title; hints.push('title'); }
   if (keywordWordHit) { score += WEIGHT.keywords; hints.push('keyword'); }
   if (titleWords.size >= 2) { score += WEIGHT.coverage; hints.push('coverage'); }

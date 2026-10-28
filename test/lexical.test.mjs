@@ -5,6 +5,7 @@ import path from 'node:path';
 
 process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-lexical-'));
 const store = await import('../store.js');
+const view = await import('../view.js');
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-lexical-scope-'));
 const scope = store.scopeOf(dir);
@@ -19,6 +20,8 @@ const add = (title, extra = {}) => store.upsert(scope, {
 add('digital signal 调试', { tags: ['音频'] });
 add('怎么做发布检查', { tags: ['发布'] });
 add('git 提交前跑检查', { tags: ['git'] });
+add('插件改名与合并', { tags: ['插件开发', '启动失败'], summary: '改包名要同步 factory ID，否则启动失败' });
+add('启动服务器', { tags: ['启动'] });
 
 /* 英文按整词：git 不能因为共享 gi/it 命中 digital。 */
 assert.equal(store.search(scope, 'git', 5).some((row) => row.title.includes('digital')), false);
@@ -29,5 +32,13 @@ assert.equal(store.search(scope, '这个怎么弄', 5).length, 0);
 
 /* 实词仍然命中。 */
 assert.equal(store.search(scope, '发布检查', 5).some((row) => row.title.includes('怎么做发布检查')), true);
+
+/* 「启动」只是「启动失败」的一半，不能把改包名的记忆带进自动提示。 */
+const renameRecord = store.search(scope, '插件改名与合并', 1)[0];
+const serverRecord = store.search(scope, '启动服务器', 5).find((row) => row.title === '启动服务器');
+assert.equal(view.matchScore(renameRecord, '启动服务器').score < view.MATCH_FLOOR, true);
+assert.equal(view.matchScore(serverRecord, '启动服务器').score >= view.MATCH_FLOOR, true);
+/* 两个词都落在同一个标签上才继续算命中。 */
+assert.equal(store.search(scope, '启动失败怎么查', 5).some((row) => row.title === '插件改名与合并'), true);
 
 console.log('lexical.test.mjs: all passed');
