@@ -871,10 +871,22 @@ window.__ModuleLoader__.load({
       explainBus.add(listener);
       return () => explainBus.delete(listener);
     };
+    /** 召回回执只说“多久以前”，不跟列表的“更新”混用。 */
+    const shortAgo = (value) => {
+      const at = Date.parse(value);
+      if (!Number.isFinite(at)) return '';
+      const minutes = Math.floor((Date.now() - at) / 60_000);
+      if (minutes < 1) return '刚刚';
+      if (minutes < 60) return `${minutes} 分钟前`;
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return `${hours} 小时前`;
+      const days = Math.floor(hours / 24);
+      return days < 30 ? `${days} 天前` : '';
+    };
     /**
      * 面板只说判断结果，不说内部原因码；条数来自上一次自动召回的回执。
      */
-    const recallLineOf = (receipt) => {
+    const recallTextOf = (receipt) => {
       if (!receipt || typeof receipt !== 'object') return '';
       const cards = Number.isInteger(receipt.cards) ? receipt.cards : 0;
       const matched = Number.isInteger(receipt.matched) ? receipt.matched : 0;
@@ -890,6 +902,12 @@ window.__ModuleLoader__.load({
         case 'tools_only': return '上次没提醒，只在你问时检索';
         default: return '';
       }
+    };
+    /** 回执可能是上一轮甚至更早的：带上时间，别让旧提醒看起来像刚发生。 */
+    const recallLineOf = (receipt) => {
+      const text = recallTextOf(receipt);
+      const when = receipt && typeof receipt === 'object' ? shortAgo(receipt.at) : '';
+      return text && when ? `${text} · ${when}` : text;
     };
     /** 功能关闭时视图统一回列表，不保留一个画不出来的页签。 */
     const graphViewOf = (enabled, view) => (enabled === true && view === 'graph' ? 'graph' : 'list');

@@ -338,6 +338,8 @@ assert.deepEqual(rowKeepFlags([rowKeyOf('memory_read', blockedBlock('memory · s
 // 面板要能回答「为什么这次没提醒我」：只给结论和条数，不露原因码。
 assert.equal(recallLineOf(null), '');
 assert.equal(recallLineOf({ reason: 'hit', cards: 1, matched: 1 }), '上次自动提醒 1 条');
+assert.equal(recallLineOf({ reason: 'hit', cards: 1, matched: 1, at: new Date(Date.now() - 120000).toISOString() }), '上次自动提醒 1 条 · 2 分钟前');
+assert.equal(recallLineOf({ reason: 'no_overlap', at: new Date().toISOString() }), '上次没提醒，没有匹配的记忆 · 刚刚');
 assert.equal(recallLineOf({ reason: 'budget', cards: 0, matched: 2 }), '上次没提醒，2 条相关记忆，本轮自动提醒已用满');
 assert.equal(recallLineOf({ reason: 'needs_context', cards: 0, matched: 1 }), '上次没提醒，1 条相关记忆，适用条件未确认');
 assert.equal(recallLineOf({ reason: 'conflict', cards: 0, matched: 2 }), '上次没提醒，2 条相关记忆，存在冲突的结论');
