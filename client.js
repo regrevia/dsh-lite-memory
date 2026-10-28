@@ -2126,6 +2126,8 @@ window.__ModuleLoader__.load({
       const load = (scopeKey = '', focusRule = '') => {
         const request = generation.current + 1;
         generation.current = request;
+        /** 用户选的项目立刻算数：晚到的保存/开关回执不能再把界面拉回旧范围。 */
+        if (scopeKey) scopeRef.current = scopeKey;
         setLoading(true);
         setFailed(false);
         setNote('');
@@ -2330,7 +2332,7 @@ window.__ModuleLoader__.load({
         };
         if (learningAction === 'pause') payload.ids = [selectedRuleRow.id];
         post('/lite-memory/evolution', payload).then((result) => {
-          if (!alive.current) return;
+          if (!alive.current || (selectedKey && scopeRef.current !== selectedKey)) return;
           setBusy(false);
           if (succeeded(result)) load(selectedKey, selectedRuleRow.id);
           else setNote(failure(result, '这次没有改动'));
@@ -2347,7 +2349,7 @@ window.__ModuleLoader__.load({
         setEditNote('');
         const payload = { sessionId, scopeKey: selectedKey, id: record.id, title, body: text, expectedRevision: record.revision };
         post('/lite-memory/entry', payload).then((result) => {
-          if (!alive.current) return;
+          if (!alive.current || (selectedKey && scopeRef.current !== selectedKey)) return;
           setBusy(false);
           if (succeeded(result)) {
             const nextTitle = result.body && typeof result.body.title === 'string' ? result.body.title : title;
@@ -2368,7 +2370,8 @@ window.__ModuleLoader__.load({
              */
             if (result.status === 409 && result.body && result.body.retry) {
               post('/lite-memory/body', { sessionId, id: record.id, scopeKey: selectedKey }).then((fresh) => {
-                if (!alive.current || !fresh.ok || !fresh.body || !fresh.body.ok || fresh.body.status === 'gone') return;
+                if (!alive.current || (selectedKey && scopeRef.current !== selectedKey)
+                  || !fresh.ok || !fresh.body || !fresh.body.ok || fresh.body.status === 'gone') return;
                 const revision = Number.isInteger(fresh.body.revision) ? fresh.body.revision : 0;
                 setDetail(fresh.body);
                 setData((prev) => {
@@ -2386,7 +2389,7 @@ window.__ModuleLoader__.load({
         if (busy || !canToggle) return;
         setBusy(true);
         post('/lite-memory/control', { sessionId, enabled: !memoryOn, operationId: newOperationId() }).then((result) => {
-          if (!alive.current) return;
+          if (!alive.current || (selectedKey && scopeRef.current !== selectedKey)) return;
           setBusy(false);
           if (succeeded(result)) load(selectedKey);
           else setNote(failure(result, '开关没有改动'));
@@ -2397,7 +2400,7 @@ window.__ModuleLoader__.load({
         if (busy || !evolution || !canToggle || !memoryOn) return;
         setBusy(true);
         post('/lite-memory/evolution', { sessionId, enabled: evolution.enabled !== true, operationId: newOperationId() }).then((result) => {
-          if (!alive.current) return;
+          if (!alive.current || (selectedKey && scopeRef.current !== selectedKey)) return;
           setBusy(false);
           if (succeeded(result)) load(selectedKey);
           else setNote(failure(result, '开关没有改动'));
