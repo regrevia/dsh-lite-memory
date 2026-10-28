@@ -1315,7 +1315,7 @@ function scoreQuery(item, grams, raw) {
 /** 项目记忆总开关：读当前层，缺字段按开启。 */
 export function controlStatus(scope) {
   const index = loadIndex(scope);
-  return { ...(index.__control || state.controlOf(null)) };
+  return index.__control ? state.controlOf({ control: index.__control }) : state.controlOf(null);
 }
 
 export function setMemoryEnabled(scope, enabled, options = {}) {
@@ -1335,6 +1335,53 @@ export function setMemoryEnabled(scope, enabled, options = {}) {
     } catch (error) {
       if (error && error.code === 'conflict') return { ok: false, reason: '项目状态刚被改过，重试一次', retry: true };
       return { ok: false, reason: error instanceof Error ? error.message : '记忆开关没有改动' };
+    }
+    return { ok: true, changed: Boolean(applied && applied.changed), ...controlStatus(scope) };
+  });
+}
+
+/** 面板一次改开关和触发方式：同一把锁里落盘，不会只改一半。 */
+export function setMemoryControl(scope, options = {}, meta = {}) {
+  return withLock(scope, () => {
+    const before = loadIndex(scope);
+    const operationId = typeof meta.operationId === 'string' ? meta.operationId : '';
+    let applied = null;
+    try {
+      state.transact(scope, {
+        operationId,
+        expectCreate: !before.__exists,
+        expected: before.__exists ? { generation: before.generation, epoch: before.epoch } : null,
+      }, (draft) => {
+        applied = state.applyControl(draft, options.enabled, options.mode);
+        return applied.changed ? { changed: true } : { changed: false };
+      });
+    } catch (error) {
+      if (error && error.code === 'conflict') return { ok: false, reason: '项目状态刚被改过，重试一次', retry: true };
+      return { ok: false, reason: error instanceof Error ? error.message : '记忆设置没有改动' };
+    }
+    return { ok: true, changed: Boolean(applied && applied.changed), ...controlStatus(scope) };
+  });
+}
+
+/** 项目的触发方式：自适应 / 仅搜索 / 关闭；空值跟随插件配置，不改全局默认。 */
+export function setRecallMode(scope, mode, options = {}) {
+  if (mode !== 'adaptive' && mode !== 'tool_only' && mode !== 'off') return { ok: false, reason: '不认识这个触发方式' };
+  return withLock(scope, () => {
+    const before = loadIndex(scope);
+    const operationId = typeof options.operationId === 'string' ? options.operationId : '';
+    let applied = null;
+    try {
+      state.transact(scope, {
+        operationId,
+        expectCreate: !before.__exists,
+        expected: before.__exists ? { generation: before.generation, epoch: before.epoch } : null,
+      }, (draft) => {
+        applied = state.applyControl(draft, undefined, mode);
+        return applied.changed ? { changed: true } : { changed: false };
+      });
+    } catch (error) {
+      if (error && error.code === 'conflict') return { ok: false, reason: '项目状态刚被改过，重试一次', retry: true };
+      return { ok: false, reason: error instanceof Error ? error.message : '触发方式没有改动' };
     }
     return { ok: true, changed: Boolean(applied && applied.changed), ...controlStatus(scope) };
   });

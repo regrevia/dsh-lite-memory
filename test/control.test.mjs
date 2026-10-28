@@ -65,6 +65,28 @@ const seedRule = (scope, title) => {
 const scopeOf = (dir) => store.scopeOf(dir);
 const toggle = (scope, enabled) => store.setMemoryEnabled(scope, enabled, { operationId: `op-${Math.random().toString(16).slice(2)}` });
 
+/* C00：触发方式按项目存，切到「仅搜索」不改总开关，关闭时也不偷偷恢复授权。 */
+{
+  const scope = scopeOf(mkdir('mode'));
+  assert.equal(store.controlStatus(scope).enabled, true);
+  assert.equal(store.controlStatus(scope).mode, '');
+  const epochBefore = store.controlStatus(scope).epoch;
+  const searched = store.setRecallMode(scope, 'tool_only', { operationId: 'op-mode-search' });
+  assert.equal(searched.ok, true);
+  assert.equal(searched.mode, 'tool_only');
+  assert.equal(store.controlStatus(scope).enabled, true, '只改触发方式，不动总开关');
+  assert.notEqual(store.controlStatus(scope).epoch, epochBefore, '改触发方式要换掉旧回执的凭据');
+  assert.equal(store.setRecallMode(scope, '自动', { operationId: 'op-mode-bad' }).ok, false);
+  assert.equal(store.controlStatus(scope).mode, 'tool_only', '不认识的值不落盘');
+  assert.equal(toggle(scope, false).ok, true);
+  assert.equal(store.setRecallMode(scope, 'adaptive', { operationId: 'op-mode-off' }).mode, 'adaptive');
+  assert.equal(store.controlStatus(scope).enabled, false, '关闭时改触发方式不能顺手打开');
+  const combined = store.setMemoryControl(scope, { enabled: true, mode: 'tool_only' }, { operationId: 'op-mode-combined' });
+  assert.equal(combined.ok, true);
+  assert.equal(combined.enabled, true);
+  assert.equal(combined.mode, 'tool_only');
+}
+
 /* C01：总开关关闭后，自动注入、全局召回、检索、读取、写入、学习全部停。 */
 {
   const dir = mkdir('off');

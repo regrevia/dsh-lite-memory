@@ -29,6 +29,8 @@ import {
   evolutionStatus,
   controlStatus,
   setMemoryEnabled,
+  setMemoryControl,
+  setRecallMode,
   isExperimentalRecord,
   setEvolution,
   taskState,
@@ -82,6 +84,9 @@ function cwdOf(execution) {
   }
   return process.cwd();
 }
+
+/** 插件配置的默认触发方式，面板要按项目实际生效值显示。 */
+let hostRecallMode = 'adaptive';
 
 /** 本项目记忆总开关：读不出来时不擅自关掉，按开处理。 */
 function memoryEnabled(scope) {
@@ -487,10 +492,14 @@ function keepHandler(webServer, cwdForSession) {
       const currentControl = (() => {
         try { return controlStatus(scope); } catch { return { enabled: true, epoch: '' }; }
       })();
+      const modeOf = (target) => {
+        try { return { effectiveMode: controlStatus(target).mode || hostRecallMode }; } catch { return { effectiveMode: hostRecallMode }; }
+      };
+      currentControl.effectiveMode = modeOf(scope).effectiveMode;
       const selectedControl = selectedScope.key === scope.key
         ? currentControl
         : (() => {
-          try { return controlStatus(selectedScope); } catch { return { enabled: true, epoch: '' }; }
+          try { return { ...controlStatus(selectedScope), ...modeOf(selectedScope) }; } catch { return { enabled: true, epoch: '', effectiveMode: recallMode() }; }
         })();
       const selectedEvolution = selectedScope.key === scope.key
         ? currentEvolution
@@ -538,8 +547,11 @@ function keepHandler(webServer, cwdForSession) {
       if (!scope.confirmed) return sendJson(res, 409, { ok: false, reason: '项目根还没确认，先重新打开这个项目' });
       const operationId = typeof body.operationId === 'string' ? body.operationId : '';
       try {
-        const result = typeof body.enabled === 'boolean'
-          ? setMemoryEnabled(scope, body.enabled, { operationId })
+        const result = typeof body.enabled === 'boolean' || typeof body.mode === 'string'
+          ? setMemoryControl(scope, {
+            ...(typeof body.enabled === 'boolean' ? { enabled: body.enabled } : {}),
+            ...(typeof body.mode === 'string' ? { mode: body.mode } : {}),
+          }, { operationId })
           : { ok: true, ...controlStatus(scope) };
         if (typeof body.enabled === 'boolean' && result && result.ok !== false && body.enabled === false) {
           const controller = learningAborts.get(scope.key);
@@ -1029,6 +1041,16 @@ export function apply(ctx, config) {
 
   /** 升级不覆盖用户的选择：默认 adaptive，别的模式只由明确配置切换。 */
   const recallMode = () => (RECALL_MODES.includes(config?.mode) ? config.mode : 'adaptive');
+  hostRecallMode = recallMode();
+  /** 项目自己的选择优先；没有写过就跟随插件配置，升级不改用户选择。 */
+  const modeFor = (scope) => {
+    try {
+      const mode = controlStatus(scope).mode;
+      return RECALL_MODES.includes(mode) ? mode : recallMode();
+    } catch {
+      return recallMode();
+    }
+  };
   /** 已准备好的快照只挂在 Agent 上，弱引用随手回收，不跨会话串。 */
   const prepared = new WeakMap();
   /** turn-stopping 只回 signal，不带头 agent；这里记 signal → agent 供收尾清理。 */
@@ -2049,7 +2071,7 @@ export function apply(ctx, config) {
       }],
     },
     execute: async (args, execution) => {
-      if (recallMode() === 'off' || !memoryEnabledFor(execution)) return { count: 0, chars: 0, text: '', status: 'memory_disabled', refs: [] };
+      if (!memoryEnabledFor(execution) || modeFor(scopeOf(cwdOf(execution))) === 'off') return { count: 0, chars: 0, text: '', status: 'memory_disabled', refs: [] };
       const agent = execution?.agent;
       const win = windowOf(agent);
       if (win && !affordableTool(win, 0)) return { count: 0, chars: 0, text: '', status: 'budget_exhausted', refs: [] };
@@ -2195,7 +2217,7 @@ export function apply(ctx, config) {
       }),
     },
     execute: async (args, execution) => {
-      if (recallMode() === 'off' || !memoryEnabledFor(execution)) return { scope: '', status: 'memory_disabled' };
+      if (!memoryEnabledFor(execution) || modeFor(scopeOf(cwdOf(execution))) === 'off') return { scope: '', status: 'memory_disabled' };
       const resolved = resolveRequestContext(execution, args.contextId);
       if (!resolved.ok) return { scope: '', status: resolved.status || 'needs_context' };
       const scope = resolved.scope;
@@ -2542,10 +2564,10 @@ export function apply(ctx, config) {
        * 工具模式也必须先有本请求上下文：memory_search/read/links 靠同一个 contextId 判项目和任务，
        * 不能等到自动召回分支才建，否则工具模式永远拿不到可核对的任务。
        */
-      const runtime = runtimeFor(scope, { sessionId, query, batchKey, messageIds: ids, autoRoute: recallMode() === 'adaptive' });
+      const runtime = runtimeFor(scope, { sessionId, query, batchKey, messageIds: ids, autoRoute: modeFor(scope) === 'adaptive' });
       if (win && runtime) win.runtime = runtime.held;
       rememberRuntime(scope, sessionId, runtime && runtime.held);
-      if (recallMode() !== 'adaptive') {
+      if (modeFor(scope) !== 'adaptive') {
         noteRecall(scope, sessionId, { reason: 'tools_only' });
         clearPrepared(agent);
         return decision;

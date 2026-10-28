@@ -106,10 +106,12 @@ export function evolutionOf(state) {
 export function controlOf(state) {
   const raw = state && state.control;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    return { enabled: true, epoch: '', changedAt: '', recoveryPending: false, compatible: true };
+    return { enabled: true, mode: '', epoch: '', changedAt: '', recoveryPending: false, compatible: true };
   }
   return {
     enabled: raw.enabled !== false && raw.recoveryPending !== true,
+    /** 空字符串表示跟随插件配置；只有明确写过的项目才覆盖。 */
+    mode: raw.mode === 'adaptive' || raw.mode === 'tool_only' || raw.mode === 'off' ? raw.mode : '',
     epoch: typeof raw.epoch === 'string' ? raw.epoch : '',
     changedAt: typeof raw.changedAt === 'string' ? raw.changedAt : '',
     recoveryPending: raw.recoveryPending === true,
@@ -122,12 +124,15 @@ export function controlOf(state) {
  * 只清运行层（在途整理、临时锚点、旧召回快照）。重新打开也换代次，关闭前排队的任务不能补交。
  * 自进化跟随总开关一起停：重新打开记忆后，自进化仍是关闭的，等用户单独开启。
  */
-export function applyControl(draft, enabled) {
+export function applyControl(draft, enabled, mode) {
   const now = new Date().toISOString();
   const current = controlOf(draft);
-  const next = Boolean(enabled);
-  if (current.enabled === next) return { changed: false, enabled: next };
-  const config = { enabled: next, epoch: crypto.randomUUID(), changedAt: now };
+  const next = typeof enabled === 'boolean' ? enabled : current.enabled;
+  const nextMode = mode === 'adaptive' || mode === 'tool_only' || mode === 'off'
+    ? mode
+    : current.mode;
+  if (current.enabled === next && current.mode === nextMode) return { changed: false, enabled: next, mode: nextMode };
+  const config = { enabled: next, mode: nextMode, epoch: crypto.randomUUID(), changedAt: now };
   draft.control = config;
   const evolution = draft.experimental && draft.experimental.projectEvolution;
   if (evolution && typeof evolution === 'object' && !Array.isArray(evolution)) {
@@ -141,7 +146,7 @@ export function applyControl(draft, enabled) {
     /** 额度只增不减：次数与回执留着，最近观察清掉。 */
     evolution.learning = { ...ledger, recent: [] };
   }
-  return { changed: true, enabled: next, epoch: config.epoch };
+  return { changed: true, enabled: next, mode: nextMode, epoch: config.epoch };
 }
 
 /**

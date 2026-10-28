@@ -718,7 +718,7 @@ window.__ModuleLoader__.load({
       const detail = shown && shown.ref && items.some((item) => item.key === shown.key && item.revision === shown.ref.revision)
         ? h('div', { style: { ...REF_BODY, borderLeft: `2px solid ${tone}` } },
           shown.loading ? h('span', { style: REF_META }, '读取中…') : null,
-          shown.gone ? h('span', { style: REF_META }, '这条记忆已删除') : null,
+          shown.gone ? h('span', { style: REF_META }, '这条记忆已经不在这里了') : null,
           shown.invalid ? h('span', { style: REF_META }, '读不到正文，点名字重试') : null,
           !shown.loading && !shown.gone && !shown.invalid ? h(React.Fragment, null,
             shown.title && shown.title !== shown.ref.title
@@ -2194,7 +2194,7 @@ window.__ModuleLoader__.load({
         post('/lite-memory/body', { sessionId, id: selectedMemory, scopeKey: data.selected.key }).then((result) => {
           if (!live) return;
           if (result.ok && result.body && result.body.ok) {
-            if (result.body.status === 'gone') setDetailNote('这条记忆已删除');
+            if (result.body.status === 'gone') setDetailNote('这条记忆已经不在这里了');
             else setDetail(result.body);
           } else setDetailNote(failure(result, '读不到正文'));
         });
@@ -2210,6 +2210,8 @@ window.__ModuleLoader__.load({
         ? selected.control
         : (current && selected && selected.key === current.key && current.control ? current.control : { enabled: true });
       const memoryOn = control.enabled !== false;
+      const memoryMode = !memoryOn ? 'off'
+        : (control.effectiveMode === 'tool_only' || control.mode === 'tool_only' ? 'tool_only' : 'adaptive');
       const evolution = selected && selected.evolution
         ? selected.evolution
         : (current && selected && selected.key === current.key ? current.evolution : null);
@@ -2374,6 +2376,7 @@ window.__ModuleLoader__.load({
                   || !fresh.ok || !fresh.body || !fresh.body.ok || fresh.body.status === 'gone') return;
                 const revision = Number.isInteger(fresh.body.revision) ? fresh.body.revision : 0;
                 setDetail(fresh.body);
+                setEditNote('已载入最新内容，再保存会覆盖它');
                 setData((prev) => {
                   if (!prev || !prev.selected || !Array.isArray(prev.selected.records)) return prev;
                   const records = prev.selected.records.map((row) => (row.id === record.id ? { ...row, revision: revision || row.revision } : row));
@@ -2413,14 +2416,17 @@ window.__ModuleLoader__.load({
         });
       };
 
-      const toggleControl = () => {
-        if (busy || !canToggle) return;
+      const setControlMode = (mode) => {
+        if (busy || !canToggle || mode === memoryMode) return;
         setBusy(true);
-        post('/lite-memory/control', { sessionId, enabled: !memoryOn, operationId: newOperationId() }).then((result) => {
+        const body = mode === 'off'
+          ? { sessionId, enabled: false, operationId: newOperationId() }
+          : { sessionId, enabled: true, mode, operationId: newOperationId() };
+        post('/lite-memory/control', body).then((result) => {
           if (!alive.current || (selectedKey && scopeRef.current !== selectedKey)) return;
           setBusy(false);
           if (succeeded(result)) load(selectedKey);
-          else setNote(failure(result, '开关没有改动'));
+          else setNote(failure(result, '触发方式没有改动'));
         });
       };
 
@@ -2488,6 +2494,25 @@ window.__ModuleLoader__.load({
         } : undefined,
       );
 
+      const modeChoices = () => h('div', {
+        style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 },
+      },
+      h('span', { style: { fontSize: '12px', lineHeight: '20px', fontWeight: 600, whiteSpace: 'nowrap' } }, '记忆'),
+      h('div', {
+        role: 'radiogroup', 'aria-label': '记忆触发方式',
+        style: { display: 'flex', gap: '2px', padding: '2px', borderRadius: '8px', background: 'var(--dsw-alias-bg-layer-2)', border: '1px solid var(--dsw-alias-border-l1)' },
+      },
+      [['adaptive', '自动提醒'], ['tool_only', '仅搜索'], ['off', '关闭']].map(([key, text]) => h('button', {
+        key, type: 'button', role: 'radio', 'aria-checked': memoryMode === key, disabled: busy || !canToggle,
+        onClick: canToggle && !busy ? () => setControlMode(key) : undefined,
+        style: {
+          padding: '2px 7px', minHeight: '22px', border: 'none', borderRadius: '6px',
+          background: memoryMode === key ? 'var(--dsw-alias-bg-layer-1)' : 'transparent',
+          color: 'inherit', fontSize: '11px', lineHeight: '18px', fontWeight: memoryMode === key ? 600 : 400,
+          cursor: canToggle && !busy ? 'pointer' : 'default', whiteSpace: 'nowrap',
+          opacity: memoryMode === key || canToggle ? 1 : 0.55,
+        },
+      }, text))));
       const switchItem = (label, hint, on, disabled, onClick) => h('div', {
         style: { display: 'flex', flexDirection: 'column', gap: '1px', minWidth: 0, opacity: disabled && !on ? 0.55 : 1 },
       },
@@ -2504,7 +2529,7 @@ window.__ModuleLoader__.load({
       globalView
         ? h('div', { style: { ...PANEL_MUTED, lineHeight: '20px' } }, '全局记忆只读')
         : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '4px 18px' } },
-          switchItem('启用记忆', memoryOn ? '读取项目和全局记忆' : '记忆已关闭，内容只读', memoryOn, busy || !canToggle, toggleControl),
+          modeChoices(),
           switchItem('自进化', evolutionOn ? '实验功能，会增加 token 消耗' : '从反馈里整理经验', evolutionOn, busy || !evolution || !canToggle || !memoryOn, toggleEvolution), // ui-copy-ignore 用户指定文案
           showSettings ? displayToggle('启用图谱', 'graph') : null,
           showSettings ? displayToggle('启用记忆宫殿', 'palace') : null,
