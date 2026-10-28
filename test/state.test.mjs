@@ -23,6 +23,11 @@ const test = (name, fn) => {
 };
 
 const dirs = [];
+/** Windows 会把同一个临时目录报成 8.3 短名或长名；按目录的文件 ID 判断是不是同一处。 */
+const pathId = (target) => {
+  const stat = fs.statSync(target, { bigint: true });
+  return `${stat.dev}:${stat.ino}`;
+};
 const fresh = (label) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `lm-state-${label}-`));
   dirs.push(dir);
@@ -218,13 +223,7 @@ test('S01 仓库根与子目录共用一份记忆', () => {
   const atSub = scopeOf(sub);
   assert.equal(atSub.key, atRoot.key);
   assert.equal(atSub.dir, atRoot.dir);
-  /* Windows reports the temp root as an 8.3 short name on one side and the long
-     name on the other; realpath 不一定把短名展开，按同一个目录的文件 ID 比对。 */
-  const dirId = (dir) => {
-    const stat = fs.statSync(dir, { bigint: true });
-    return `${stat.dev}:${stat.ino}`;
-  };
-  assert.equal(dirId(resolveRoot(sub).root), dirId(repo));
+  assert.equal(pathId(resolveRoot(sub).root), pathId(repo));
 });
 
 test('S02 符号链接、非 Git 目录、嵌套仓库各归各的', () => {
@@ -255,7 +254,7 @@ test('S03 配置的项目根只覆盖自己的子树，不吞别的目录', () =
   fs.mkdirSync(path.dirname(config), { recursive: true });
   fs.writeFileSync(config, JSON.stringify({ projectRoot: root }));
   try {
-    assert.equal(resolveRoot(sub).root, fs.realpathSync(root));
+    assert.equal(pathId(resolveRoot(sub).root), pathId(root));
     assert.equal(resolveRoot(sub).source, 'configured');
     assert.equal(scopeOf(sub).key, scopeOf(root).key);
     assert.notEqual(resolveRoot(outside).source, 'configured');
