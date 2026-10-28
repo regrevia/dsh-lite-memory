@@ -2399,10 +2399,12 @@ export function readCitationBodyByTitle(sessionId, title, options = {}) {
   if (!wanted) return null;
   const data = readSessionFile(sessionId);
   const want = Number.isInteger(options.revision) ? options.revision : null;
+  const scopeWanted = options.scope === 'global' || options.scope === 'project' ? options.scope : '';
   /** 引用行只存身份，标题要从当前索引解析出来再比；行上没有 title 字段。 */
   const matches = ((data && data.items) || [])
     .map((row) => ({ row, found: resolveCitation(row) }))
     .filter((item) => item.found
+      && (!scopeWanted || (item.found.scope.key === 'global' ? 'global' : 'project') === scopeWanted)
       && normalizeText(item.found.row.title || '', 120).toLowerCase() === wanted);
   if (matches.length === 0) return null;
   const chosen = (want !== null

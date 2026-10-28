@@ -10,7 +10,7 @@ const state = await import('../state.js');
 const { upsert, search, readEntry, forget, undoChange, acceptCandidate, rejectCandidate,
   suggestionGate, noteSuggestion, findSuggestion, renderIndex, normalizeDraft, loadIndex,
   scopeOf, globalScope, LIMITS, recordCitations, listCitations, readCitationBody,
-  evolutionStatus, setEvolution, saveIndex } = store;
+  evolutionStatus, setEvolution, saveIndex, readCitationBodyByTitle } = store;
 
 let passed = 0;
 const test = (name, fn) => {
@@ -543,6 +543,16 @@ test('citation rows follow the current title and layer', () => {
   const global = upsert(globalScope(), { title: '跨项目规则', summary: '换个项目也成立' }).record;
   recordCitations(scope, 'session-fresh', [{ ...global, scope: 'global' }]);
   assert.equal(listCitations('session-fresh').items[0].scope, 'global');
+});
+
+test('citation body by title picks the requested layer', () => {
+  const scope = fresh('cite-layer');
+  const local = upsert(scope, { title: '同名规则', summary: '项目层版本', body: '项目正文' }).record;
+  const wide = upsert(globalScope(), { title: '同名规则', summary: '全局层版本', body: '全局正文' }).record;
+  recordCitations(scope, 'session-layer', [{ ...local, scope: 'project' }, { ...wide, scope: 'global' }]);
+  assert.match(readCitationBodyByTitle('session-layer', '同名规则', { scope: 'project' }).body, /项目正文/);
+  assert.match(readCitationBodyByTitle('session-layer', '同名规则', { scope: 'global' }).body, /全局正文/);
+  assert.equal(readCitationBodyByTitle('session-layer', '没有这条', { scope: 'global' }), null);
 });
 
 test('old citation session files are pruned', () => {

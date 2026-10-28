@@ -230,6 +230,7 @@ function keepHandler(webServer, cwdForSession) {
       const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
       const cwd = typeof body.cwd === 'string' ? body.cwd : '';
       const scopeKey = typeof body.scopeKey === 'string' ? body.scopeKey : '';
+      const scopeRef = body.scope === 'global' || body.scope === 'project' ? body.scope : '';
       let found;
       if (scopeKey) {
         /**
@@ -254,7 +255,7 @@ function keepHandler(webServer, cwdForSession) {
       } else if (sessionId) {
         try {
           found = id ? readCitationBody(sessionId, id)
-            : readCitationBodyByTitle(sessionId, titleRef, { revision: revisionRef });
+            : readCitationBodyByTitle(sessionId, titleRef, { revision: revisionRef, scope: scopeRef });
         } catch {
           found = null;
         }
