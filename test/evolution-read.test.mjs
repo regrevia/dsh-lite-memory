@@ -601,3 +601,39 @@ const scopeOf = (dir) => store.scopeOf(dir);
 }
 
 console.log('evolution-read.test.mjs: all passed');
+
+/* L23：被取代 / 已过期的实验规则不再从实验通道注入正文。 */
+{
+  const dir = mkdir('lifecycle');
+  const scope = scopeOf(dir);
+  const superseded = seedRule(scope, { title: '旧开场规则', body: '旧规则正文：开场先自我介绍。', conditions: [{ key: 'seriesId', value: '口播' }] });
+  const expired = seedRule(scope, { title: '过期规则', body: '过期规则正文：开场念固定slogan。', conditions: [{ key: 'seriesId', value: '口播' }] });
+  enable(scope, { seriesId: '口播' });
+  state.transact(scope, {}, (draft) => {
+    const first = draft.entries.find((entry) => entry.id === superseded);
+    first.supersededBy = 'mem_deadbeef';
+    const second = draft.entries.find((entry) => entry.id === expired);
+    second.validUntil = new Date(Date.now() - 60_000).toISOString();
+    return { changed: true };
+  });
+  const runtime = boot();
+  const agent = makeAgent('a-lifecycle', dir);
+  const sig = signal();
+  await runtime.preStep({ agent, signal: sig, turn: 't1' }, enter(human('这期口播开场怎么改')));
+  const text = runtime.text(agent, sig);
+  assert.equal(text.includes('旧规则正文'), false, '被取代的规则不能注入');
+  assert.equal(text.includes('过期规则正文'), false, '过期规则不能注入');
+}
+
+/* L24：没有声明条件的实验规则，问题不相关时也不靠「有规则」硬注入。 */
+{
+  const dir = mkdir('unbound');
+  const scope = scopeOf(dir);
+  seedRule(scope, { title: '导出参数', body: '导出统一用 H.264。', conditions: [] });
+  enable(scope, { seriesId: '口播' });
+  const runtime = boot();
+  const agent = makeAgent('a-unbound', dir);
+  const sig = signal();
+  await runtime.preStep({ agent, signal: sig, turn: 't1' }, enter(human('这期封面标题怎么写')));
+  assert.equal(runtime.text(agent, sig).includes('导出统一用 H.264'), false, '无关问题不注入宽泛规则');
+}

@@ -711,11 +711,36 @@ export function isContinuationQuery(text) {
 }
 
 /**
+ * 补查只有在「还是同一个任务」时才成立：任务类型或 episode 变了，上一轮的动作历史属于旧任务，
+ * 不能拿它给新任务找记忆。缺任一侧身份都按不同任务处理，宁可少补一次也不串旧话题。
+ */
+export function sameRecallTask(previous, current) {
+  if (!previous || !current) return true;
+  const kind = (value) => plain(value && value.kind, 40).trim().toLowerCase();
+  const episode = (value) => plain(value && value.episodeId, 120).trim();
+  /** 两侧都认出了任务类型且不同：明确换任务，上一轮的动作历史不再属于当前请求。 */
+  if (kind(previous) && kind(current) && kind(previous) !== kind(current)) return false;
+  /** 同类型但是另一个 episode：同类任务的新一轮，也不沿用旧任务的动作线索。 */
+  if (kind(previous) && kind(current) && episode(previous) && episode(current)) {
+    return episode(previous) === episode(current);
+  }
+  /** 认不出类型（或只有一侧有）时保留补查：这正是该机制要救的场景。 */
+  return true;
+}
+
+/**
  * 动作侧检索词：用户这句话没提，但「刚才在动什么」往往就写在上一轮助手的话和工具名里。
  * 预防型记忆（先重载再重启、改插件后别用 Cmd+R）约束的是下一步动作，
  * 只拿用户原话查，词面永远在错的一侧。这里只取少量最近的实词和工具名，避免长文稀释命中。
  */
 const ACTION_NOISE = new Set(['const', 'function', 'return', 'import', 'export', 'from', 'async', 'await', 'true', 'false', 'null', 'undefined', 'string', 'number', 'object']);
+const MEMORY_TOOL = /^memory(?:[_-]|$)/i;
+const MEMORY_TEXT = /^(?:memory ·|已有记忆可能相关|这条记忆|有些实验规则)/u;
+/** 记忆工具的调用与记忆自身的呈现文本不能充当新召回线索：否则记忆会自己触发自己。 */
+function isMemoryNoise(name, text) {
+  if (name && MEMORY_TOOL.test(String(name))) return true;
+  return Boolean(text && MEMORY_TEXT.test(String(text).trimStart()));
+}
 export function actionTerms(messages, options = {}) {
   if (!Array.isArray(messages)) return '';
   const limit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : 16;
@@ -734,6 +759,7 @@ export function actionTerms(messages, options = {}) {
     for (const part of content) {
       if (!part || typeof part !== 'object') continue;
       if (part.type === 'tool-call' || part.type === 'tool_call') {
+        if (isMemoryNoise(part.name, '')) continue;
         if (typeof part.name === 'string') push(part.name);
         const input = part.input || part.arguments || part.args;
         if (input && typeof input === 'object') {
@@ -745,7 +771,7 @@ export function actionTerms(messages, options = {}) {
         }
         continue;
       }
-      if (part.type === 'text' && typeof part.text === 'string') text += `${part.text}\n`;
+      if (part.type === 'text' && typeof part.text === 'string' && !isMemoryNoise('', part.text)) text += `${part.text}\n`;
     }
     return text;
   };

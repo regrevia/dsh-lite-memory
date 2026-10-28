@@ -288,8 +288,11 @@ const toggle = (scope, enabled) => store.setMemoryEnabled(scope, enabled, { oper
   assert.equal(store.beginLearningAttempt(scope, { episodeId: 'ep-preserve', operationId: 'a1' }).ok, true);
   assert.equal(store.beginLearningAttempt(scope, { episodeId: 'ep-preserve', operationId: 'a2' }).ok, true);
   assert.equal(store.beginLearningAttempt(scope, { episodeId: 'ep-preserve', operationId: 'a3' }).ok, false);
+  const ledgerBefore = store.loadIndex(scope).__evolution.learning.recent.length;
+  assert.ok(ledgerBefore >= 2, '先有滚动额度记录');
   toggle(scope, false);
   toggle(scope, true);
+  assert.ok(store.loadIndex(scope).__evolution.learning.recent.length >= ledgerBefore, '关开不重置滚动额度账本');
   assert.deepEqual(store.taskState(scope).defaults, { ...defaults, confirmedBy: 'user', confirmedAt: '' });
   assert.equal(store.setEvolution(scope, true, { operationId: 'evo-quota-again' }).ok, true);
   const limited = store.beginLearningAttempt(scope, { episodeId: 'ep-preserve', operationId: 'a4' });

@@ -1587,11 +1587,22 @@ export function search(scope, query, limit = 4, options = {}) {
       archived: Boolean(row.archived),
     }));
   });
-  /** 锁外回写：在层锁里再抢同一层的锁会死锁。 */
-  for (const row of found) {
-    if (!row.archived) touchUsed(row.source, [row.record.id]);
+  /** 锁外回写：在层锁里再抢同一层的锁会死锁；只给真正会交付给调用方的检索默认记账。 */
+  if (options.markUsed !== false) {
+    for (const row of found) {
+      if (!row.archived) touchUsed(row.source, [row.record.id]);
+    }
   }
   return found.map((row) => row.record);
+}
+
+/** 交付后再记账：调用方只把最终真给模型看过的条目交回来。 */
+export function markUsed(scope, ids) {
+  const wanted = (Array.isArray(ids) ? ids : []).filter((id) => typeof id === 'string' && id);
+  if (!wanted.length) return;
+  for (const source of [scope, globalScope()]) {
+    try { touchUsed(source, wanted); } catch { /* lastUsed 只是提示 */ }
+  }
 }
 
 /**
@@ -2511,11 +2522,27 @@ const MACHINE_BOUND_PATTERNS = [
   /\b\d{1,3}(?:\.\d{1,3}){3}:\d{2,5}\b/,
 ];
 
-function machineBoundText(source) {
-  const text = [source?.title, source?.summary, source?.when, source?.body, source?.topicKey]
+function contentText(source) {
+  return [source?.title, source?.summary, source?.when, source?.body, source?.topicKey]
     .filter((value) => typeof value === 'string' && value)
     .join('\n');
-  return MACHINE_BOUND_PATTERNS.some((re) => re.test(text));
+}
+
+function machineBoundText(source) {
+  return MACHINE_BOUND_PATTERNS.some((re) => re.test(contentText(source)));
+}
+
+/** 内容自己说了「本项目 / 这个仓库」：模型给的类别标签不能把它抬到全局层。 */
+const PROJECT_BOUND_PATTERNS = [
+  /本项目|这个项目|当前项目|该项目/,
+  /本仓库|这个仓库|当前仓库/,
+  /本工程|这个工程|当前工程/,
+  /本目录|当前目录/,
+  /本项目里|我们项目/,
+];
+
+function projectBoundText(source) {
+  return PROJECT_BOUND_PATTERNS.some((re) => re.test(contentText(source)));
 }
 
 /**
@@ -2556,6 +2583,8 @@ export function routeScope(draft, options = {}) {
   };
   /** 人明确点过「就存全局」才算数；模型自己提的 global 不抵消本机痕迹。 */
   const humanConfirmed = options.humanScope === true || source.scopeConfirmed === true;
+  /** 「本项目里…」是项目事实的措辞，类别写成偏好/流程也不能这样进通用层。 */
+  const projectBound = projectBoundText(source);
   if (durability === 'task') return { ...base, needsScope: true, reasonCode: 'task_state' };
   if (explicit) {
     /**
@@ -2566,6 +2595,7 @@ export function routeScope(draft, options = {}) {
     if (explicit === 'global' && !humanConfirmed) {
       if (machineConflict) return fallbackToProject('machine_bound_scope');
       if (cls === 'project_fact') return fallbackToProject('model_global_project_fact');
+      if (projectBound) return fallbackToProject('project_bound_scope');
     }
     if (explicit === 'project' && !projectReady) {
       const reasonCode = options.project && options.project.confirmed === false ? 'unconfirmed_project' : 'no_project';
@@ -2590,16 +2620,20 @@ export function routeScope(draft, options = {}) {
   if (cls === 'personal_preference') {
     /** 偏好也分「我的习惯」和「这台机器上的习惯」：后者绑机器，不进通用层。 */
     if (machineConflict) return fallbackToProject('machine_bound_preference');
+    /** 说了「本项目」的偏好其实是项目约定，类别写错也不能跨项目。 */
+    if (projectBound) return fallbackToProject('project_bound_preference');
     return { ...base, chosenScope: 'global', reasonCode: 'class_personal_preference' };
   }
   if (cls === 'portable_procedure') {
     if (machineConflict) return fallbackToProject('machine_bound_procedure');
+    if (projectBound) return fallbackToProject('project_bound_procedure');
     /** 带适用环境条件的本机流程：条件成立时才用，换台机器自然不生效。 */
     if (envScoped) return { ...base, chosenScope: 'global', reasonCode: 'machine_scoped_procedure' };
     /** 说能搬去别的项目，就要有能搬的依据；没有就先留在本项目。 */
     if (!evidence) return fallbackToProject('unbound_evidence');
     return { ...base, chosenScope: 'global', reasonCode: 'class_portable_procedure' };
   }
+  if (projectBound) return fallbackToProject('project_bound_environment');
   const conditions = view.normalizeConditions(source.conditions) || [];
   const scoped = conditions.some((item) => ENVIRONMENT_KEYS.includes(item.key));
   if (!scoped) {

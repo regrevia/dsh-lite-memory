@@ -190,6 +190,23 @@ const hitText = render('memory_search', {}, hits);
 assert.match(hitText, new RegExp(`^memory · 命中 ${hits.count} 条 · 引用 ${hits.chars} 字\\n- \\[[^\\]]+\\] 「`));
 assert.doesNotMatch(hitText, /mem_[a-z0-9]{6,}/, '检索结果只给标题与适用范围');
 assert.doesNotMatch(hitText, /第 .* 版/);
+/** 用量只在真交付后才记：检索候选（尤其被预算/上限丢掉的那些）不算用过。 */
+const contractScope = store.scopeOf(cwd);
+await exec('memory_save', { title: '用量记账探针', summary: '只在交付后记 lastUsed', kind: 'note' });
+const usedRow = () => store.loadIndex(contractScope).entries.find((item) => item.title === '用量记账探针');
+const oldUse = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+const probeId = usedRow().id;
+state.transact(contractScope, {}, (draft) => {
+  const row = draft.entries.find((item) => item.id === probeId);
+  row.maintenance.lastUsed = oldUse;
+  return { changed: true };
+});
+assert.equal(usedRow().lastUsed, oldUse);
+const silent = store.search(contractScope, '用量记账探针', 50, { markUsed: false });
+assert.ok(silent.length >= 1);
+assert.equal(usedRow().lastUsed, oldUse, '候选检索不记 usage');
+await exec('memory_search', { query: '用量记账探针' });
+assert.notEqual(usedRow().lastUsed, oldUse, '真交付给模型后才记 usage');
 /** 「发版当天」这类自由文本条件没有可信上下文，不能当成适用条目塞给模型。 */
 const miss = await exec('memory_search', { query: '完全没有出现过的主题' });
 assert.equal(miss.count, 0);
@@ -254,6 +271,41 @@ assert.ok(ambiguousSave.error, '跨层同名要报改哪一层');
 assertSchema('memory_save', ambiguousSave);
 assert.match(render('memory_save', {}, ambiguousSave), /^memory · /);
 assert.doesNotMatch(render('memory_save', {}, ambiguousSave), /undefined|saved|merged/);
+/** 同层同名不是「取第一条」：读、忘、更新都必须报歧义，按 id 仍能精确到条。 */
+const twinScope = store.scopeOf(cwd);
+const twinA = store.saveEntry(twinScope, { title: '同层重名探针', summary: '第一条', body: '正文甲', when: '机器甲', writeMode: 'patch' });
+const twinB = store.saveEntry(twinScope, { title: '同层重名探针', summary: '第二条', body: '正文乙', when: '机器乙', writeMode: 'patch' });
+const twinAId = twinA.record?.id ?? twinA.id;
+const twinBId = twinB.record?.id ?? twinB.id;
+assert.notEqual(twinAId, twinBId);
+await assert.rejects(() => exec('memory_read', { title: '同层重名探针' }), /有 2 条同名/);
+await assert.rejects(() => exec('memory_forget', { title: '同层重名探针', mode: 'archive' }), /有 2 条同名/);
+const twinUpdate = await exec('memory_save', { title: '换个标题', summary: '尝试更新同名条目', updateTitle: '同层重名探针' });
+assert.ok(twinUpdate.error, '同层同名更新要报歧义');
+assert.match(twinUpdate.error, /有 2 条同名/);
+assertSchema('memory_save', twinUpdate);
+assert.equal(store.readEntry(twinScope, twinAId).body, '正文甲', '按 id 读不能被同名条目串走');
+assert.equal(store.readEntry(twinScope, twinBId).body, '正文乙');
+
+/** 重命名后仍按原 id 定位到同一条；归档后重建同名条目也不能冒领旧 id。 */
+const renameSaved = store.saveEntry(twinScope, { title: '改名前的探针', summary: '旧身份', body: '旧正文', writeMode: 'patch' });
+const renameSeedId = renameSaved.record?.id ?? renameSaved.id;
+const renamed = await exec('memory_save', { title: '改名后的探针', summary: '旧身份', updateTitle: '改名前的探针' });
+assert.equal(renamed.changed, true);
+assert.equal(store.locateByTitle(twinScope, '改名后的探针').record.id, renameSeedId, '改名必须落在同一条记录上');
+const oldIdRead = store.readEntry(twinScope, renameSeedId);
+assert.equal(oldIdRead.title, '改名后的探针');
+assert.equal(oldIdRead.body, '旧正文');
+await exec('memory_forget', { id: renameSeedId, mode: 'archive' });
+const recreated = await exec('memory_save', { title: '改名后的探针', summary: '新身份', body: '新正文' });
+const recreatedId = store.locateByTitle(twinScope, '改名后的探针').record.id;
+assert.notEqual(recreatedId, renameSeedId, '删掉再建是新的身份');
+const staleRead = await exec('memory_read', { id: renameSeedId });
+assert.equal(staleRead.status, 'archived', '旧 id 只能读到旧条目的归档状态');
+assert.equal(staleRead.body, '');
+const freshRead = await exec('memory_read', { id: recreatedId });
+assert.equal(freshRead.body, '新正文');
+
 const missingSave = await exec('memory_save', { title: '别的标题', summary: '没有这条', updateTitle: '根本不存在的条目' });
 assert.ok(missingSave.error);
 assertSchema('memory_save', missingSave);
@@ -672,6 +724,8 @@ assert.equal(closedTool.changed, false);
 assert.equal(closedTool.reason, 'memory_disabled');
 assertSchema('memory_save', closedTool);
 assert.equal(closedTool.id, undefined);
+/** 关闭态的保存回执也要能渲染：不能等用户真去写一条才报 ReferenceError。 */
+assert.match(render('memory_save', {}, closedTool), /^memory · 本项目记忆已关闭/);
 /** 关闭状态下的读取也只报状态，不返回正文。 */
 const closedRead = await defs.get('memory_read').execute({ title: closedSeed.title }, { agent: closedAgent });
 assert.equal(closedRead.status, 'memory_disabled');

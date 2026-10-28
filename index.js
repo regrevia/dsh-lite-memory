@@ -3,6 +3,7 @@ import {
   globalScope,
   upsert,
   search,
+  markUsed,
   readEntry,
   readLinks,
   forget,
@@ -919,7 +920,39 @@ const FORGET_PARAMS = {
   additionalProperties: false,
 };
 
-/** 对外只认标题：id 留作内部地址，模型和界面都不用碰。 */
+/**
+ * 按标题解析内部身份。对外仍只显示标题，但解析必须能说明「唯一 / 同层歧义 / 不存在」：
+ * 同层同名是正常情况（不同前置条件各一条），静默取第一条会读错、写错。
+ */
+function titleHitsIn(target, title, { includeArchived = false } = {}) {
+  let index;
+  try { index = loadIndex(target); } catch { return []; }
+  const rows = includeArchived ? (index.archived || []) : (index.entries || []);
+  return rows.filter((entry) => entry && (includeArchived || entry.status !== 'archived')
+    && String(entry.title || '').trim() === title);
+}
+
+function candidateNote(entry) {
+  const conditions = Array.isArray(entry.conditions) ? entry.conditions.filter((row) => row && row.key) : [];
+  const parts = [];
+  if (entry.when) parts.push(String(entry.when));
+  if (conditions.length) parts.push(conditions.map((row) => `${row.key}=${row.value}`).join('·'));
+  return parts.join('，');
+}
+
+/** 同层同名时把候选条件一起报出来，模型/用户才能决定改哪条或先归档哪条。 */
+function ambiguousTitleError(title, hits, label) {
+  const detail = hits.slice(0, 4).map((entry) => {
+    const note = candidateNote(entry);
+    return note ? `「${title}」（${note}）` : `「${title}」`;
+  }).join('、');
+  return `${label}「${title}」有 ${hits.length} 条同名，无法确定是哪一条：${detail}。先归档其中一条，或换一个能区分的标题再试`;
+}
+
+/**
+ * 返回 { id } 或抛出：显式层只查那一层；默认先项目后全局（别的项目不参与解析）。
+ * 同一层出现多条同名一律报歧义，绝不取第一条。
+ */
 function refIdOf(scope, args, label = '记忆') {
   const id = typeof args.id === 'string' ? args.id.trim() : '';
   if (id) return id;
@@ -928,34 +961,30 @@ function refIdOf(scope, args, label = '记忆') {
   /** 显式指定层时只解析那一层：同名条目不会被顺手改掉，项目层也不会命中全局。 */
   const explicit = args && args.scope === 'global' ? globalScope() : args && args.scope === 'project' ? scope : null;
   const sources = explicit ? [explicit] : runtimeLayers(scope);
-  /** 运行时只解析当前项目与全局：别的项目正文不进本会话。 */
+  let crossLayerHit = null;
   for (const target of sources) {
-    let index;
-    try { index = loadIndex(target); } catch { continue; }
-    const hit = (index.entries || []).find((entry) => entry && entry.status !== 'archived'
-      && String(entry.title || '').trim() === title);
-    if (hit) return hit.id;
+    const hits = titleHitsIn(target, title);
+    if (hits.length > 1) throw new Error(ambiguousTitleError(title, hits, label));
+    if (hits.length === 1 && !crossLayerHit) crossLayerHit = hits[0];
   }
+  if (crossLayerHit) return crossLayerHit.id;
   /** 忘掉已归档的条目也要能按标题解析到；归档不会因此重新参与召回。 */
   for (const target of sources) {
-    let index;
-    try { index = loadIndex(target); } catch { continue; }
-    const hit = (index.archived || []).find((entry) => entry
-      && String(entry.title || '').trim() === title);
-    if (hit) return hit.id;
+    const hits = titleHitsIn(target, title, { includeArchived: true });
+    if (hits.length > 1) throw new Error(ambiguousTitleError(title, hits, label));
+    if (hits.length === 1) return hits[0].id;
   }
-  throw new Error(`没有「${title}」这条记忆；先用 memory_search 对一下标题`);
+  throw new Error(`没有「${title}」这条${label}；先用 memory_search 对一下标题`);
 }
 
 /** 同名条目可能分布在项目层和全局层：更新前先报候选，不能先匹配。 */
 function titleCandidates(scope, title) {
   const out = [];
   for (const target of runtimeLayers(scope)) {
-    let index;
-    try { index = loadIndex(target); } catch { continue; }
-    const hit = (index.entries || []).find((entry) => entry && entry.status !== 'archived'
-      && String(entry.title || '').trim() === title);
-    if (hit) out.push({ id: hit.id, scope: target.key === 'global' ? 'global' : 'project' });
+    const hits = titleHitsIn(target, title);
+    if (!hits.length) continue;
+    if (hits.length > 1) out.push({ ambiguous: true, title, hits, scope: target.key === 'global' ? 'global' : 'project' });
+    else out.push({ id: hits[0].id, scope: target.key === 'global' ? 'global' : 'project', note: candidateNote(hits[0]) });
   }
   return out;
 }
@@ -1073,6 +1102,8 @@ export function apply(ctx, config) {
   };
   /** 已准备好的快照只挂在 Agent 上，弱引用随手回收，不跨会话串。 */
   const prepared = new WeakMap();
+  /** 最近一次请求的任务身份：本轮没注入任何内容时 prepared 会清掉，补查仍需要知道上一轮任务。 */
+  const lastTask = new Map();
   /** turn-stopping 只回 signal，不带头 agent；这里记 signal → agent 供收尾清理。 */
   const signalAgents = new Map();
   const generations = new WeakMap();
@@ -1273,7 +1304,7 @@ export function apply(ctx, config) {
         win.recallHeader = true;
       }
       lines.push(line);
-      cards.push({ revision, scope: card.scope, title: card.title });
+      cards.push({ id: card.id, revision, scope: card.scope, title: card.title });
       /** 卡片行与到期时间一起留到最后输出：中间隔了系统提示组装，不能拿投影时的判断当现在。 */
       linesMeta.push({ line, validUntil: row.record.validUntil || '' });
     }
@@ -1318,8 +1349,9 @@ export function apply(ctx, config) {
           : waiting ? 'needs_context'
             : (gateRuntime && gateRuntime.enabled ? 'no_overlap' : 'needs_context');
     const matched = ranked.length || nearMatched;
-    if (!cards.length) return { text: '', cards: [], lines: [], bytes: 0, query, reason, matched };
-    return { text: finalText, cards, lines: linesMeta, bytes: Buffer.byteLength(finalText), query, reason, matched };
+    const ids = cards.map((card) => card.id).filter(Boolean);
+    if (!cards.length) return { text: '', cards: [], lines: [], ids, bytes: 0, query, reason, matched };
+    return { text: finalText, cards, lines: linesMeta, ids, bytes: Buffer.byteLength(finalText), query, reason, matched };
   }
 
   /* ---------------- 项目自进化：任务锚点、读取决策、上下文解析 ---------------- */
@@ -1491,21 +1523,31 @@ export function apply(ctx, config) {
     const unknown = [];
     const byTopic = new Map();
     let conflict = false;
+    const now = Date.now();
+    const query = held && held.query ? String(held.query) : '';
+    const runtime = { projectId: scope.key, experimental: true, context: context || {}, task: (held && held.task) || {} };
     for (const record of index.entries) {
       if (record.origin !== 'project_evolution') continue;
       if (record.ownerProjectId && record.ownerProjectId !== scope.key) continue;
-      if (record.reviewState === 'legacy_unreviewed') continue;
-      const learning = record.learning && typeof record.learning === 'object' ? record.learning : {};
-      if (learning.state !== 'active' && learning.state !== 'trial') continue;
-      /** 试用到期、暂停或身份失效：自动注入与检索、读取用同一档可用性，不能各判各的。 */
-      if (!view.experimentalUsable(record, Date.now())) continue;
-      const status = view.statusOf(record, context);
-      if (status === 'needs_context') { unknown.push(record); continue; }
-      if (status !== 'ok') continue;
+      const score = query ? view.matchScore(record, query).score : 0;
+      /** 生命周期、归属、学习状态、适用条件统一走 eligibility：被取代、过期、暂停都不该从实验通道溜进来。 */
+      const usable = view.eligibility(record, runtime, 'auto', now);
+      if (!usable.ok) {
+        if (usable.status === 'needs_context' && usable.reason !== 'condition_mismatch'
+          && score >= view.MATCH_FLOOR) unknown.push(record);
+        continue;
+      }
+      /**
+       * 实验规则的任务条件本身就是相关度：栏目/阶段都对上，说明这条规则就属于当前这一集。
+       * 没有声明条件的规则仍要过词面门，避免一条宽泛规则在所有请求里都出现。
+       */
+      const conditions = Array.isArray(record.conditions) ? record.conditions.filter((row) => row && row.key) : [];
+      const bound = conditions.length > 0;
+      if (!bound && score < view.MATCH_FLOOR) continue;
       const topic = record.topicKey || record.id;
       if (byTopic.has(topic) && byTopic.get(topic).body !== record.body) conflict = true;
       byTopic.set(topic, record);
-      matched.push(record);
+      matched.push({ record, score: bound ? Math.max(score, view.MATCH_FLOOR) : score });
     }
     if (conflict) {
       return chargeExperiment(win, '这些实验规则互相冲突，先按用户这次说的做，别叠加对立的规则。');
@@ -1520,15 +1562,10 @@ export function apply(ctx, config) {
       ? Math.max(0, view.CARD.bytes - Buffer.byteLength(auto.normalText || '') - 2)
       : EXPERIMENT_BYTES;
     let used = Buffer.byteLength(EXPERIMENT_RULES_HEADER) + 1;
-    /** 实验规则也要过本轮相关度：和当前问题没有交集就不占卡片，不能“来自自进化”就天然优先。 */
-    const query = held && held.query ? String(held.query) : '';
-    const relevant = query
-      ? matched.map((record) => ({ record, score: view.matchScore(record, query).score }))
-        /** 条件明确且已满足的规则按绑定注入；无条件的全项目规则必须和本轮问题有交集。 */
-        .filter((row) => row.score > 0 || (Array.isArray(row.record.conditions) && row.record.conditions.length > 0))
-        .sort((a, b) => b.score - a.score)
-        .map((row) => row.record)
-      : matched;
+    const relevant = matched
+      .slice()
+      .sort((a, b) => b.score - a.score)
+      .map((row) => row.record);
     for (const record of relevant.slice(0, cardCap)) {
       const body = String(record.body || '');
       const short = body && body.length <= EXPERIMENT_SHORT_CHARS && body.split('\n').length <= 4;
@@ -1649,6 +1686,7 @@ export function apply(ctx, config) {
       projectKey: scope.key, sessionId, batchKey, messageIds, query,
       context, task, anchor: routed.anchor, ranges, decision, epoch,
       experimental: enabled,
+      episodeId: (episode && episode.episodeId) || (routed.anchor && routed.anchor.episodeId) || '',
       episodeUpdatedAt: episode ? episode.updatedAt : '', injectedIds: [],
       at: Date.now(),
     };
@@ -1889,6 +1927,7 @@ export function apply(ctx, config) {
           archived: { type: 'string' },
           pendingConflicts: { type: 'integer' },
           error: { type: 'string' },
+          offCopy: { type: 'string' },
         },
         required: ['title', 'summary', 'when', 'revision', 'merged', 'changed', 'scope', 'needsResolution', 'archived'],
         additionalProperties: false,
@@ -1899,7 +1938,7 @@ export function apply(ctx, config) {
           ? `memory · ${value.error}`
           : value.needsScope
           ? value.reason === 'memory_disabled'
-            ? `memory · ${memoryOffCopy(projectScope)}`
+            ? `memory · ${value.offCopy || '本项目记忆已关闭，先在面板打开'}`
             : value.reason === 'unconfirmed_project'
             ? `memory · 当前目录还不能确认属于哪个项目：「${value.title}」\n先确认项目根目录，或显式 scope="global"`
             : `memory · 归属还没定：「${value.title}」\n补 memoryClass（personal_preference / project_fact / environment_fact / portable_procedure）或显式 scope；设备事实还要给设备条件`
@@ -1919,7 +1958,7 @@ export function apply(ctx, config) {
         return {
           title: String(args.title || ''), summary: '', when: '', revision: 0,
           merged: false, changed: false, scope: '', needsScope: true, reason: 'memory_disabled',
-          needsResolution: false, similarTitles: '', similar: '', archived: '',
+          needsResolution: false, similarTitles: '', similar: '', archived: '', offCopy: memoryOffCopy(projectScope),
         };
       }
       const supersedes = String(args.supersedes || '').trim();
@@ -1932,13 +1971,17 @@ export function apply(ctx, config) {
       /** 更新句柄也用标题：id 只是底层实现，模型抄标题就行。 */
       const updateTitle = String(args.updateTitle || '').trim();
       if (updateTitle) {
-        const candidates = args.scope ? [] : titleCandidates(projectScope, updateTitle);
-        if (candidates.length > 1) {
+        const candidates = titleCandidates(projectScope, updateTitle);
+        const ambiguous = candidates.find((row) => row.ambiguous);
+        /** 同层同名是允许的（不同前置条件各一条），但不能替用户挑第一条改。 */
+        if (ambiguous) return saveFailure(ambiguousTitleError(updateTitle, ambiguous.hits, '记忆'), args);
+        if (!args.scope && candidates.length > 1) {
           return saveFailure(`「${updateTitle}」在项目层和全局层各有一条：改全局加 scope="global"，改项目加 scope="project"`, args);
         }
-        const updateId = (() => { try { return refIdOf(projectScope, { title: updateTitle, scope: args.scope }, '记忆'); } catch { return ''; } })();
-        if (!updateId) return saveFailure(`没有「${updateTitle}」这条记忆；要新增就不用 updateTitle`, args);
-        draft.id = updateId;
+        const layer = args.scope === 'global' ? 'global' : args.scope === 'project' ? 'project' : '';
+        const picked = layer ? candidates.find((row) => row.scope === layer) : candidates[0];
+        if (!picked) return saveFailure(`没有「${updateTitle}」这条记忆；要新增就不用 updateTitle`, args);
+        draft.id = picked.id;
       }
       /** 关联目标同样按标题解析成内部 id 再落盘。 */
       if (Array.isArray(args.links) && args.links.length) {
@@ -1946,8 +1989,10 @@ export function apply(ctx, config) {
         for (const link of args.links) {
           const title = typeof link?.title === 'string' ? link.title.trim() : '';
           if (!title) return saveFailure('关联要写成 {type, title}：给被关联那条记忆的标题', args);
-          const targetId = (() => { try { return refIdOf(projectScope, { title }, '记忆'); } catch { return ''; } })();
-          if (!targetId) return saveFailure(`没有「${title}」这条记忆，关联没写成`, args);
+          let targetId = '';
+          try { targetId = refIdOf(projectScope, { title }, '记忆'); } catch (error) {
+            return saveFailure(String(error && error.message ? error.message : `没有「${title}」这条记忆`), args);
+          }
           resolved.push({ type: link.type || 'related', id: targetId });
         }
         draft.links = resolved;
@@ -2162,6 +2207,8 @@ export function apply(ctx, config) {
         context,
         history: args.history === true,
         allowExperimental: resolved.experimental === true,
+        /** 「用过」要等真正给了模型看再记：检索到的前 50 条不是交付。 */
+        markUsed: false,
       }).filter((item) => !item.ownerProjectId || item.ownerProjectId === scope.key)
         .filter((item) => item.archived || view.eligibility(item, gateRuntime, 'search').ok);
       const hits = rawHits.filter((item) => item.archived || item.status === 'ok').slice(0, limit);
@@ -2219,10 +2266,12 @@ export function apply(ctx, config) {
         win.toolBytes += jsonBytes(value);
         win.reads += 1;
         recordCitations(scope, sessionIdOf(execution), hits.slice(0, kept));
+        markUsed(scope, hits.slice(0, kept).map((item) => item.id));
         return value;
       }
       const value = valueOf(shown.length);
       recordCitations(scope, sessionIdOf(execution), hits);
+      markUsed(scope, hits.map((item) => item.id));
       return value;
     },
   }), 'lite-memory: memory_search');
@@ -2554,7 +2603,7 @@ export function apply(ctx, config) {
         .filter((message) => message?.source?.kind === 'user');
       const fresh = freshHumans(sessionId, humans);
       const previous = prepared.get(agent);
-      const sameSession = previous && previous.sessionId === sessionId;
+      const sameSession = Boolean(previous && previous.sessionId === sessionId);
 
       if (fresh.length === 0) {
         /** 工具续步：内容冻结，只把快照绑到本步的 signal；盘上版本变了才重投影。 */
@@ -2651,7 +2700,6 @@ export function apply(ctx, config) {
       /** 任务上下文独立于自进化开关：普通记忆按当前任务判适用，实验规则再叠一层可用性。 */
       const auto = emptyAutoBudget();
       if (win) win.autoBudget = auto;
-      const experiment = runtime ? experimentFor(scope, runtime, win) : null;
       const recalledContext = runtime ? runtime.held.context : context;
       const remembered = runtime && runtime.enabled
         ? rememberFeedback(scope, sessionId, fresh, runtime.held, turn)
@@ -2661,7 +2709,16 @@ export function apply(ctx, config) {
        * 预防型记忆约束的是「下一步动作」，词面常写在上一轮助手的话和工具调用里，用户这句话反而没提。
        * 第一次检索一张卡都没有时，用最近的实词/工具名补一次有界查询，预算仍是同一份。
        */
-      if (!snapshot.cards.length && !carried) {
+      const currentTask = {
+        kind: (runtime && runtime.held && runtime.held.task && runtime.held.task.kind) || '',
+        episodeId: (runtime && runtime.held && runtime.held.episodeId) || '',
+      };
+      const rememberedTask = lastTask.get(sessionId) || null;
+      const previousTask = previous && previous.task ? previous.task : rememberedTask;
+      const sameTask = Boolean(sameSession || rememberedTask) && view.sameRecallTask(previousTask, currentTask);
+      lastTask.set(sessionId, currentTask);
+      while (lastTask.size > 64) lastTask.delete(lastTask.keys().next().value);
+      if (!snapshot.cards.length && !carried && sameTask) {
         const humanTail = (() => {
           const messages = Array.isArray(decision.messages) ? decision.messages : [];
           for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -2680,6 +2737,8 @@ export function apply(ctx, config) {
           }
         }
       }
+      /** 实验规则最后才取预算：普通卡片先占，弱相关实验不能把强相关项目规则挤出去。 */
+      const experiment = runtime ? experimentFor(scope, runtime, win) : null;
       noteRecall(scope, sessionId, {
         reason: snapshot.reason, matched: snapshot.matched, cards: snapshot.cards.length, chars: snapshot.bytes,
       });
@@ -2729,6 +2788,7 @@ export function apply(ctx, config) {
         cards: snapshot ? snapshot.cards : [],
         lines: snapshot ? snapshot.lines : [],
         matched: snapshot ? snapshot.matched : 0,
+        task: currentTask,
         scope,
         query,
         sessionId,
@@ -2740,6 +2800,7 @@ export function apply(ctx, config) {
         at: Date.now(),
       };
       prepared.set(agent, state);
+      if (snapshot && snapshot.ids && snapshot.ids.length) markUsed(scope, snapshot.ids);
       payloadBytes.set(sessionId, win.bytes);
       while (payloadBytes.size > 64) payloadBytes.delete(payloadBytes.keys().next().value);
       if (signal) signalAgents.set(signal, agent);

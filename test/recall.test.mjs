@@ -587,3 +587,29 @@ console.log('recall.test.mjs: ok');
   await runtime.preStep({ agent, signal: second, turn: 't2' }, enter(assistantMessage, human('这个怎么弄')));
   assert.match(runtime.provider.text({ agent, signal: second }), /改完 client\.js 先重载宿主/, '动作侧线索要能召回预防型记忆');
 }
+
+// A26：明确换任务后，不能拿上一轮助手的话去补查、把旧任务记忆塞进新任务。
+{
+  const cwdSwitch = mkdir('switch');
+  const scopeSwitch = store.scopeOf(cwdSwitch);
+  save(scopeSwitch, {
+    title: '口播开场先给结论',
+    tags: ['口播', '开场'],
+    summary: '口播开场三句内先给结论，别先铺垫',
+  });
+  const agent = makeAgent('agent-switch', cwdSwitch);
+  const runtime = boot();
+  const first = signal();
+  await runtime.preStep({ agent, signal: first, turn: 't1' }, enter(human('这期口播开场怎么改')));
+  const assistantMessage = {
+    role: 'assistant',
+    id: 'asst-switch-1',
+    content: [
+      { type: 'text', text: '口播开场先给结论，栏目风格保持短句。' },
+      { type: 'tool-call', name: 'write', input: { file_path: '/tmp/switch/talk.md' } },
+    ],
+  };
+  const second = signal();
+  await runtime.preStep({ agent, signal: second, turn: 't2' }, enter(assistantMessage, human('开始写 PostgreSQL 迁移脚本，先建表')));
+  assert.equal(runtime.provider.text({ agent, signal: second }), '', '换任务后不补查旧任务的动作线索');
+}

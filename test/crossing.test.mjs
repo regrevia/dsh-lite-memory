@@ -59,6 +59,28 @@ await test('S03 项目事实留在项目层', () => {
   assert.equal(idsOf(scope).length, 1);
 });
 
+await test('S03 模型给的类别标签不能把「本项目」抬进全局层', () => {
+  const scope = fresh('route-project-bound');
+  const pref = saveEntry(scope, {
+    title: '本项目回复用中文',
+    summary: '这个项目里回复用中文',
+    body: '本项目统一中文、简短',
+    memoryClass: 'personal_preference',
+  });
+  assert.equal(pref.chosenScope, 'project');
+  assert.equal(pref.reasonCode, 'project_bound_preference');
+  assert.equal(stateOf(globalScope()).entries.filter((row) => row.current.title === '本项目回复用中文').length, 0);
+  const proc = saveEntry(scope, {
+    title: '本项目构建',
+    summary: '这个仓库构建用 pnpm',
+    body: '本仓库统一 pnpm build',
+    memoryClass: 'portable_procedure',
+    evidenceRef: 'README',
+  });
+  assert.equal(proc.chosenScope, 'project');
+  assert.equal(proc.reasonCode, 'project_bound_procedure');
+});
+
 await test('S03 设备事实没给设备条件就返回 needsScope，不落盘', () => {
   const scope = fresh('route-env');
   const saved = saveEntry(scope, { title: '本机 Node', summary: '本机 Node 版本', body: 'v24', memoryClass: 'environment_fact' });

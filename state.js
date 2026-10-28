@@ -143,8 +143,8 @@ export function applyControl(draft, enabled, mode) {
     evolution.changedAt = now;
     /** 默认绑定属于已确认结果；临时锚点和在途观察不属于。 */
     evolution.tasks = { ...emptyTasks(), ...(evolution.tasks && evolution.tasks.defaults ? { defaults: evolution.tasks.defaults } : {}) };
-    /** 额度只增不减：次数与回执留着，最近观察清掉。 */
-    evolution.learning = { ...ledger, recent: [] };
+    /** 额度只增不减：次数、回执和滚动时间戳都留着，关开不能把项目额度洗掉。 */
+    evolution.learning = ledger;
   }
   return { changed: true, enabled: next, mode: nextMode, epoch: config.epoch };
 }
@@ -190,8 +190,11 @@ export function applyEvolution(draft, enabled) {
     changedAt: now,
     /** 开与关都让上一轮锚点失效；已经确认的项目默认保留，它不属于临时作品状态。 */
     tasks: { ...emptyTasks(), ...(current.tasks && current.tasks.defaults ? { defaults: current.tasks.defaults } : {}) },
-    /** 只清在途观察；已学规则的来源、版本和候选都在条目里，关开不动它们。 */
-    learning: { ...normalizeLearning(current.learning), recent: [] },
+    /** 只清在途候选与回执；额度账本 recent 是滚动时间戳，开关/重启都得留着。 */
+    learning: {
+      ...normalizeLearning(current.learning),
+      recent: (Array.isArray(current.learning && current.learning.recent) ? current.learning.recent : []).slice(-32),
+    },
   };
   draft.experimental = { ...(draft.experimental || {}), projectEvolution: config };
   /** 显式关闭自进化：试用转暂停待复核，不删除候选与证据；重新打开后可逐条恢复。 */

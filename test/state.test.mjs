@@ -633,7 +633,7 @@ test('P0-B 坏 state 且没有 prev：报错给出损坏副本与可执行的恢
   assert.equal(fs.readFileSync(stateFile(scope), 'utf8'), broken);
 });
 
-test('D05 学习开关关掉再开，不重置已用次数和整理记录', () => {
+test('D05 学习开关关掉再开，不重置已用次数、滚动额度与整理记录', () => {
   const scope = fresh('d05-learning-budget');
   const at = new Date().toISOString();
   transact(scope, {}, (draft) => {
@@ -647,7 +647,7 @@ test('D05 学习开关关掉再开，不重置已用次数和整理记录', () =
   });
   const opened = load(scope).state.experimental.projectEvolution;
   assert.equal(opened.enabled, true);
-  assert.deepEqual(opened.learning.recent, [], '打开时清掉在途观察');
+  assert.deepEqual(opened.learning.recent, [at], '滚动额度时间戳要留着，关开不洗额度');
   assert.equal(opened.learning.receipts.length, 1, '打开不能清整理回执');
   assert.equal(opened.learning.attempts.ep_seed.count, 2, '打开不能清已用次数');
   transact(scope, {}, (draft) => state.applyEvolution(draft, false));
@@ -656,7 +656,7 @@ test('D05 学习开关关掉再开，不重置已用次数和整理记录', () =
   assert.equal(again.enabled, true);
   assert.equal(again.learning.receipts.length, 1, '关掉再开不重置整理回执');
   assert.equal(again.learning.attempts.ep_seed.count, 2, '关掉再开不重置已用次数');
-  assert.deepEqual(again.learning.recent, []);
+  assert.deepEqual(again.learning.recent, [at], '关掉再开也不能洗掉滚动额度');
 });
 
 for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
