@@ -413,6 +413,15 @@ const waitingReceipt = await call('/lite-memory/overview', { sessionId: 'session
 assert.equal(waitingReceipt.body.current.recall.reason, 'needs_context', '有候选但条件未确认时，不误报成没有匹配');
 assert.equal(waitingReceipt.body.current.recall.cards, 0);
 
+// 同一主题的两条现行规范互相冲突：整组不进自动召回，但面板要说是「相关但没确认」，不是「没有匹配」
+await exec('memory_save', { title: '发版前检查清单', summary: '发版前先跑一遍检查清单', topicKey: 'release-checklist' });
+await exec('memory_save', { title: '发版前通知渠道', summary: '发版前在群里通知相关人', topicKey: 'release-checklist', resolution: 'distinct' });
+await preStep({ agent: recallAgent, signal: sig2, turn: '4' }, pass('发版前要做哪些检查', 'h4'));
+const conflictReceipt = await call('/lite-memory/overview', { sessionId: 'session-recall' });
+assert.equal(conflictReceipt.body.current.recall.reason, 'needs_context', '冲突未解决时也不能报成没有匹配');
+assert.equal(conflictReceipt.body.current.recall.cards, 0);
+assert.ok(conflictReceipt.body.current.recall.matched >= 1);
+
 const sig3 = new AbortController().signal;
 await preStep({ agent: recallAgent, signal: sig3, turn: '4' }, pass('把这个按钮的圆角改小一点', 'h3'));
 assert.equal(recall.text({ agent: recallAgent, signal: sig3 }), '');

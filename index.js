@@ -1172,9 +1172,10 @@ export function apply(ctx, config) {
       }
     }
     /** 同一槽位只让胜出的规范进去；冲突或条件未知的整组不进自动召回。 */
+    const groups = [...view.resolveTopics(layers.project, layers.global, context).values()];
     const records = [];
     const layerOf = new Map();
-    for (const group of view.resolveTopics(layers.project, layers.global, context).values()) {
+    for (const group of groups) {
       if (group.status !== 'ok' || !group.record) continue;
       records.push(group.record);
       layerOf.set(group.record.id, group.scope === 'global' ? 'global' : 'project');
@@ -1240,12 +1241,25 @@ export function apply(ctx, config) {
         limit: 8, requireApplicable: false, context, runtime: gateRuntime, task,
       });
     }
-    const waiting = near.some((row) => row.status !== 'ok' || row.record.reviewState === 'legacy_unreviewed');
+    let waiting = near.some((row) => row.status !== 'ok' || row.record.reviewState === 'legacy_unreviewed');
+    let nearMatched = near.length;
+    if (!cards.length && !ranked.length) {
+      /** 整组被条件或冲突挡下的候选没进 records，单独按同一查询算；只计数，不投放。 */
+      for (const group of groups) {
+        if (group.status !== 'conflict' && group.status !== 'needs_context') continue;
+        const hits = view.rank(group.records || [], query, {
+          limit: 1, requireApplicable: false, context, runtime: gateRuntime, task,
+        });
+        if (!hits.length) continue;
+        waiting = true;
+        nearMatched += hits.length;
+      }
+    }
     const reason = cards.length ? 'hit'
       : ranked.length ? 'budget'
         : waiting ? 'needs_context'
           : (gateRuntime && gateRuntime.enabled ? 'no_overlap' : 'needs_context');
-    const matched = ranked.length || near.length;
+    const matched = ranked.length || nearMatched;
     if (!cards.length) return { text: '', cards: [], bytes: 0, query, reason, matched };
     return { text: finalText, cards, bytes: Buffer.byteLength(finalText), query, reason, matched };
   }
