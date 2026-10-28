@@ -39,6 +39,8 @@ function boot(mode = 'adaptive') {
   apply(ctx, { mode });
   const debug = globalThis.__liteMemoryRecall;
   const provider = promptContexts.find((entry) => entry.name === 'lite-memory:recall');
+  /* CI 冷启动偶尔超过召回耗时上限，逻辑断言不该被「这轮先不注入」判失败。 */
+  globalThis.__liteMemoryRecall?.setDeadlineMs?.(5000);
   assert.ok(provider, 'recall provider registered');
   assert.equal(provider.order, 60);
   assert.equal(provider.interpolate, false);

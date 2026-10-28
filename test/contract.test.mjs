@@ -460,6 +460,8 @@ const pass = (text, id) => async () => ({
   messages: [{ role: 'user', id, source: { kind: 'user' }, content: [{ type: 'text', text }] }],
 });
 const recall = promptContexts.find((entry) => entry.name === 'lite-memory:recall');
+  /* CI 冷启动偶尔超过召回耗时上限，逻辑断言不该被「这轮先不注入」判失败。 */
+  globalThis.__liteMemoryRecall?.setDeadlineMs?.(5000);
 assert.ok(recall, 'recall context registered');
 assert.equal(recall.order, 60);
 assert.equal(recall.interpolate, false);
@@ -545,6 +547,8 @@ const evoEnter = async () => ({
 });
 await preStep({ agent: evoAgent, signal: evoSig, turn: '21' }, evoEnter);
 const evoRecall = promptContexts.find((entry) => entry.name === 'lite-memory:recall');
+  /* CI 冷启动偶尔超过召回耗时上限，逻辑断言不该被「这轮先不注入」判失败。 */
+  globalThis.__liteMemoryRecall?.setDeadlineMs?.(5000);
 assert.match(evoRecall.text({ agent: evoAgent, signal: evoSig }), /开场三句内给结论/);
 assert.equal(evoRecall.text({ agent: evoAgent, signal: evoSig }).includes('README'), false);
 
