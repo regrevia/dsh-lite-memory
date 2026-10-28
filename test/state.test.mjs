@@ -218,7 +218,9 @@ test('S01 仓库根与子目录共用一份记忆', () => {
   const atSub = scopeOf(sub);
   assert.equal(atSub.key, atRoot.key);
   assert.equal(atSub.dir, atRoot.dir);
-  assert.equal(resolveRoot(sub).root, fs.realpathSync(repo));
+  /* Windows reports the temp root as an 8.3 short name on one side and the long
+     name on the other; compare what both of them resolve to. */
+  assert.equal(fs.realpathSync(resolveRoot(sub).root), fs.realpathSync(repo));
 });
 
 test('S02 符号链接、非 Git 目录、嵌套仓库各归各的', () => {
