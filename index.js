@@ -13,6 +13,9 @@ import {
   runtimeLayers,
   findAnywhere,
   renderIndex,
+  conflictsOf,
+  resolveConflict,
+  dropConflict,
   loadIndex,
   saveEntry,
   move,
@@ -214,6 +217,7 @@ function keepHandler(webServer, cwdForSession) {
               : pathname === REMOTE_PATH + '/entry' ? 'entry'
               : pathname === REMOTE_PATH + '/move' ? 'move'
                 : pathname === REMOTE_PATH + '/overview' ? 'overview'
+                  : pathname === REMOTE_PATH + '/conflict' ? 'conflict'
                   : pathname === REMOTE_PATH + '/control' ? 'control'
                   : pathname === REMOTE_PATH + '/evolution' ? 'evolution'
                   : pathname === REMOTE_PATH + '/resume-move' ? 'resume-move' : '';
@@ -530,6 +534,7 @@ function keepHandler(webServer, cwdForSession) {
           evolution: selectedEvolution,
           records,
           archived,
+          conflicts: conflictsOf(selectedScope),
           stats: {
             total: records.length,
             experimental: records.filter((record) => record.experimental).length,
@@ -539,6 +544,26 @@ function keepHandler(webServer, cwdForSession) {
           },
         },
       });
+    }
+
+    /** 待裁决：用队列里留下的草稿另存，或删掉这条待办；不预写、不替用户合并。 */
+    if (action === 'conflict') {
+      const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
+      if (!sessionId) return sendJson(res, 400, { ok: false, reason: '缺少 sessionId' });
+      const cwd = typeof cwdForSession === 'function' ? cwdForSession(sessionId) : '';
+      if (!cwd) return sendJson(res, 409, { ok: false, reason: '这个会话还没有项目目录' });
+      const projectScope = scopeOf(cwd);
+      const requested = typeof body.scopeKey === 'string' ? body.scopeKey : '';
+      const target = requested === 'global' ? globalScope() : projectScope;
+      const title = typeof body.title === 'string' ? body.title.trim() : '';
+      if (!title) return sendJson(res, 400, { ok: false, reason: '缺少标题' });
+      try {
+        const outcome = body.op === 'drop' ? { ok: dropConflict(target, title) } : resolveConflict(target, title);
+        if (!outcome.ok) return sendJson(res, 409, { ok: false, reason: outcome.reason || '这条待裁决还没处理成' });
+        return sendJson(res, 200, { ok: true, remaining: conflictsOf(target).length });
+      } catch (error) {
+        return sendJson(res, 409, { ok: false, reason: error instanceof Error ? error.message : '待裁决处理失败' });
+      }
     }
 
     /**

@@ -2200,6 +2200,21 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => { load(); }, [sessionId]);
 
+      /** 待裁决只做两件事：把草稿另存成一条，或删掉这条待办；不在面板里悄悄合并。 */
+      const resolveQueued = (row, op) => {
+        if (!row || busy) return;
+        setBusy(true);
+        setNote('');
+        post('/lite-memory/conflict', { sessionId, scopeKey: selectedKey, title: row.title, op }).then((result) => {
+          if (!alive.current) return;
+          setBusy(false);
+          if (result.ok && result.body && result.body.ok) {
+            if (op === 'drop') setNote('已忽略这条待裁决');
+            load(selectedKey);
+          } else setNote(failure(result, '待裁决没处理成'));
+        });
+      };
+
       /** 显示设置跟着当前项目走；换项目或换范围时重新读。 */
       React.useEffect(() => {
         setDisplay(readDisplaySettings(selectedKey));
@@ -2249,6 +2264,7 @@ window.__ModuleLoader__.load({
       const selected = data ? data.selected : null;
       const records = selected && Array.isArray(selected.records) ? selected.records : EMPTY;
       const total = selected && selected.stats && Number.isInteger(selected.stats.total) ? selected.stats.total : records.length;
+      const queued = selected && Array.isArray(selected.conflicts) ? selected.conflicts : EMPTY;
       const currentKey = current ? current.key : '';
       const control = selected && selected.control
         ? selected.control
@@ -2710,12 +2726,24 @@ window.__ModuleLoader__.load({
       const memoryViewActive = viewModeOf(display, memoryView);
       const evolutionViewActive = graphViewOf(display.graph, evolutionView);
 
+      const conflictBar = queued.length === 0 ? null : h('div', {
+        style: { display: 'flex', flexDirection: 'column', gap: '3px', padding: '7px 9px 8px', borderBottom: '1px solid var(--dsw-alias-border-l1)', flex: '0 0 auto' },
+      },
+      h('div', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, `${queued.length} 条保存没确认`),
+      queued.slice(0, 2).map((row) => h('div', {
+        key: row.id || row.title,
+        style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 },
+      },
+      h('span', { style: { flex: 1, minWidth: 0, fontSize: '12px', lineHeight: '20px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, row.title),
+      h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'keep') }, '另存'),
+      h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'drop') }, '忽略'),
+      )));
       const memoryListPane = h('div', {
         style: {
           ...PANEL_CARD, padding: '2px 4px', minHeight: 0, overflowY: 'auto',
           display: 'flex', flexDirection: 'column', gap: 0,
         },
-      }, memoryList);
+      }, conflictBar, memoryList);
       const memoryGraphPane = h('div', {
         style: { ...PANEL_CARD, padding: 0, minHeight: 0, overflow: 'hidden', display: 'flex' },
       },

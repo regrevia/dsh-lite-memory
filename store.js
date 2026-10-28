@@ -2723,6 +2723,29 @@ function bindSameTopic(projectScope, ref) {
 /** 冲突队列：只记待办，不预写记忆；最多 20 条。 */
 const CONFLICT_LIMIT = 20;
 
+/** 待办里留一份可重放的草稿：面板能直接另存，不用用户回忆刚才想记什么。 */
+const CONFLICT_DRAFT_KEYS = ['title', 'summary', 'body', 'when', 'kind', 'tags', 'conditions', 'applicability', 'topicKey', 'source', 'origin'];
+function conflictDraftOf(draft) {
+  const out = {};
+  if (!draft || typeof draft !== 'object') return out;
+  for (const key of CONFLICT_DRAFT_KEYS) {
+    const value = draft[key];
+    if (value === undefined || value === null) continue;
+    if (key === 'title') out.title = normalizeText(value, 120);
+    else if (key === 'summary') out.summary = normalizeText(value, 400);
+    else if (key === 'body') out.body = typeof value === 'string' ? value.slice(0, 8000) : '';
+    else if (key === 'when') out.when = normalizeText(value, 160);
+    else if (key === 'kind') { if (KINDS.includes(value)) out.kind = value; }
+    else if (key === 'tags') out.tags = Array.isArray(value) ? value.slice(0, 5) : undefined;
+    else if (key === 'conditions') out.conditions = Array.isArray(value) ? value.slice(0, 8) : undefined;
+    else if (key === 'applicability') out.applicability = value;
+    else if (key === 'topicKey') out.topicKey = normalizeText(value, 80);
+    else if (key === 'source') out.source = value;
+    else if (key === 'origin') out.origin = value;
+  }
+  return out;
+}
+
 function queueConflictLocked(scope, draft, candidates) {
   const index = loadIndex(scope);
   const title = normalizeText(draft && draft.title, 120);
@@ -2734,11 +2757,13 @@ function queueConflictLocked(scope, draft, candidates) {
     id: item.id, title: item.title || '', when: item.when || '', reason: item.reason || 'similar_title',
   }));
   const hit = rows.find((row) => row.title === title && row.scope === scopeKey);
+  const replay = conflictDraftOf(draft);
   if (hit) {
     hit.candidates = view;
+    hit.draft = replay;
     hit.updatedAt = now;
   } else {
-    rows.push({ id: `cf_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`, title, scope: scopeKey, candidates: view, createdAt: now, updatedAt: now });
+    rows.push({ id: `cf_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`, title, scope: scopeKey, candidates: view, draft: replay, createdAt: now, updatedAt: now });
   }
   index.conflicts = rows.slice(-CONFLICT_LIMIT);
   saveIndex(scope, index);
@@ -2754,6 +2779,36 @@ function clearConflictLocked(scope, title) {
   index.conflicts = next;
   saveIndex(scope, index);
   return next.length;
+}
+
+/** 面板待裁决列表：只给可重放草稿与候选，不预写记忆。 */
+export function conflictsOf(scope) {
+  const rows = loadIndex(scope).conflicts;
+  return Array.isArray(rows) ? JSON.parse(JSON.stringify(rows)) : [];
+}
+
+/** 确认另存：用队列里的草稿按 distinct 重放一次，成功后出队。 */
+export function resolveConflict(scope, title, options = {}) {
+  const rows = Array.isArray(loadIndex(scope).conflicts) ? loadIndex(scope).conflicts : [];
+  const norm = normalizeText(title, 120);
+  const row = rows.find((item) => item.title === norm && item.scope === (scope.key === 'global' ? 'global' : 'project'));
+  if (!row) return { ok: false, reason: '这条待裁决已经不在了，刷新面板看看' };
+  const draft = { ...(row.draft || {}), resolution: 'distinct', writeMode: options.writeMode === 'append' ? 'append' : 'patch' };
+  if (scope.key === 'global') draft.scope = 'global';
+  else draft.scope = 'project';
+  if (!draft.title) draft.title = row.title;
+  const result = saveEntry(scope, draft);
+  if (result.needsResolution) return { ok: false, reason: '还是相近：换一个标题或等确认', result };
+  if (result.needsScope) return { ok: false, reason: '这条记忆的适用范围还没定，先说明当前环境', result };
+  clearConflictLocked(scope, row.title);
+  return { ok: true, result };
+}
+
+/** 删掉待裁决：用户决定不再另存。 */
+export function dropConflict(scope, title) {
+  const before = pendingConflictsOf(scope);
+  clearConflictLocked(scope, title);
+  return pendingConflictsOf(scope) < before;
 }
 
 /** 当前层还有几条没处理的冲突。 */

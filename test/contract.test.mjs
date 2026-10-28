@@ -1210,4 +1210,26 @@ assert.equal(ovArchivedBody.status, 200);
 assert.equal(ovArchivedBody.body.status, 'archived');
 assert.equal(ovArchivedBody.body.body, '右侧留白。');
 
+// 待裁决：面板看得到队列，确认后按草稿另存，不预写正文
+const cfCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-conflict-'));
+sessionCwds.set('session-conflict-panel', cfCwd);
+const cfAgent = { id: 'session-conflict-panel', cwd: cfCwd, session: { id: 'session-conflict-panel', header: { cwd: cfCwd } } };
+await defs.get('memory_save').execute({ title: '发布窗口', summary: '只在周四晚上发版', body: '周四晚上再发版。', scope: 'global' }, { agent: cfAgent });
+const cfSave = await defs.get('memory_save').execute({ title: '发布窗口', summary: '本项目周五发版', body: '周五发版。' }, { agent: cfAgent });
+assert.equal(cfSave.needsResolution, true);
+assert.equal(store.loadIndex(store.scopeOf(cfCwd)).entries.length, 0, '没确认前不落库');
+const cfBefore = await call('/lite-memory/overview', { sessionId: 'session-conflict-panel' });
+assert.equal(cfBefore.status, 200);
+assert.equal(cfBefore.body.selected.conflicts.length, 1);
+assert.equal(cfBefore.body.selected.conflicts[0].title, '发布窗口');
+assert.equal(cfBefore.body.selected.conflicts[0].draft.body, '周五发版。');
+const cfKeep = await call('/lite-memory/conflict', { sessionId: 'session-conflict-panel', scopeKey: cfBefore.body.selected.key, title: '发布窗口', op: 'keep' });
+assert.equal(cfKeep.status, 200);
+assert.equal(cfKeep.body.ok, true);
+const cfAfter = await call('/lite-memory/overview', { sessionId: 'session-conflict-panel' });
+assert.equal(cfAfter.body.selected.conflicts.length, 0);
+assert.ok(cfAfter.body.selected.records.some((row) => row.title === '发布窗口' && row.summary === '本项目周五发版'));
+const cfAgain = await call('/lite-memory/conflict', { sessionId: 'session-conflict-panel', scopeKey: cfBefore.body.selected.key, title: '发布窗口', op: 'keep' });
+assert.equal(cfAgain.status, 409, '队列没了就明确说，不重复落库');
+
 console.log('contract.test.mjs: all passed');

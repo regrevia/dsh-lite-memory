@@ -11,6 +11,7 @@ const view = await import('../view.js');
 const {
   saveEntry, routeScope, visibleRules, move, resumeMove, movePending,
   upsert, forget, readLinks, loadIndex, scopeOf, globalScope, readEntry, pendingConflictsOf,
+  conflictsOf, resolveConflict, dropConflict,
 } = store;
 
 let passed = 0;
@@ -79,6 +80,12 @@ await test('S03 模型给的类别标签不能把「本项目」抬进全局层'
   });
   assert.equal(proc.chosenScope, 'project');
   assert.equal(proc.reasonCode, 'project_bound_procedure');
+  /** 人自己确认「就存全局」时，措辞推断不能压过明确指令。 */
+  const human = routeScope({
+    title: '本项目回复用中文', body: '本项目统一中文、简短', memoryClass: 'personal_preference', scope: 'global',
+  }, { humanScope: true, project: { confirmed: true } });
+  assert.equal(human.chosenScope, 'global');
+  assert.equal(human.reasonCode, 'explicit');
 });
 
 await test('S03 设备事实没给设备条件就返回 needsScope，不落盘', () => {
@@ -410,6 +417,24 @@ await test('S12 相近保存进待办队列，确认 distinct 后出队', () => 
   const distinct = saveEntry(scope, { title: '发布前检查清单', summary: '发版前逐项确认（项目补充）', body: '项目清单', resolution: 'distinct' });
   assert.equal(distinct.needsResolution, false);
   assert.equal(pendingConflictsOf(scope), 0);
+});
+
+await test('S12 待裁决留可重放草稿，面板确认另存后才落库', () => {
+  const scope = fresh('conflict-replay');
+  saveEntry(globalScope(), { title: '提交信息格式', summary: '用一句话说清做了什么', body: '全局约定', resolution: 'distinct' });
+  const near = saveEntry(scope, { title: '提交信息格式', summary: '本项目用中文写提交信息', body: '项目补充', when: '本仓库' });
+  assert.equal(near.needsResolution, true);
+  assert.equal(loadIndex(scope).entries.length, 0, '没确认前不能预写正文');
+  const [row] = conflictsOf(scope);
+  assert.equal(row.title, '提交信息格式');
+  assert.equal(row.draft.body, '项目补充');
+  assert.equal(row.draft.when, '本仓库');
+  const kept = resolveConflict(scope, '提交信息格式');
+  assert.equal(kept.ok, true);
+  assert.equal(pendingConflictsOf(scope), 0);
+  assert.equal(loadIndex(scope).entries.length, 1);
+  assert.equal(loadIndex(scope).entries[0].body, '项目补充');
+  assert.equal(dropConflict(scope, '不存在'), false);
 });
 
 console.log(`crossing.test.mjs: ${passed} passed`);
