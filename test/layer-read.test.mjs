@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url'
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
@@ -233,7 +234,7 @@ store.saveEntry(store.scopeOf(projectB), {
   memoryClass: 'project_fact',
 });
 const marker = path.join(os.tmpdir(), `lite-memory-hold-${Math.random().toString(16).slice(2, 8)}`);
-const repo = path.resolve(new URL('..', import.meta.url).pathname);
+const repo = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const holder = spawn(process.execPath, ['--input-type=module', '-e', `
   import fs from 'node:fs';
   const { scopeOf } = await import('./store.js');

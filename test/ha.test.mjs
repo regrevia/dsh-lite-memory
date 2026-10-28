@@ -140,14 +140,27 @@ test('P0-A: a failing write surfaces as unavailable and does not clobber the goo
   state.writeDurable(file, 'good');
   const frozen = path.join(dir, 'frozen');
   fs.mkdirSync(frozen);
-  fs.chmodSync(frozen, 0o500);
-  try {
+  if (process.platform === 'win32') {
+    // Windows has no directory write bit: chmod on a folder changes nothing, so
+    // the injection has to be a failure Windows actually raises. A directory in
+    // the way of the final rename is EPERM here and EISDIR on POSIX — both must
+    // surface as `unavailable`, and neither may touch the good file beside it.
+    const blocked = path.join(dir, 'blocked.json');
+    fs.mkdirSync(blocked);
     assert.throws(
-      () => state.writeDurable(path.join(frozen, 'y.json'), 'nope'),
+      () => state.writeDurable(blocked, 'nope'),
       (error) => error.code === 'unavailable' && /写不进去/.test(error.message),
     );
-  } finally {
-    fs.chmodSync(frozen, 0o700);
+  } else {
+    fs.chmodSync(frozen, 0o500);
+    try {
+      assert.throws(
+        () => state.writeDurable(path.join(frozen, 'y.json'), 'nope'),
+        (error) => error.code === 'unavailable' && /写不进去/.test(error.message),
+      );
+    } finally {
+      fs.chmodSync(frozen, 0o700);
+    }
   }
   assert.equal(fs.readFileSync(file, 'utf8'), 'good');
 });
