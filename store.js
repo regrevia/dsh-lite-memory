@@ -2507,6 +2507,8 @@ export const MEMORY_CLASSES = ['personal_preference', 'project_fact', 'environme
 export const DURABILITIES = ['durable', 'task'];
 
 const ENVIRONMENT_KEYS = ['machine', 'targetOs', 'runtime', 'shell'];
+/** 一台机器/一次运行才算收住本机痕迹；只写操作系统名（targetOs）换台机器照样不成立。 */
+const MACHINE_SCOPE_KEYS = ['machine', 'runtime'];
 
 /**
  * 范围路由：用户明确说的范围最高；没有就按记忆类别提案，设备事实必须带设备条件。
@@ -2568,8 +2570,16 @@ export function routeScope(draft, options = {}) {
       return false;
     }
   })();
+  /** 本机痕迹只被「本机/运行时」条件收住；targetOs 是平台，不是这台机器。 */
+  const machineScoped = (() => {
+    try {
+      return (view.normalizeConditions(source.conditions) || []).some((item) => MACHINE_SCOPE_KEYS.includes(item.key));
+    } catch {
+      return false;
+    }
+  })();
   /** 真正挡回项目层的只有「本机痕迹 + 没有声明适用环境」；只写命令名不算本机痕迹。 */
-  const machineConflict = machineBound && !envScoped;
+  const machineConflict = machineBound && !machineScoped;
   const base = { chosenScope: '', reasonCode: '', requiredConditions: [], needsScope: false, explicit };
   /** 通用层拿不出普适证据时：有项目就留在项目层，没有就问一次运行环境。 */
   const fallbackToProject = (reasonCode) => {

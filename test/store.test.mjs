@@ -1089,6 +1089,22 @@ test('归属路由：本机痕迹的「通用流程」留在项目层，干净�
   assert.equal(evidencePath.chosenScope, 'project', '依据本身是本机文件不算普适证据');
   assert.equal(evidencePath.reasonCode, 'machine_bound_procedure');
 
+  const osOnlyProcedure = store.routeScope({
+    title: '本机部署脚本', summary: '本机部署脚本的位置', body: 'bash /tmp/deploy.sh',
+    memoryClass: 'portable_procedure', scope: 'global',
+    conditions: [{ key: 'targetOs', value: 'macos' }],
+  }, { project });
+  assert.equal(osOnlyProcedure.chosenScope, 'project', '只写操作系统名收不住本机路径');
+  assert.equal(osOnlyProcedure.reasonCode, 'machine_bound_scope');
+
+  const osOnlyClass = store.routeScope({
+    title: '本机部署脚本', summary: '本机部署脚本的位置', body: 'bash /tmp/deploy.sh',
+    memoryClass: 'portable_procedure',
+    conditions: [{ key: 'targetOs', value: 'macos' }],
+  }, { project });
+  assert.equal(osOnlyClass.chosenScope, 'project', 'targetOs 不是机器条件，不能凭它搬去全局层');
+  assert.equal(osOnlyClass.reasonCode, 'machine_bound_procedure');
+
   const scopedProcedure = store.routeScope({
     title: 'npm 操作走 dsh-npm', summary: '本机 npm 命令用包装脚本',
     body: '本机 npm 一律用 dsh-npm；裸 npm 报 ENEEDAUTH 不是缺凭据',
