@@ -888,6 +888,10 @@ const ovSecond = await defs.get('memory_save').execute(
   { agent: ovAgent },
 );
 await defs.get('memory_save').execute(
+  { title: '发布窗口', summary: '只在周四晚上发版', body: '周四晚上再发版。', when: '周四晚上' },
+  { agent: ovAgent },
+);
+await defs.get('memory_save').execute(
   { title: '观察全局', summary: '跨项目通用说明', body: '全局正文。', scope: 'global' },
   { agent: ovAgent },
 );
@@ -908,7 +912,7 @@ assert.equal(ov.body.selected.evolution.enabled, false);
 assert.ok(Array.isArray(ov.body.selected.evolution.rules));
 assert.ok(ov.body.selected.records.some((row) => row.title === '开场先给结论'));
 assert.equal(ov.body.selected.records.some((row) => 'body' in row), false, '列表不带正文');
-assert.equal(ov.body.selected.stats.total, 2);
+assert.equal(ov.body.selected.stats.total, 3);
 assert.equal(ov.body.selected.stats.tags, 3);
 assert.equal(JSON.stringify(ov.body).includes('"dir"'), false, '不暴露内部目录');
 assert.equal(JSON.stringify(ov.body).includes(process.env.DSH_HOME), false);
@@ -970,6 +974,30 @@ const ovGlobalEdit = await call('/lite-memory/entry', {
 });
 assert.equal(ovGlobalEdit.status, 409, '全局层在项目会话里只读');
 assert.equal((await call('/lite-memory/entry', { sessionId: 'session-overview', scopeKey: ov.body.current.key, id: ovRow.id, title: '', body: 'x', expectedRevision: 1 })).status, 400);
+
+// 适用范围只有两种来源：模型当时没确认，或人看过之后明确确认。面板能补后者，不替模型猜。
+const ovPendingRow = ov.body.selected.records.find((row) => row.title === '发布窗口');
+assert.equal(ovPendingRow.applicability, 'unresolved');
+const ovPendingBody = await call('/lite-memory/body', { sessionId: 'session-overview', title: '发布窗口', scopeKey: ov.body.current.key });
+assert.equal(ovPendingBody.status, 200);
+assert.equal(ovPendingBody.body.applicability, 'unresolved');
+const ovConfirmBad = await call('/lite-memory/entry', {
+  sessionId: 'session-overview', scopeKey: ov.body.current.key, id: ovPendingRow.id,
+  title: '发布窗口', body: '周四晚上再发版。', expectedRevision: ovPendingRow.revision, applicability: 'always',
+});
+assert.equal(ovConfirmBad.status, 400, '三档之外的值不能写进记忆');
+const ovConfirm = await call('/lite-memory/entry', {
+  sessionId: 'session-overview', scopeKey: ov.body.current.key, id: ovPendingRow.id,
+  title: '发布窗口', body: '周四晚上再发版。', expectedRevision: ovPendingRow.revision,
+  applicability: 'all_in_scope', conditions: [],
+});
+assert.equal(ovConfirm.status, 200);
+assert.equal(ovConfirm.body.ok, true);
+const ovPendingAfter = await call('/lite-memory/body', { sessionId: 'session-overview', title: '发布窗口', scopeKey: ov.body.current.key });
+assert.equal(ovPendingAfter.body.applicability, 'all_in_scope');
+assert.deepEqual(ovPendingAfter.body.conditions, []);
+assert.equal(store.readEntry(store.scopeOf(ovCwd), ovPendingRow.id).applicability, 'all_in_scope', '确认落到那一条上');
+assert.equal(store.readEntry(store.scopeOf(ovCwd), ovRow.id).applicability, 'all_in_scope', '别条不受影响');
 
 // 详情按服务端枚举过的 scopeKey 取；内部路径、未知键一律不放行。
 // 宫殿里点开一条只走这个只读入口：不改记忆、不记用量、不占额度。

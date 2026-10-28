@@ -2385,6 +2385,34 @@ window.__ModuleLoader__.load({
         });
       };
 
+      /** 适用范围待确认是模型留下的不确定；人点一次就把它变成明确结论，别再让模型猜。 */
+      const confirmMemoryScope = (record) => {
+        if (busy || !canManage || !record || !record.id) return;
+        const text = currentBodyOf(detail) || '';
+        if (!text) return;
+        setBusy(true);
+        post('/lite-memory/entry', {
+          sessionId, scopeKey: selectedKey, id: record.id,
+          title: record.title || detail.title || '', body: text,
+          expectedRevision: record.revision, applicability: 'all_in_scope', conditions: [],
+        }).then((result) => {
+          if (!alive.current || (selectedKey && scopeRef.current !== selectedKey)) return;
+          setBusy(false);
+          if (!succeeded(result)) {
+            setNote(failure(result, '适用范围没有改动'));
+            return;
+          }
+          const revision = result.body && Number.isInteger(result.body.revision) ? result.body.revision : record.revision;
+          setDetail((prev) => (prev ? { ...prev, applicability: 'all_in_scope', conditions: [], revision } : prev));
+          setData((prev) => {
+            if (!prev || !prev.selected || !Array.isArray(prev.selected.records)) return prev;
+            const records = prev.selected.records.map((row) => (row.id === record.id
+              ? { ...row, applicability: 'all_in_scope', conditions: [], revision } : row));
+            return { ...prev, selected: { ...prev.selected, records } };
+          });
+        });
+      };
+
       const toggleControl = () => {
         if (busy || !canToggle) return;
         setBusy(true);
@@ -2555,6 +2583,17 @@ window.__ModuleLoader__.load({
                   detailRecord.tags.slice(0, 6).map((tag) => h('span', { key: tag, style: { ...PANEL_MUTED, padding: '0 6px', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '999px' } }, `#${tag}`))) : null,
               memoryEditor,
               editingMemory ? null : h('div', { style: { fontSize: '12px', lineHeight: '1.65', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, currentBodyOf(detail) || '没有正文'),
+              !editingMemory && detailRecord && detailRecord.applicability === 'unresolved'
+                ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+                  h('span', { style: PANEL_MUTED }, '适用范围待确认'),
+                  canManage
+                    ? h(Action, {
+                      disabled: busy || !currentBodyOf(detail),
+                      'aria-label': '标为所有任务都适用',
+                      onClick: () => confirmMemoryScope(detailRecord),
+                    }, '都适用')
+                    : null)
+                : null,
               editingMemory ? null : h(DetailExtras, { payload: detail }),
               !editingMemory && detailRecord && canManage
                 ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap', paddingTop: '2px' } },

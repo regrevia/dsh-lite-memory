@@ -290,6 +290,8 @@ function keepHandler(webServer, cwdForSession) {
         scope: found.scope,
         scopeLabel: found.scopeLabel || '',
         revision: found.revision,
+        applicability: found.applicability || 'all_in_scope',
+        conditions: Array.isArray(found.conditions) ? found.conditions : [],
         body: found.body,
         currentBody: typeof found.currentBody === 'string' ? found.currentBody : found.body,
         versions,
@@ -328,8 +330,15 @@ function keepHandler(webServer, cwdForSession) {
         return sendJson(res, 409, { ok: false, reason: '这条记忆的版本不清楚，先刷新再改' });
       }
       if (!title.trim()) return sendJson(res, 400, { ok: false, reason: '标题不能为空' });
+      /** 面板只让人确认「适用范围」这一件事实，不开放条件编辑；取值由 view 再校验。 */
+      const applicability = typeof body.applicability === 'string' ? body.applicability : undefined;
+      const conditions = Array.isArray(body.conditions) ? body.conditions : undefined;
       try {
-        const result = saveEntry(scope, { id, title, body: text, expectedRevision, scope: 'project', source: 'user_explicit' });
+        const result = saveEntry(scope, {
+          id, title, body: text, expectedRevision, scope: 'project', source: 'user_explicit',
+          ...(applicability !== undefined ? { applicability } : {}),
+          ...(conditions !== undefined ? { conditions } : {}),
+        });
         if (!result || !result.record) {
           const reason = result && result.reasonCode === 'memory_disabled' ? '本项目记忆已关闭'
             : result && result.needsResolution ? '改动和另一条太像，先去那条上改'
