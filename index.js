@@ -1015,7 +1015,8 @@ function statusLabel(status) {
  */
 export const RECALL_MODES = ['adaptive', 'tool_only', 'off'];
 const RECALL_QUERY_CHARS = 400;
-const RECALL_DEADLINE_MS = 150;
+/** 单轮投影的耗时上限：慢机器上宁可这轮不注入，也不把回合拖住。测试可临时放宽。 */
+let recallDeadlineMs = 150;
 const RECALL_HEADER = '已有记忆可能相关（需要细节用 memory_read 带标题取正文，别凭标题猜）：';
 
 /** 卡片只放够判断要不要读的几行；必要前提整条在场，装不下就整卡省略。 */
@@ -2706,7 +2707,7 @@ export function apply(ctx, config) {
         return decision;
       }
       /** 超时或被取消：这一步不留半旧卡片，下一真人请求重新投影。 */
-      if (signal?.aborted || Date.now() - startedAt > RECALL_DEADLINE_MS) {
+      if (signal?.aborted || Date.now() - startedAt > recallDeadlineMs) {
         rollbackBudget();
         if (snapshot.cards.length) clearRecall(scope, sessionId);
         clearPrepared(agent);
@@ -3044,6 +3045,8 @@ export function apply(ctx, config) {
       mode: recallMode,
       preparedOf: (agent) => prepared.get(agent) || null,
       windowOf: (agent) => windowOf(agent),
+      /** 测试专用：CI 冷启动偶尔超过 150ms，逻辑测试不该被耗时上限判失败。 */
+      setDeadlineMs: (ms) => { if (Number.isFinite(ms) && ms > 0) recallDeadlineMs = ms; },
     };
     return () => {
       delete globalThis.__liteMemoryRecall;

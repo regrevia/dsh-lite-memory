@@ -330,7 +330,7 @@ test('S10 旧库迁移：正文、归档、旧标题一起搬进状态', () => {
   const loaded = load(scope).state;
   assert.equal(loaded.entries.length, 4);
   assert.equal(loaded.migration.fromVersion, 1);
-  assert.equal(bodyOf(scope, 'mem_111111111111'), '第一步跑测试\n第二步改版本号');
+  assert.equal(bodyOf(scope, 'mem_111111111111').replace(/\r\n/g, '\n'), '第一步跑测试\n第二步改版本号');
   const archived = loaded.entries.find((entry) => entry.id === 'mem_444444444444');
   assert.equal(archived.status, 'archived');
   assert.equal(archived.current.body, '归档正文');

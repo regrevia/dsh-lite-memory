@@ -35,6 +35,8 @@ function boot(mode = 'adaptive') {
   apply(ctx, { mode });
   const provider = promptContexts.find((entry) => entry.name === 'lite-memory:recall');
   assert.ok(provider, 'recall provider registered');
+  /* CI 冷启动偶尔超过召回耗时上限，逻辑断言不该被「这轮先不注入」判失败。 */
+  globalThis.__liteMemoryRecall?.setDeadlineMs?.(5000);
   const exec = (name, args, agent) => defs.get(name).execute(args, { agent });
   const preStep = (payload, decision) => handlers.get('agent/pre-step').at(-1)(payload, async () => decision);
   const text = (agent, signal) => provider.text({ agent, signal });
