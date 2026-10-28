@@ -9,6 +9,8 @@ export const APPLICABILITY = ['all_in_scope', 'conditional', 'unresolved'];
 export const SELECTION_MODES = ['complete', 'examples'];
 export const LINK_TYPES = ['related'];
 export const CONDITION_KEYS = ['targetOs', 'shell', 'runtime', 'machine', 'projectRoot', 'pathPrefix', 'artifactKey', 'taskKind', 'seriesId', 'phase'];
+/** 真正把规则绑到「这一集任务」上的条件；其余条件只描述环境，不构成相关性。 */
+export const TASK_CONDITION_KEYS = ['taskKind', 'seriesId', 'phase'];
 
 /** 卡片与单次请求的硬上限：整张卡要么进来，要么省略，不截半句前提。 */
 export const CARD = { max: 3, bytes: 1200 };

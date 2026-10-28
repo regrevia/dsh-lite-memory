@@ -842,29 +842,29 @@ function refsOf(hits) {
 const SAVE_PARAMS = {
   type: 'object',
   properties: {
-    updateTitle: { type: 'string', description: '要更新的那条记忆的标题（原样抄搜索结果里的标题）。同一件事更新时用它，别另建一条' },
-    title: { type: 'string', description: `标题：名词短语，用户一眼能认出是哪件事，不超过 ${LIMITS.titleChars} 字。它就是这条记忆的身份` },
-    summary: { type: 'string', description: `一句话说清要记的内容本身——用户只看这一行决定留不留，名词短语最好，超长会自动截到这个长度` },
-    body: { type: 'string', description: `正文 markdown，整段替换旧正文，不超过 ${LIMITS.entryBytes} 字节。只写原则、判断规则、触发条件和边界；不写一次性数字或代码片段，这些查当前代码或文档。` },
-    when: { type: 'string', description: `前置条件或适用场景（「在哪台机器 / 哪个环境 / 什么情况下」），不超过 ${LIMITS.whenChars} 字。同一标题但前置条件不同，会存成两条，不合并；更新时不给就保留原值` },
-    kind: { type: 'string', enum: ['preference', 'convention', 'procedure', 'pointer', 'pitfall', 'credential_hint', 'note'], description: '条目类型；更新时不给就保留原值' },
-    tags: { type: 'array', items: { type: 'string' }, description: '最多 5 个标签；更新时不给就保留原值' },
+    updateTitle: { type: 'string', description: '要更新的已有条目标题，原样抄搜索结果；同一件事更新时用，不新建' },
+    title: { type: 'string', description: `标题，名词短语，≤${LIMITS.titleChars} 字；就是条目身份` },
+    summary: { type: 'string', description: '一句话说明记的是什么，名词短语；超长自动截断' },
+    body: { type: 'string', description: `正文 markdown，≤${LIMITS.entryBytes} 字节；只写原则、判断规则、触发条件和边界` },
+    when: { type: 'string', description: `适用场景（哪台机器/什么环境/什么情况），≤${LIMITS.whenChars} 字；同标题不同 when 存两条；更新不给则保留` },
+    kind: { type: 'string', enum: ['preference', 'convention', 'procedure', 'pointer', 'pitfall', 'credential_hint', 'note'], description: '条目类型；更新不给则保留' },
+    tags: { type: 'array', items: { type: 'string' }, description: '最多 5 个标签；更新不给则保留' },
     supersedes: {
       type: 'string',
-      description: '要取代的那条记忆的标题（原样抄搜索结果里的标题）：新内容写成新条目，旧条目标为已被取代并保留在历史里；同层才有效，已被取代过的不能再取代',
+      description: '被取代的旧条目标题，原样抄搜索结果；同层有效，旧条目保留在历史',
     },
     resolution: {
       type: 'string',
       enum: ['distinct'],
-      description: '明确表示「这确实是另一条」。返回 needsResolution 时，只有确认不是同一件事才带上它再存一次',
+      description: '确认「不是同一条」；仅当返回 needsResolution 且核对后确实不同时带上',
     },
-    scope: { type: 'string', enum: ['auto', 'project', 'global'], description: '存哪一层：auto 按记忆类别判定（默认）；只有用户这一次明确说「以后所有项目都这样」才用 global，模型自己判断通用不是理由；明确说只在这个项目用 project。本机路径/端口和项目事实即使写 global 也会留在项目层，降级原因见 scopeNote；只在本机成立的命令/流程声明 machine 或 runtime 条件后可进全局层' },
-    memoryClass: { type: 'string', enum: ['personal_preference', 'project_fact', 'environment_fact', 'portable_procedure'], description: '归属提案：个人偏好 / 项目事实 / 设备事实 / 可搬流程。服务端据此判定存哪层；设备事实必须同时给设备条件' },
-    durability: { type: 'string', enum: ['durable', 'task'], description: '一般认为 durable；只是一次性任务参数用 task，服务端会拒绝落盘' },
-    evidenceRef: { type: 'string', description: '归属判定的依据（哪条消息、哪个文件、哪次观察）；用户没说范围时用来判断能不能存' },
+    scope: { type: 'string', enum: ['auto', 'project', 'global'], description: '存哪层：auto（默认，按类别判定）/ project / global。只有用户明确说「所有项目」才 global；本机路径、端口、项目事实会降为项目层；仅本机成立的流程声明 machine/runtime 条件后可进全局' },
+    memoryClass: { type: 'string', enum: ['personal_preference', 'project_fact', 'environment_fact', 'portable_procedure'], description: '归属提案：个人偏好/项目事实/设备事实/可搬流程；设备事实须带条件' },
+    durability: { type: 'string', enum: ['durable', 'task'], description: 'durable（默认）或 task（一次性参数，拒绝落盘）' },
+    evidenceRef: { type: 'string', description: '归属依据：哪条消息/文件/观察' },
     sameTopicAs: {
       type: 'object',
-      description: '显式绑定到已有主题槽位：{scope, title}。标题对不上就报错，不写',
+      description: '绑定已有主题槽位；标题对不上则报错不写',
       properties: {
         scope: { type: 'string', enum: ['project', 'global'] },
         title: { type: 'string' },
@@ -875,16 +875,16 @@ const SAVE_PARAMS = {
     mode: {
       type: 'string',
       enum: ['patch', 'replace_current'],
-      description: '默认 patch：没给的字段保持原值。要整条换掉时用 replace_current，并把 title/summary/when/body/kind/tags 全部显式给出（空值也要写），不继承旧值',
+      description: 'patch（默认，未给字段保留）或 replace_current（整条替换，须显式给 title/summary/when/body/kind/tags）',
     },
     applicability: {
       type: 'string',
       enum: view.APPLICABILITY,
-      description: '适用范围：all_in_scope 普遍适用；conditional 条件适用（必须给 conditions）；unresolved 还没定（有 when 但没结构化条件时默认这个）。不给就按字段推断',
+      description: 'all_in_scope 普遍适用；conditional 须给 conditions；unresolved 还没定（默认）',
     },
     conditions: {
       type: 'array',
-      description: '条件适用的具体条件，最多 8 条；给了空数组就是清空',
+      description: '条件，最多 8 条；空数组表示清空',
       items: {
         type: 'object',
         properties: {
@@ -897,23 +897,23 @@ const SAVE_PARAMS = {
     },
     selection: {
       type: ['object', 'null'],
-      description: '只对某个产物成立的规则：complete 表示清单完整（必须给 artifactKey），examples 只是举例。null 表示清空',
+      description: '只对某产物成立：complete 清单完整（须 artifactKey），examples 仅举例；null 清空',
       properties: {
         mode: { type: 'string', enum: view.SELECTION_MODES },
         artifactKey: { type: 'string' },
-        items: { type: 'array', items: { type: 'string' }, description: 'examples 模式下的举例清单' },
+        items: { type: 'array', items: { type: 'string' }, description: 'examples 的举例清单' },
       },
       required: ['mode'],
       additionalProperties: false,
     },
     links: {
       type: 'array',
-      description: '相关记忆，最多 3 条，只表示同类相关；目标必须当前存在。给空数组就是清空',
+      description: '相关条目，最多 3 条；目标须存在；空数组清空',
       items: {
         type: 'object',
         properties: {
           type: { type: 'string', enum: view.LINK_TYPES, description: '默认 related' },
-          title: { type: 'string', description: '被关联那条记忆的标题（原样抄搜索结果里的标题）' },
+          title: { type: 'string', description: '被关联条目标题，原样抄搜索结果' },
         },
         required: ['title'],
         additionalProperties: false,
@@ -922,9 +922,9 @@ const SAVE_PARAMS = {
     triggers: {
       type: 'array',
       items: { type: 'string' },
-      description: '自动召回用的固定触发词，最多 4 个；给空数组就是清空',
+      description: '自动召回触发词，最多 4 个；空数组清空',
     },
-    topicKey: { type: ['string', 'null'], description: '主题槽位，用来判断同一件事避免重复；不给就保持原值，null 表示清空' },
+    topicKey: { type: ['string', 'null'], description: '主题槽位，去重用；null 清空' },
   },
   required: ['title', 'summary'],
   additionalProperties: false,
@@ -932,7 +932,7 @@ const SAVE_PARAMS = {
 
 const SUGGEST_PARAMS = {
   ...SAVE_PARAMS,
-  properties: Object.fromEntries(Object.entries(SAVE_PARAMS.properties).filter(([key]) => !['scope', 'id', 'updateTitle', 'resolution', 'memoryClass', 'durability', 'evidenceRef', 'sameTopicAs'].includes(key))),
+  properties: Object.fromEntries(Object.entries(SAVE_PARAMS.properties).filter(([key]) => !['scope', 'id', 'updateTitle', 'resolution', 'memoryClass', 'durability', 'evidenceRef', 'sameTopicAs', 'supersedes', 'mode'].includes(key))),
 };
 
 const SEARCH_PARAMS = {
@@ -940,9 +940,9 @@ const SEARCH_PARAMS = {
   properties: {
     query: { type: 'string', description: '要查的主题；用用户原话里的词，长句也行' },
     limit: { type: 'integer', minimum: 1, maximum: 4, description: '最多返回几条，默认 3' },
-    history: { type: 'boolean', description: '连已归档的旧记录一起找；默认只看当前有效的，旧修正不混进正常检索' },
-    contextId: { type: 'string', description: '本请求已经给出的任务上下文 id；只有上一轮自动索引或工具结果里出现过才填' },
-    bindForRequest: { type: 'boolean', description: '把这次选择绑定为本请求的任务；有 contextId 就带上。默认 false，只做普通检索' },
+    history: { type: 'boolean', description: '连已归档的旧记录一起找；默认只看当前有效' },
+    contextId: { type: 'string', description: '上一轮索引或工具结果给的任务上下文 id' },
+    bindForRequest: { type: 'boolean', description: '把这次选择绑定为本请求的任务；有 contextId 时带上' },
   },
   required: ['query'],
   additionalProperties: false,
@@ -1605,11 +1605,11 @@ export function apply(ctx, config) {
         continue;
       }
       /**
-       * 实验规则的任务条件本身就是相关度：栏目/阶段都对上，说明这条规则就属于当前这一集。
-       * 没有声明条件的规则仍要过词面门，避免一条宽泛规则在所有请求里都出现。
+       * 只有任务范围条件（栏目/阶段/任务类型）才算相关度：环境条件（系统/机器/路径）人人都过，
+       * 拿它当绑定条件会让一条宽泛规则出现在每个请求里。其余规则照旧过词面门。
        */
       const conditions = Array.isArray(record.conditions) ? record.conditions.filter((row) => row && row.key) : [];
-      const bound = conditions.length > 0;
+      const bound = conditions.some((row) => view.TASK_CONDITION_KEYS.includes(row.key));
       if (!bound && score < view.MATCH_FLOOR) continue;
       const topic = record.topicKey || record.id;
       if (byTopic.has(topic) && byTopic.get(topic).body !== record.body) conflict = true;
@@ -1954,7 +1954,7 @@ export function apply(ctx, config) {
 
   ctx.effect(() => tools.register({
     name: 'memory_save',
-    description: `保存一条记忆。只在会改变以后判断时才存；先搜已有条目，能更新就不要新建。保存前先蒸馏：标题是结论，正文只写原则与触发条件，通常 2–4 句；路径、字段表、完整命令、版本号、尺寸数值不要抄进正文，改成文档或 skill 的指针。用户明确说「记住」时直接调用；用户自己的话已经是长期规则（「以后都这样」「别再 X」）时也直接调用，不要先问。更新同一件事时用同一个标题：身份只看标题、旧标题和前置条件，像不像不授权覆盖。文本相近但标题不同时先不写，返回 needsResolution 与 1–2 条相近条目：确实是同一条就改成那个标题重存，确实是另一条才带 resolution="distinct" 再存。按标题更新时没给的字段保持原值，正文整段替换，旧正文只留作内部撤回，不展示也不参与检索。条数到硬上限时把同层最久没被读的一条移进归档，结果里写明动了哪条，不拒绝新记忆；单条正文超限只报错、不截断。前置条件不同的同一标题是两条。${NOTES}`,
+    description: `保存一条跨会话有用的记忆。只在会改变以后判断时存；先搜，能更新就不新建。用户说「记住」或话已是长期规则（「以后都这样」「别再 X」）时直接调用，不要先问。文本相近但标题不同时先不写，返回 needsResolution 后核对：是同一件事就改成那个标题重存，确实是另一条才带 resolution="distinct"。按标题更新时未给字段保留，正文整段替换；旧正文只留作内部撤回，不展示不检索。前置条件不同同一标题可存两条。${NOTES}`,
     parameters: SAVE_PARAMS,
     output: {
       presentationMeta: (_args, value) => ({
@@ -2176,7 +2176,7 @@ export function apply(ctx, config) {
 
   ctx.effect(() => tools.register({
     name: 'memory_suggest',
-    description: `对一条用户没说、但跨会话还有用的经验提出保存建议。调用后对话里出现一个「保留」按钮，用户点了才进正式记忆。不要用问句征询「要不要记」，那要用户打字。一次对话最多建议一条，48 小时内每个项目一条。建议草稿与正式保存走同一套校验，凭据不会落盘；待确认草稿 48 小时过期，确认前就落盘所以撤回/过期都查得到。已有同一条时不再建议；相近的另一条会记成「更新候选」，保留后改的是那条，不会另建。${NOTES}`,
+    description: `对用户没说、但跨会话有用的经验提出保存建议。调用后出现「保留」按钮，用户点了才进正式记忆；不要用问句征询。一次对话最多一条，48 小时内每项目一条；相近条目记为「更新候选」，保留后更新那条，不新建。${NOTES}`,
     parameters: SUGGEST_PARAMS,
     output: {
       presentationMeta: (_args, value) => ({ kind: 'memory-suggest', id: value.id || '', asked: value.asked }),
@@ -2216,7 +2216,7 @@ export function apply(ctx, config) {
 
   ctx.effect(() => tools.register({
     name: 'memory_search',
-    description: `按需检索已有记忆：先搜，命中再 memory_read 读正文。用户提到「记住了什么 / 上次 / 规范 / 约定 / 路径 / 凭据怎么取」，或者眼前反复出现的报错、弹窗、异常时，先查这里有没有记过解法。跨项目的通用条目以 [global] 开头，项目条目以 [项目名] 开头。中文长句可以直接当查询。每行给标题与适用范围；要更新就用那个标题重存。默认只列当前有效的；已经归档或被更新替换的旧说法不混进来，要查历史就在参数里显式要 history。`,
+    description: `检索已有记忆；命中后 memory_read 带标题读正文。用户提到「记住了什么/上次/规范/约定/路径/凭据怎么取」，或眼前反复出现报错、弹窗、异常时先查这里。跨项目条目以 [global] 开头。要更新就按返回标题重存。默认只列当前有效的；查历史传 history。`,
     parameters: SEARCH_PARAMS,
     output: {
       presentationMeta: (_args, value) => ({

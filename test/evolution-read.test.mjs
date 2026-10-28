@@ -8,6 +8,7 @@ const { apply } = await import('../index.js');
 const store = await import('../store.js');
 const state = await import('../state.js');
 const anchor = await import('../anchor.js');
+const view = await import('../view.js');
 
 const effect = (fn) => {
   const dispose = fn();
@@ -636,4 +637,22 @@ console.log('evolution-read.test.mjs: all passed');
   const sig = signal();
   await runtime.preStep({ agent, signal: sig, turn: 't1' }, enter(human('这期封面标题怎么写')));
   assert.equal(runtime.text(agent, sig).includes('导出统一用 H.264'), false, '无关问题不注入宽泛规则');
+}
+
+/* L25：只声明环境条件（系统/路径）的规则不算任务绑定，问题不相关时不注入。 */
+{
+  const dir = mkdir('env-only');
+  const scope = scopeOf(dir);
+  const host = view.hostTargetOs();
+  assert.ok(host, '本机系统可识别');
+  seedRule(scope, { title: '导出参数', body: '导出统一用 H.264。', conditions: [{ key: 'targetOs', value: host }] });
+  enable(scope, { seriesId: '口播' });
+  const runtime = boot();
+  const agent = makeAgent('a-env-only', dir);
+  const sig = signal();
+  await runtime.preStep({ agent, signal: sig, turn: 't1' }, enter(human('这期封面标题怎么写')));
+  assert.equal(runtime.text(agent, sig).includes('导出统一用 H.264'), false, '只有环境条件也要过词面门');
+  const sig2 = signal();
+  await runtime.preStep({ agent, signal: sig2, turn: 't2' }, enter(human('这期口播导出参数怎么配')));
+  assert.equal(runtime.text(agent, sig2).includes('导出统一用 H.264'), true, '相关时环境条件规则照常注入');
 }
