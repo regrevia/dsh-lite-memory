@@ -558,3 +558,30 @@ console.log('recall.test.mjs: ok');
   assert.doesNotMatch(runtime.provider.text({ agent, signal: sig }), /Digital asset catalog/);
   assert.equal(store.search(scopeEn, 'git', 5).length, 0, '手动搜索也不给这条');
 }
+
+// A25：用户这句话没提动作时，用上一轮助手的话和工具名补一次查询；补不到不盖掉原判断。
+{
+  const cwdAct = mkdir('action');
+  const scopeAct = store.scopeOf(cwdAct);
+  save(scopeAct, {
+    title: '改完 client.js 先重载宿主',
+    tags: ['client.js', '重载'],
+    summary: 'client.js 一改就要重载宿主，普通刷新覆盖不到',
+  });
+  const agent = makeAgent('agent-action', cwdAct);
+  const runtime = boot();
+  const first = signal();
+  await runtime.preStep({ agent, signal: first, turn: 't1' }, enter(human('这个怎么弄')));
+  assert.equal(runtime.provider.text({ agent, signal: first }), '', '只说「这个怎么弄」时不该凭空命中');
+  const assistantMessage = {
+    role: 'assistant',
+    id: 'asst-action-1',
+    content: [
+      { type: 'text', text: '我把改动写进文件了。' },
+      { type: 'tool-call', name: 'write', input: { file_path: '/tmp/act/client.js' } },
+    ],
+  };
+  const second = signal();
+  await runtime.preStep({ agent, signal: second, turn: 't2' }, enter(assistantMessage, human('这个怎么弄')));
+  assert.match(runtime.provider.text({ agent, signal: second }), /改完 client\.js 先重载宿主/, '动作侧线索要能召回预防型记忆');
+}

@@ -1111,12 +1111,21 @@ test('归属路由：本机痕迹的「通用流程」留在项目层，干净�
   assert.equal(modelGlobalFact.chosenScope, 'project', '模型自填 global 不能把项目事实送进全局层');
   assert.equal(modelGlobalFact.reasonCode, 'model_global_project_fact');
 
-  const modelGlobalProcedure = store.routeScope({
+  /** 显式 global 是用户要的那一层：没 evidenceRef 也只代表模型没补依据，不能把它降回项目层。 */
+  const userGlobalProcedure = store.routeScope({
     title: '提交前跑测试', summary: '提交前跑测试', body: 'pnpm test',
     memoryClass: 'portable_procedure', scope: 'global',
   }, { project });
-  assert.equal(modelGlobalProcedure.chosenScope, 'project', '模型自填 global 少了依据也不能进全局层');
-  assert.equal(modelGlobalProcedure.reasonCode, 'unbound_evidence');
+  assert.equal(userGlobalProcedure.chosenScope, 'global');
+  assert.equal(userGlobalProcedure.reasonCode, 'explicit');
+
+  /** 没显式 scope 时，memoryClass 只是提案：缺可搬依据的流程仍留在项目层。 */
+  const classOnlyProcedure = store.routeScope({
+    title: '提交前跑测试', summary: '提交前跑测试', body: 'pnpm test',
+    memoryClass: 'portable_procedure',
+  }, { project });
+  assert.equal(classOnlyProcedure.chosenScope, 'project', '没有显式 scope 又缺依据，不能自己搬去全局层');
+  assert.equal(classOnlyProcedure.reasonCode, 'unbound_evidence');
 });
 
 test('几百条归档的正文不进热状态，下一次保存照样能过', () => {

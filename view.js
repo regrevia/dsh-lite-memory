@@ -700,6 +700,68 @@ export function isContinuationQuery(text) {
   return /^(继续|接着|然后|然后呢|还有|还有呢|往下|说下去|goon|continue|next|more)$/.test(raw);
 }
 
+/**
+ * 动作侧检索词：用户这句话没提，但「刚才在动什么」往往就写在上一轮助手的话和工具名里。
+ * 预防型记忆（先重载再重启、改插件后别用 Cmd+R）约束的是下一步动作，
+ * 只拿用户原话查，词面永远在错的一侧。这里只取少量最近的实词和工具名，避免长文稀释命中。
+ */
+const ACTION_NOISE = new Set(['const', 'function', 'return', 'import', 'export', 'from', 'async', 'await', 'true', 'false', 'null', 'undefined', 'string', 'number', 'object']);
+export function actionTerms(messages, options = {}) {
+  if (!Array.isArray(messages)) return '';
+  const limit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : 16;
+  const terms = [];
+  const seen = new Set();
+  const push = (word) => {
+    const text = String(word || '').trim().toLowerCase();
+    if ([...text].length < 2 || ACTION_NOISE.has(text) || seen.has(text)) return;
+    seen.add(text);
+    terms.push(text);
+  };
+  const scan = (message) => {
+    const content = message?.content;
+    if (!Array.isArray(content)) return '';
+    let text = '';
+    for (const part of content) {
+      if (!part || typeof part !== 'object') continue;
+      if (part.type === 'tool-call' || part.type === 'tool_call') {
+        if (typeof part.name === 'string') push(part.name);
+        const input = part.input || part.arguments || part.args;
+        if (input && typeof input === 'object') {
+          for (const value of Object.values(input)) {
+            if (typeof value === 'string' && /[./_-]/.test(value)) {
+              for (const piece of value.split(/[^\p{L}\p{N}_.-]+/u)) push(piece);
+            }
+          }
+        }
+        continue;
+      }
+      if (part.type === 'text' && typeof part.text === 'string') text += `${part.text}\n`;
+    }
+    return text;
+  };
+  let assistants = 0;
+  let previousHuman = false;
+  for (let i = messages.length - 1; i >= 0 && terms.length < limit; i -= 1) {
+    const message = messages[i];
+    if (!message) continue;
+    if (message.role === 'assistant') {
+      const text = scan(message);
+      if (!text) continue;
+      assistants += 1;
+      for (const word of contentWordsOf(text)) push(word);
+      for (const word of asciiWordsOf(text)) push(word);
+      if (assistants >= 2) break;
+    } else if (message.role === 'user' && !previousHuman && message?.source?.kind !== 'goal') {
+      const text = scan(message);
+      if (!text) continue;
+      previousHuman = true;
+      for (const word of contentWordsOf(text)) push(word);
+      for (const word of asciiWordsOf(text)) push(word);
+    }
+  }
+  return terms.slice(0, limit).join(' ');
+}
+
 export function newestUserQuery(messages) {
   if (!Array.isArray(messages)) return '';
   for (let i = messages.length - 1; i >= 0; i -= 1) {

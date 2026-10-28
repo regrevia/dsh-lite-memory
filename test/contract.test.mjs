@@ -327,7 +327,28 @@ assert.equal((await call('/lite-memory/keep', {}, { method: 'GET' })).status, 40
 // ── global layer ─────────────────────────────────────────────────────────────
 const global = await exec('memory_save', { title: '回复用中文', summary: '用户要求回复用中文', scope: 'global' });
 assert.equal(global.scope, 'global');
+assert.equal(global.scopeNote, undefined, '正常落全局不该带降级说明');
 assert.match(render('memory_save', {}, global), /^memory · saved \[global\] "回复用中文"$/);
+
+// 显式写 global 也不再被悄无声息地改层：本机痕迹和项目事实各有一条能解释的降级。
+const machineGlobal = await exec('memory_save', {
+  title: '本机目录同步步骤',
+  summary: '流程里写了本机路径，写全局也会留在项目层',
+  body: '在 /Users/apple/Desktop/DSH 下改完再同步。',
+  scope: 'global',
+  memoryClass: 'portable_procedure',
+});
+assert.equal(machineGlobal.scope, 'project');
+assert.match(machineGlobal.scopeNote, /按本机痕迹留在项目层/);
+const factGlobal = await exec('memory_save', {
+  title: '发版顺序只在仓库成立',
+  summary: '项目事实换项目不成立，写全局也会留在项目层',
+  body: '这个仓库的发版顺序是先前置检查再打包。',
+  scope: 'global',
+  memoryClass: 'project_fact',
+});
+assert.equal(factGlobal.scope, 'project');
+assert.match(factGlobal.scopeNote, /按项目事实留在项目层/);
 const globalSearch = await exec('memory_search', { query: '回复用中文' });
 assert.equal(globalSearch.count, 1);
 assert.match(render('memory_search', {}, globalSearch), /\[global\] 「/);

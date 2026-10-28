@@ -28,7 +28,7 @@ assert.equal(panel.name, 'shell.overlay');
 assert.equal(panel.order, 30);
 
 const EMPTY_CHILDREN = [];
-const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, agoLabel, checkupOf, titleCountsOf, rowKeyOf, rowKeepFlags } = seen;
+const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags } = seen;
 
 // 图谱只按真实数据画：共享标签成枢纽，显式关联成边，位置由 id 决定。
 const graph = graphOf([
@@ -297,6 +297,23 @@ assert.equal(aged.entryKind, 'preference');
 assert.equal(refMetaOf(aged), '[全局] · 3 天前更新');
 assert.equal(agoLabel(''), '');
 assert.equal(agoLabel(new Date(Date.now() - 40 * 86_400_000).toISOString()), '');
+
+// 会话里的正文跟着被点的那条走：点 B，正文夹在 B 与 C 之间，不甩到列表末尾。
+const inlineRefs = [
+  { key: 'a', revision: 1, title: 'A' },
+  { key: 'b', revision: 2, title: 'B' },
+  { key: 'c', revision: 3, title: 'C' },
+];
+const rowOfRef = (item) => item.key;
+const detailOfRef = () => 'detail';
+assert.deepEqual(refSectionRowsOf(inlineRefs, { key: 'b', ref: { revision: 2 } }, rowOfRef, detailOfRef), ['a', 'b', 'detail', 'c']);
+assert.deepEqual(refSectionRowsOf(inlineRefs, { key: 'a', ref: { revision: 1 } }, rowOfRef, detailOfRef), ['a', 'detail', 'b', 'c']);
+assert.deepEqual(refSectionRowsOf(inlineRefs, null, rowOfRef, detailOfRef), ['a', 'b', 'c']);
+// 抬头的永远是记忆标题；项目名只留在下一行来源里，不再单独顶一行被当成标题。
+assert.equal(refDetailTitleOf({ title: 'DSH', ref: { title: '视频预览插件重启后仍缓存旧代码' } }), '视频预览插件重启后仍缓存旧代码');
+assert.equal(refDetailTitleOf({ ref: { title: '标题' } }), '标题');
+assert.equal(versionLine({ scope: 'project', scopeLabel: 'DSH', status: 'active' }), '项目 · DSH');
+assert.equal(versionLine({ scope: 'global', status: 'active' }), '全局');
 
 // 解释模式按会话存在本机，缺省关闭；关着零命中不出提示，打开后才说原因。
 assert.equal(explainModeOf('s1'), false);

@@ -804,7 +804,7 @@ const SAVE_PARAMS = {
       enum: ['distinct'],
       description: '明确表示「这确实是另一条」。返回 needsResolution 时，只有确认不是同一件事才带上它再存一次',
     },
-    scope: { type: 'string', enum: ['auto', 'project', 'global'], description: '存哪一层：auto 按记忆类别判定（默认）；用户明确说「以后所有项目都这样」用 global；明确说只在这个项目用 project' },
+    scope: { type: 'string', enum: ['auto', 'project', 'global'], description: '存哪一层：auto 按记忆类别判定（默认）；只有用户这一次明确说「以后所有项目都这样」才用 global，模型自己判断通用不是理由；明确说只在这个项目用 project。本机路径/端口和项目事实即使写 global 也会留在项目层，降级原因见 scopeNote' },
     memoryClass: { type: 'string', enum: ['personal_preference', 'project_fact', 'environment_fact', 'portable_procedure'], description: '归属提案：个人偏好 / 项目事实 / 设备事实 / 可搬流程。服务端据此判定存哪层；设备事实必须同时给设备条件' },
     durability: { type: 'string', enum: ['durable', 'task'], description: '一般认为 durable；只是一次性任务参数用 task，服务端会拒绝落盘' },
     evidenceRef: { type: 'string', description: '归属判定的依据（哪条消息、哪个文件、哪次观察）；用户没说范围时用来判断能不能存' },
@@ -1883,6 +1883,7 @@ export function apply(ctx, config) {
           sameTopic: { type: 'boolean' },
           similarTitles: { type: 'string' },
           similar: { type: 'string' },
+          scopeNote: { type: 'string' },
           supersededTitle: { type: 'string' },
           archived: { type: 'string' },
           pendingConflicts: { type: 'integer' },
@@ -1907,7 +1908,7 @@ export function apply(ctx, config) {
           ? `memory · 需要确认：「${value.title}」与已有条目相近${value.crossLayer ? '（在另一层）' : ''}${value.sameTopic ? '（同一主题槽位）' : ''}\n${value.similar}\n要更新它：用同一个标题${value.crossScope === 'global' ? '、并带 scope="global"' : ''}再存一次；确实是另一条，加 resolution="distinct"`
           : value.changed === false
             ? `memory · unchanged ${withTag(value, `"${value.title}"`)}`
-            : `memory · ${value.merged ? 'merged' : 'saved'} ${withTag(value, `"${value.title}"`)}${value.when ? `（${value.when}）` : ''}${value.similar ? ` · 相近：${value.similar}` : ''}${value.archived ? ` · 已归档「${value.archived}」腾位` : ''}${value.fullTextSaved ? ' · 完整原句已另存' : ''}${value.supersededTitle ? ` · 已取代「${value.supersededTitle}」` : ''}`,
+            : `memory · ${value.merged ? 'merged' : 'saved'} ${withTag(value, `"${value.title}"`)}${value.when ? `（${value.when}）` : ''}${value.similar ? ` · 相近：${value.similar}` : ''}${value.archived ? ` · 已归档「${value.archived}」腾位` : ''}${value.fullTextSaved ? ' · 完整原句已另存' : ''}${value.supersededTitle ? ` · 已取代「${value.supersededTitle}」` : ''}${value.scopeNote ? ` · ${value.scopeNote}` : ''}`,
       }],
     },
     execute: async (args, execution) => {
@@ -1988,6 +1989,13 @@ export function apply(ctx, config) {
         };
       }
       const scope = saved.chosenScope === 'global' || (args.scope === 'global' && !saved.chosenScope) ? globalScope() : projectScope;
+      /** 显式要了全局却被硬冲突挡回项目层时说清原因：否则模型只能看到 scope=project，无从纠。 */
+      const scopeNote = (() => {
+        if (args.scope !== 'global' || scope.key === 'global') return '';
+        if (saved.reasonCode === 'machine_bound_scope') return '按本机痕迹留在项目层：正文或依据里写了本机路径/端口，改成别的项目仍成立的通用规则再存全局';
+        if (saved.reasonCode === 'model_global_project_fact') return '按项目事实留在项目层：换成别的项目就不成立；确实是通用流程就改 memoryClass';
+        return '';
+      })();
       if (saved.needsResolution) {
         return {
           title: saved.draft.title,
@@ -2005,6 +2013,7 @@ export function apply(ctx, config) {
           similarTitles: saved.similarList.map((item) => item.title).join('、'),
           similar: saved.similarList.map((item) => describeCandidate(item, { sameTopic: saved.sameTopic })).join('；'),
           archived: '',
+          ...(scopeNote ? { scopeNote } : {}),
           pendingConflicts: Number(saved.pendingConflicts) || 0,
         };
       }
@@ -2024,6 +2033,7 @@ export function apply(ctx, config) {
         needsScope: false,
         needsResolution: false,
         similarTitles: saved.similarList.map((item) => item.title).join('、'),
+        ...(scopeNote ? { scopeNote } : {}),
         supersededTitle: supersedes && supersedesId ? supersedes : '',
         archived: (saved.archived || []).map((item) => item.title).join('、'),
         pendingConflicts: Number(saved.pendingConflicts) || 0,
@@ -2645,7 +2655,30 @@ export function apply(ctx, config) {
       const remembered = runtime && runtime.enabled
         ? rememberFeedback(scope, sessionId, fresh, runtime.held, turn)
         : null;
-      const snapshot = projectRecall(scope, query, recalledContext, win, runtime ? runtime.held : null);
+      let snapshot = projectRecall(scope, query, recalledContext, win, runtime ? runtime.held : null);
+      /**
+       * 预防型记忆约束的是「下一步动作」，词面常写在上一轮助手的话和工具调用里，用户这句话反而没提。
+       * 第一次检索一张卡都没有时，用最近的实词/工具名补一次有界查询，预算仍是同一份。
+       */
+      if (!snapshot.cards.length && !carried) {
+        const humanTail = (() => {
+          const messages = Array.isArray(decision.messages) ? decision.messages : [];
+          for (let i = messages.length - 1; i >= 0; i -= 1) {
+            if (messages[i]?.source?.kind === 'user') return messages.slice(0, i);
+          }
+          return messages;
+        })();
+        const trail = view.actionTerms(humanTail, { limit: 12 }).slice(0, 240);
+        if (trail) {
+          const actionQuery = `${trail} ${query}`.trim().slice(0, RECALL_QUERY_CHARS);
+          const retry = projectRecall(scope, actionQuery, recalledContext, win, runtime ? runtime.held : null);
+          /** 补查是为了给出提醒：补不到就保留第一次的「为什么没提醒」，不拿空结果盖掉。 */
+          if (retry.cards.length) {
+            snapshot = retry;
+            if (win) win.query = actionQuery;
+          }
+        }
+      }
       noteRecall(scope, sessionId, {
         reason: snapshot.reason, matched: snapshot.matched, cards: snapshot.cards.length, chars: snapshot.bytes,
       });

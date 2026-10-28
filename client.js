@@ -568,10 +568,30 @@ window.__ModuleLoader__.load({
     };
 
     const versionLine = (shown) => {
-      const scope = shown.scopeLabel || (shown.scope === 'global' ? '全局' : '项目');
+      /** 项目名只当分层后缀：光写目录名会被当成记忆标题。 */
+      const scope = shown.scope === 'global' ? '全局'
+        : shown.scopeLabel ? `项目 · ${shown.scopeLabel}` : '项目';
       const archived = shown.status === 'archived' ? ' · 已归档' : '';
       const processing = processingStatusOf(shown.processingStatus ? { processingStatus: shown.processingStatus } : shown);
       return `${scope}${archived}${processing ? ` · ${PROCESSING_LABEL[processing]}` : ''}`;
+    };
+
+    /** 展开的正文紧跟被点的那条；顺序由列表决定，不挂在一段末尾。 */
+    const refSectionRowsOf = (items, shown, renderRow, renderDetail) => {
+      const rows = [];
+      for (const item of items) {
+        rows.push(renderRow(item));
+        if (shown && shown.ref && shown.key === item.key && shown.ref.revision === item.revision) rows.push(renderDetail(item));
+      }
+      return rows;
+    };
+
+    /** 正文抬头永远是记忆标题；项目/全局只做下面的来源行。 */
+    const refDetailTitleOf = (shown) => {
+      const title = shown && shown.ref && typeof shown.ref.title === 'string' ? shown.ref.title.trim() : '';
+      if (title) return title;
+      const fallback = shown && typeof shown.title === 'string' ? shown.title.trim() : '';
+      return fallback || '记忆';
     };
 
     /**
@@ -625,8 +645,9 @@ window.__ModuleLoader__.load({
         onMouseEnter: () => setHover(true),
         onMouseLeave: () => setHover(false),
         onClick: props.onShow, // ui-copy-ignore
-        'aria-label': `查看记忆 ${item.title || '记忆'}${reason ? `，${reason}` : ''}`,
-        title: reason ? `${item.title || '记忆'}，${reason}` : (item.title || '记忆'),
+        'aria-expanded': Boolean(props.active),
+        'aria-label': `${props.active ? '收起' : '查看'}记忆 ${item.title || '记忆'}${reason ? `，${reason}` : ''}`,
+        title: props.active ? `收起 ${item.title || '记忆'}` : (reason ? `${item.title || '记忆'}，${reason}` : (item.title || '记忆')),
         style: { // ui-copy-ignore
           display: 'flex', alignItems: 'flex-start', gap: '7px', width: '100%', minWidth: 0, textAlign: 'left',
           border: 'none', borderRadius: '8px', padding: '3px 7px', cursor: 'pointer', color: 'inherit',
@@ -675,8 +696,11 @@ window.__ModuleLoader__.load({
         setOpen(false);
       };
       const show = (item) => {
-        if (shown && shown.key === item.key) {
-          close();
+        /** 再点同一条只收起正文，列表留着，方便接着看别的。 */
+        if (shown && shown.key === item.key && shown.ref && shown.ref.revision === item.revision) {
+          generation.current += 1;
+          setShown(null);
+          setNote('');
           return;
         }
         const request = generation.current + 1;
@@ -711,20 +735,13 @@ window.__ModuleLoader__.load({
           });
         });
       };
-      const rows = open ? items.map((item) => h(RefRow, {
-        key: `${item.key}|${item.revision}`, // ui-copy-ignore
-        item, tone, active: Boolean(shown && shown.key === item.key),
-        onShow: () => show(item),
-      })) : [];
-      const detail = shown && shown.ref && items.some((item) => item.key === shown.key && item.revision === shown.ref.revision)
-        ? h('div', { style: { ...REF_BODY, borderLeft: `2px solid ${tone}` } },
+      const detail = shown && shown.ref
+        ? h('div', { style: { ...REF_BODY, margin: '2px 0 4px 7px', padding: '2px 2px 4px 10px', borderLeft: `2px solid ${tone}` } },
           shown.loading ? h('span', { style: REF_META }, '读取中…') : null,
           shown.gone ? h('span', { style: REF_META }, '这条记忆已经不在这里了') : null,
           shown.invalid ? h('span', { style: REF_META }, '读不到正文，点名字重试') : null,
           !shown.loading && !shown.gone && !shown.invalid ? h(React.Fragment, null,
-            shown.title && shown.title !== shown.ref.title
-              ? h('div', { style: { fontSize: '12px', lineHeight: '1.55', fontWeight: 600 } }, shown.title)
-              : null,
+            h('div', { style: { fontSize: '13px', lineHeight: '1.5', fontWeight: 600, wordBreak: 'break-word' } }, refDetailTitleOf(shown)),
             h('div', { style: REF_META }, versionLine(shown)),
             shown.when ? h('div', { style: REF_META }, shown.when) : null,
             shown.body
@@ -735,6 +752,13 @@ window.__ModuleLoader__.load({
           note ? h('span', { style: REF_META }, note) : null,
         )
         : null;
+      const rows = open
+        ? refSectionRowsOf(items, shown, (item) => h(RefRow, {
+          key: `${item.key}|${item.revision}`, // ui-copy-ignore
+          item, tone, active: Boolean(shown && shown.ref && shown.key === item.key && shown.ref.revision === item.revision),
+          onShow: () => show(item),
+        }), () => detail)
+        : [];
       return h('div', { style: DOCK, 'data-memory-section': props.label },
         h('button', {
           type: 'button',
@@ -753,7 +777,6 @@ window.__ModuleLoader__.load({
         h(RefChevron, { open }),
         ),
         ...rows,
-        detail,
       );
     };
 
@@ -2935,7 +2958,7 @@ window.__ModuleLoader__.load({
 
     // 测试缝：Node 里验引用投影，浏览器里没有任何副作用。
     if (typeof globalThis.__LITE_MEMORY_TEST__ === 'function') {
-      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, agoLabel, checkupOf, titleCountsOf, rowKeyOf, rowKeepFlags, Row });
+      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row });
     }
 
     return {

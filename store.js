@@ -2547,11 +2547,14 @@ export function routeScope(draft, options = {}) {
   const humanConfirmed = options.humanScope === true || source.scopeConfirmed === true;
   if (durability === 'task') return { ...base, needsScope: true, reasonCode: 'task_state' };
   if (explicit) {
-    /** 模型自己填的 global 只是提案：本机痕迹、项目事实、无依据的通用流程都按提案降级。 */
+    /**
+     * 显式 scope 代表「用户这个消息里要的那一层」：这是唯一能让全局层落地的输入，
+     * 所以不能再按模型自荐降级，只有本机痕迹和项目事实两种硬冲突能改落点。
+     * 没显式 scope 时才用 memoryClass 提案，缺可搬依据的流程留在项目层。
+     */
     if (explicit === 'global' && !humanConfirmed) {
       if (machineBound) return fallbackToProject('machine_bound_scope');
       if (cls === 'project_fact') return fallbackToProject('model_global_project_fact');
-      if (cls === 'portable_procedure' && !evidence) return fallbackToProject('unbound_evidence');
     }
     if (explicit === 'project' && !projectReady) {
       const reasonCode = options.project && options.project.confirmed === false ? 'unconfirmed_project' : 'no_project';
