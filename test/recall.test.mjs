@@ -846,6 +846,40 @@ console.log('recall.test.mjs: ok');
   assert.ok(scopeNpm.key, '项目层不受影响');
 }
 
+// A27b：npm 提醒先看当前项目层，再看全局层；本机流程留在项目层也能在动作前拦人。
+{
+  const cwdNpmProject = mkdir('npm-guard-project');
+  const scopeNpmProject = store.scopeOf(cwdNpmProject);
+  store.setRecallMode(scopeNpmProject, 'adaptive', { operationId: 'npm-guard-project-mode' });
+  assert.ok(store.upsert(global, {
+    title: 'npm 全局登录提醒',
+    summary: '全局层的 npm 登录说明',
+    body: '全局层：npm login 会误导，改用 dsh-npm。',
+    tags: ['npm'],
+    applicability: 'all_in_scope',
+  }).record);
+  assert.ok(store.upsert(scopeNpmProject, {
+    title: 'npm 项目发布前先看凭据',
+    summary: '这个项目的 npm 发布步骤',
+    body: '项目层：先读 Keychain 位置，再用 dsh-npm publish，不要 npm whoami。',
+    tags: ['npm', '发布'],
+    applicability: 'all_in_scope',
+  }).record);
+  const guards = [];
+  const agent = makeAgent('agent-npm-project', cwdNpmProject);
+  agent.ctx = {
+    tools: { guard: (fn) => { guards.push(fn); return () => {}; } },
+    effect: (fn) => fn(),
+  };
+  const runtime = boot();
+  runtime.handlers.get('agent/created').at(-1)({ agent });
+  const sig = signal();
+  await runtime.preStep({ agent, signal: sig, turn: 'npm-project-1' }, enter(human('先看下环境状态')));
+  const blocked = guards[0]({ name: 'bash', callId: 'call-npm-project', arguments: { command: 'npm publish' } });
+  assert.match(String(blocked), /项目发布前先看凭据/, '项目层规则优先于全局层');
+  assert.match(String(blocked), /Keychain/, '给项目层正文');
+}
+
 // A28：零命中的同一轮里，关键动作发生后补查一次；补到后不再重复注入。
 {
   const cwdActionKey = mkdir('action-key');

@@ -1,6 +1,6 @@
 {
   "name": "dsh-lite-memory",
-  "version": "0.18.36",
+  "version": "0.18.37",
   "description": "On-demand memory for the DeepSeek Harness: nothing resident, at most three small cards on a real hit, bodies read on demand.",
   "type": "module",
   "main": "index.js",

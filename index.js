@@ -2671,8 +2671,16 @@ export function apply(ctx, config) {
       const held = prepared.get(agent);
       if (!held || held.npmHinted) return undefined;
       if (!memoryOnForAgent(agent)) return undefined;
-      const index = loadIndex(globalScope());
-      const row = (index.entries || []).find((entry) => {
+      /** 本机流程按规矩留在项目层；全局层是兜底，先看当前项目再看全局。 */
+      const scopes = [];
+      try {
+        const project = scopeOf(cwdOf({ agent }));
+        if (project && project.confirmed !== false && project.key !== 'global') scopes.push(project);
+      } catch { /* 项目根还没确认时只看全局 */ }
+      scopes.push(globalScope());
+      const row = scopes.flatMap((scope) => {
+        try { return loadIndex(scope).entries || []; } catch { return []; }
+      }).find((entry) => {
         if (!entry || entry.archived || entry.origin === 'project_evolution') return false;
         /** 过期/被取代的规则不能再在动作前拦人。 */
         if (view.lifecycleStatusOf(entry)) return false;
