@@ -26,6 +26,9 @@ add('启动服务器', { tags: ['启动'] });
 /* 英文按整词：git 不能因为共享 gi/it 命中 digital。 */
 assert.equal(store.search(scope, 'git', 5).some((row) => row.title.includes('digital')), false);
 assert.equal(store.search(scope, 'digital', 5).some((row) => row.title.includes('digital')), true);
+/* 中英混排同样按整词：英文词没出现，中文词重合再多也不能替它作证。 */
+assert.equal(store.search(scope, '排查 git', 5).some((row) => row.title.includes('digital')), false);
+assert.equal(store.search(scope, '排查 git', 5).some((row) => row.title.includes('git 提交前跑检查')), true);
 
 /* 只重合「怎么」这类高频词不算命中。 */
 assert.equal(store.search(scope, '这个怎么弄', 5).length, 0);
@@ -40,5 +43,13 @@ assert.equal(view.matchScore(renameRecord, '启动服务器').score < view.MATCH
 assert.equal(view.matchScore(serverRecord, '启动服务器').score >= view.MATCH_FLOOR, true);
 /* 两个词都落在同一个标签上才继续算命中。 */
 assert.equal(store.search(scope, '启动失败怎么查', 5).some((row) => row.title === '插件改名与合并'), true);
+
+/* 续说一句没有检索词：只有明确的「继续/然后」才沿用上一轮，别把短问题也接上去。 */
+for (const text of ['继续', '继续。', '然后呢？', '接着', 'go on', 'continue']) {
+  assert.equal(view.isContinuationQuery(text), true, text);
+}
+for (const text of ['继续优化轻量化记忆与前端展示逻辑', '然后发布', '样式', 'next steps for release']) {
+  assert.equal(view.isContinuationQuery(text), false, text);
+}
 
 console.log('lexical.test.mjs: all passed');

@@ -885,6 +885,7 @@ window.__ModuleLoader__.load({
         case 'needs_context': return `上次没提醒，${related}适用条件未确认`;
         case 'conflict': return `上次没提醒，${related}存在冲突的结论`;
         case 'no_overlap': return '上次没提醒，没有匹配的记忆';
+        case 'expired': return '上次没提醒，相关内容已经过期';
         case 'memory_off': return '上次没提醒，记忆已关闭';
         case 'tools_only': return '上次没提醒，只在你问时检索';
         default: return '';

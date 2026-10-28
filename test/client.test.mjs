@@ -342,6 +342,7 @@ assert.equal(recallLineOf({ reason: 'budget', cards: 0, matched: 2 }), '上次�
 assert.equal(recallLineOf({ reason: 'needs_context', cards: 0, matched: 1 }), '上次没提醒，1 条相关记忆，适用条件未确认');
 assert.equal(recallLineOf({ reason: 'conflict', cards: 0, matched: 2 }), '上次没提醒，2 条相关记忆，存在冲突的结论');
 assert.equal(recallLineOf({ reason: 'no_overlap', cards: 0, matched: 0 }), '上次没提醒，没有匹配的记忆');
+assert.equal(recallLineOf({ reason: 'expired', cards: 0, matched: 2 }), '上次没提醒，相关内容已经过期');
 assert.equal(recallLineOf({ reason: 'memory_off', cards: 0, matched: 0 }), '上次没提醒，记忆已关闭');
 assert.equal(recallLineOf({ reason: 'tools_only', cards: 0, matched: 0 }), '上次没提醒，只在你问时检索');
 assert.equal(recallLineOf({ reason: 'made_up', cards: 0, matched: 0 }), '');

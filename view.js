@@ -381,11 +381,18 @@ export function matchScore(record, query, corpus = null) {
   const words = [...new Set(wordsOf(raw))];
   const hints = [];
   let score = 0;
+  /** 英文按整词比对：纯英文二元组只在该词整体出现时才计数，中英混排也一样。 */
+  const ascii = asciiWordsOf(raw);
+  const englishIn = (text) => ascii.some((word) => wordIn(plain(text, 400).toLowerCase(), word));
   const hit = (text, weight) => {
     if (!text) return 0;
     const pool = gramsOf(text);
+    const wholeEnglish = englishIn(text);
     let shared = 0;
-    for (const gram of grams) if (pool.has(gram)) shared += 1;
+    for (const gram of grams) {
+      if (/^[a-z0-9]+$/.test(gram) && !wholeEnglish) continue;
+      if (pool.has(gram)) shared += 1;
+    }
     if (shared === 0) return 0;
     return (shared / Math.max(1, Math.min(grams.size, 12))) * weight;
   };
@@ -475,7 +482,6 @@ export function matchScore(record, query, corpus = null) {
   const whenScore = hit(record.when, WEIGHT.when);
   if (whenScore > 0) score += whenScore;
   /** 纯英文查询必须整词命中，别让语料里的字面巧合把不相关的记忆带进自动提示。 */
-  const ascii = asciiWordsOf(raw);
   if (ascii.length && !/[\u4e00-\u9fff]/.test(raw)) {
     const pool = [record.title, (record.aliases || []).join(' '), ...(record.tags || []), ...(record.triggers || []), record.summary, record.when]
       .filter(Boolean).join('\n').toLowerCase();
@@ -687,6 +693,13 @@ export function textOfMessage(message) {
 }
 
 /** 最后一句真人说的话；goal 轮次、压缩摘要、时间快照、后台任务回执都不算。 */
+/** 续说一句（「继续」「然后呢」）本身没有检索线索：沿用上一轮原话，别让自动提醒在这一轮断掉。 */
+export function isContinuationQuery(text) {
+  const raw = plain(text, 40).trim().toLowerCase().replace(/[\s\u3002\uff01\uff1f?!\uff0c,\u3001\u2026~\uff5e]+/gu, '');
+  if (!raw || [...raw].length > 8) return false;
+  return /^(继续|接着|然后|然后呢|还有|还有呢|往下|说下去|goon|continue|next|more)$/.test(raw);
+}
+
 export function newestUserQuery(messages) {
   if (!Array.isArray(messages)) return '';
   for (let i = messages.length - 1; i >= 0; i -= 1) {

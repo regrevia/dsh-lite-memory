@@ -1234,6 +1234,7 @@ export function apply(ctx, config) {
     /** 卡片上限含包装；共享请求账本也要把标题行算进去，不能只算卡片行。 */
     let headerCharged = win ? win.recallHeader === true : false;
     const lines = [];
+    const linesMeta = [];
     const cards = [];
     for (const row of ranked) {
       const usedCards = cards.length + (auto ? (auto.experimentCards || 0) : 0);
@@ -1266,6 +1267,8 @@ export function apply(ctx, config) {
       }
       lines.push(line);
       cards.push({ revision, scope: card.scope, title: card.title });
+      /** 卡片行与到期时间一起留到最后输出：中间隔了系统提示组装，不能拿投影时的判断当现在。 */
+      linesMeta.push({ line, validUntil: row.record.validUntil || '' });
     }
     const finalText = `${RECALL_HEADER}\n${lines.join('\n')}`;
     if (auto) {
@@ -1308,8 +1311,8 @@ export function apply(ctx, config) {
           : waiting ? 'needs_context'
             : (gateRuntime && gateRuntime.enabled ? 'no_overlap' : 'needs_context');
     const matched = ranked.length || nearMatched;
-    if (!cards.length) return { text: '', cards: [], bytes: 0, query, reason, matched };
-    return { text: finalText, cards, bytes: Buffer.byteLength(finalText), query, reason, matched };
+    if (!cards.length) return { text: '', cards: [], lines: [], bytes: 0, query, reason, matched };
+    return { text: finalText, cards, lines: linesMeta, bytes: Buffer.byteLength(finalText), query, reason, matched };
   }
 
   /* ---------------- 项目自进化：任务锚点、读取决策、上下文解析 ---------------- */
@@ -1809,7 +1812,23 @@ export function apply(ctx, config) {
       }
       /** 没有逐条快照时才退回整段到期判断；有快照就只撤到期的那一条。 */
       if (evolutionText && !state.experimentParts && state.validUntil && Date.now() > Date.parse(String(state.validUntil))) evolutionText = '';
-      return [evolutionText, state.text].filter(Boolean).join('\n\n');
+      /** 普通卡片也在输出前逐条复核到期：投影到真正发给模型之间可能已经过了 validUntil。 */
+      let normalText = state.text;
+      if (Array.isArray(state.lines)) {
+        const now = Date.now();
+        const live = state.lines.filter((row) => !row.validUntil || now <= Date.parse(String(row.validUntil)));
+        normalText = live.length ? `${RECALL_HEADER}\n${live.map((row) => row.line).join('\n')}` : '';
+        /** 投影时还在、发出时已过期：回执跟着真实输出改，别在面板上说「提醒了 2 条」而正文是空的。 */
+        if (state.scope && live.length !== state.cards.length) {
+          noteRecall(state.scope, state.sessionId, {
+            reason: live.length ? 'hit' : 'expired',
+            matched: state.matched || state.cards.length,
+            cards: live.length,
+            chars: live.length ? view.bytesOf(normalText) : 0,
+          });
+        }
+      }
+      return [evolutionText, normalText].filter(Boolean).join('\n\n');
     } catch {
       return '';
     }
@@ -2551,6 +2570,7 @@ export function apply(ctx, config) {
             if (snapshot || experimentText) {
               previous.text = snapshot ? snapshot.text : '';
               previous.cards = snapshot ? snapshot.cards : [];
+              previous.lines = snapshot ? snapshot.lines : [];
               previous.experimentText = experimentText;
               previous.experimentParts = win && win.experiment ? (win.experiment.experimentParts || null) : null;
               previous.validUntil = win && win.experiment ? (win.experiment.validUntil || '') : '';
@@ -2573,7 +2593,10 @@ export function apply(ctx, config) {
         autoBudget: win.autoBudget ? JSON.parse(JSON.stringify(win.autoBudget)) : null,
       } : null;
       /** 工具模式也要记下本轮真人原话：只用于核对绑定，不自动注入。 */
-      const query = view.newestUserQuery(fresh).slice(0, RECALL_QUERY_CHARS);
+      const said = view.newestUserQuery(fresh).slice(0, RECALL_QUERY_CHARS);
+      /** 「继续」这类续说没有检索词：带上同会话上一轮原话，否则这一轮必然召回为空。 */
+      const carried = sameSession && previous?.query && view.isContinuationQuery(said) ? previous.query : '';
+      const query = (carried ? `${carried} ${said}` : said).trim().slice(0, RECALL_QUERY_CHARS);
       if (win && query) win.query = query;
 
       if (!query) {
@@ -2662,6 +2685,9 @@ export function apply(ctx, config) {
         experimentParts: experiment && experiment.held ? (experiment.held.experimentParts || null) : null,
         validUntil: experiment && experiment.held ? (experiment.held.validUntil || '') : '',
         cards: snapshot ? snapshot.cards : [],
+        lines: snapshot ? snapshot.lines : [],
+        matched: snapshot ? snapshot.matched : 0,
+        scope,
         query,
         sessionId,
         turn,

@@ -157,6 +157,16 @@ assert.ok(cards.length <= 3);
 for (const line of cards) assert.match(line, CARD_LINE);
 assert.doesNotMatch(preparedText, /第 .* 版/);
 assert.equal(bootA.provider.text({ agent: agentA, signal: signalA }), preparedText, 'frozen between calls');
+/** 到期在输出前复核：投影之后过期的那条不再发给模型。 */
+const expiring = bootA.debug.preparedOf(agentA);
+assert.ok(expiring.lines.length >= 1, 'prepared cards carry their own deadline');
+const firstLine = expiring.lines[0].line;
+expiring.lines[0].validUntil = new Date(Date.now() - 1000).toISOString();
+const afterExpiry = bootA.provider.text({ agent: agentA, signal: signalA });
+assert.ok(!afterExpiry.includes(firstLine), 'expired card withheld at emit');
+assert.match(afterExpiry, /^已有记忆可能相关/);
+expiring.lines[0].validUntil = '';
+assert.equal(bootA.provider.text({ agent: agentA, signal: signalA }), preparedText, 'unexpired card still delivered');
 
 // A03：provider 纯内存，不写盘、不动 hits。
 const statePath = path.join(scopeA.dir, 'state.json');

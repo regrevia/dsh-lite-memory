@@ -232,6 +232,7 @@ const readArchived = await exec('memory_read', { title: distinct.title });
 assert.equal(readArchived.status, 'archived');
 assert.equal(readArchived.body, '');
 assert.match(render('memory_read', { title: distinct.title }, readArchived), /^memory · 这条记忆已归档$/);
+assertSchema('memory_read', readArchived);
 assert.equal(await exec('memory_save', { title: '发布顺序是啥', summary: '发版前要按顺序做的事', body: '第三条' }).then((v) => v.merged), false);
 
 // ── 失败回执同样过输出 schema：不能再返裸 {error} 让界面渲染 undefined ──────────
@@ -636,6 +637,12 @@ assert.equal(closedTool.changed, false);
 assert.equal(closedTool.reason, 'memory_disabled');
 assertSchema('memory_save', closedTool);
 assert.equal(closedTool.id, undefined);
+/** 关闭状态下的读取也只报状态，不返回正文。 */
+const closedRead = await defs.get('memory_read').execute({ title: closedSeed.title }, { agent: closedAgent });
+assert.equal(closedRead.status, 'memory_disabled');
+assert.equal(closedRead.body, undefined, '关闭时连空正文也不占位');
+assertSchema('memory_read', closedRead);
+assert.match(render('memory_read', {}, closedRead), /^memory · 记忆检索已关闭$/);
 assert.equal(Buffer.compare(closedBefore, fs.readFileSync(closedFile)), 0);
 const toolOnly = await call('/lite-memory/control', { sessionId: 'session-closed', enabled: true, mode: 'tool_only', operationId: 'op_mode_contract' });
 assert.equal(toolOnly.status, 200);
