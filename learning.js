@@ -44,7 +44,8 @@ const UNCLEAR = /不太对|再想想|感觉不对|说不上|有点怪|不对劲/
  * 点名项目范围才算全项目授权；「以后都」不等于「所有项目」。
  * 「所有口播」「一律」这种覆盖全部对象的说法也算，但只限当前项目层。
  */
-const PROJECT_WIDE = /(这个项目|本项目|所有项目|全项目|整个项目|全库|每个项目|所有(?!项目)|一律)/;
+const PROJECT_WIDE = /(这个项目|本项目|所有项目|全项目|整个项目|全库|每个项目)/;
+/** 「所有口播」「一律」限定的是对象，不是整个项目：没有可信范围时只算待确认。 */
 
 const has = (pattern, text) => pattern.test(text);
 
@@ -380,7 +381,7 @@ export function pendingChangeFrom(feedback = {}) {
     ? (expected.applicability === 'all_in_scope'
       ? 'all_in_scope'
       : expectedConditions.length ? 'conditional' : 'unresolved')
-    : /(所有|全都|一律|任何|默认|整个项目|这个项目|本项目)/.test(currentText)
+    : /(这个项目|本项目|所有项目|全项目|整个项目|全库|每个项目)/.test(currentText)
       ? 'all_in_scope'
       : taskKind ? 'conditional' : 'unresolved';
   const conditions = expected

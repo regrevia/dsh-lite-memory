@@ -41,6 +41,29 @@ fs.mkdirSync(cwd, { recursive: true });
 const exec = (name, args) => defs.get(name).execute(args, { agent: { cwd, session: { id: 'session-contract', header: { cwd } } } });
 const render = (name, args, value) => defs.get(name).output.render(args, value)[0].text;
 
+/** 按已注册的 output.schema 校验真实 execute 结果：宿主校验失败会整条工具报错。 */
+function assertSchema(name, value) {
+  const schema = defs.get(name).output.schema;
+  const walk = (node, data, where) => {
+    if (node.type === 'object') {
+      assert.ok(data && typeof data === 'object' && !Array.isArray(data), `${where} 应为对象`);
+      for (const key of node.required || []) assert.ok(key in data, `${where} 缺少 ${key}`);
+      for (const [key, item] of Object.entries(data)) {
+        if (node.properties && node.properties[key]) walk(node.properties[key], item, `${where}.${key}`);
+        else assert.equal(node.additionalProperties, true, `${where} 多出 ${key}`);
+      }
+    } else if (node.type === 'array') {
+      assert.ok(Array.isArray(data), `${where} 应为数组`);
+      if (node.items) data.forEach((item, index) => walk(node.items, item, `${where}[${index}]`));
+    } else if (node.type === 'string') assert.equal(typeof data, 'string', `${where} 应为字符串`);
+    else if (node.type === 'boolean') assert.equal(typeof data, 'boolean', `${where} 应为布尔值`);
+    else if (node.type === 'integer') assert.ok(Number.isInteger(data), `${where} 应为整数`);
+    else if (node.type === 'number') assert.equal(typeof data, 'number', `${where} 应为数字`);
+    if (node.enum) assert.ok(node.enum.includes(data), `${where} 不在枚举里`);
+  };
+  walk(schema, value, name);
+}
+
 function call(pathname, payload, options = {}) {
   const req = new EventEmitter();
   req.method = options.method ?? 'POST';
@@ -206,6 +229,29 @@ assert.equal(readArchived.status, 'archived');
 assert.equal(readArchived.body, '');
 assert.match(render('memory_read', { title: distinct.title }, readArchived), /^memory · 这条记忆已归档$/);
 assert.equal(await exec('memory_save', { title: '发布顺序是啥', summary: '发版前要按顺序做的事', body: '第三条' }).then((v) => v.merged), false);
+
+// ── 失败回执同样过输出 schema：不能再返裸 {error} 让界面渲染 undefined ──────────
+await exec('memory_save', { title: '跨层同名', summary: '项目层这一条', body: '项目正文' });
+/** 直接落全局层：正常保存有跨层相近拦截，同层/跨层同名只可能来自历史数据。 */
+store.saveEntry(store.globalScope(), { title: '跨层同名', summary: '全局层另一条', body: '全局正文', writeMode: 'patch' });
+const ambiguousSave = await exec('memory_save', { title: '别的标题', summary: '尝试改同名条目', updateTitle: '跨层同名' });
+assert.ok(ambiguousSave.error, '跨层同名要报改哪一层');
+assertSchema('memory_save', ambiguousSave);
+assert.match(render('memory_save', {}, ambiguousSave), /^memory · /);
+assert.doesNotMatch(render('memory_save', {}, ambiguousSave), /undefined|saved|merged/);
+const missingSave = await exec('memory_save', { title: '别的标题', summary: '没有这条', updateTitle: '根本不存在的条目' });
+assert.ok(missingSave.error);
+assertSchema('memory_save', missingSave);
+const badLink = await exec('memory_save', { title: '关联写法不对', summary: '关联要写标题', links: [{}] });
+assert.ok(badLink.error);
+assertSchema('memory_save', badLink);
+const missingLink = await exec('memory_save', { title: '关联目标不存在', summary: '目标没有落盘', links: [{ type: 'related', title: '根本没这条' }] });
+assert.ok(missingLink.error);
+assertSchema('memory_save', missingLink);
+assert.match(render('memory_save', {}, missingLink), /^memory · 没有「根本没这条」这条记忆/);
+
+// 成功回执也必须过同一份 schema
+for (const value of [saved, merged, patch, probe, distinct]) assertSchema('memory_save', value);
 
 // ── suggestion → keep → replay → reject ──────────────────────────────────────
 const suggested = await exec('memory_suggest', { title: '发布前跑文案检查', summary: '发版前先跑 ui 文案 lint', body: 'node ui-copy-lint.mjs', when: '发布前' });
@@ -584,6 +630,7 @@ const closedTool = await defs.get('memory_save').execute(
 );
 assert.equal(closedTool.changed, false);
 assert.equal(closedTool.reason, 'memory_disabled');
+assertSchema('memory_save', closedTool);
 assert.equal(closedTool.id, undefined);
 assert.equal(Buffer.compare(closedBefore, fs.readFileSync(closedFile)), 0);
 const toolOnly = await call('/lite-memory/control', { sessionId: 'session-closed', enabled: true, mode: 'tool_only', operationId: 'op_mode_contract' });
@@ -763,6 +810,11 @@ assert.ok(linkedRecord && linkedTarget);
 assert.equal(linkedRecord.links.length, 1);
 assert.equal(linkedRecord.links[0].id, linkedTarget.id);
 assert.equal(linkedRecord.links[0].type, 'related');
+/** 关联清单也要给标题：只发内部 id 会让界面显示 undefined。 */
+const linkRead = await exec2('memory_read', { title: '关联目标乙', view: 'links' });
+assert.equal(linkRead.title, '关联目标乙');
+assert.match(linkRead.links, /关联目标甲/);
+assert.doesNotMatch(render('memory_read', { title: '关联目标乙', view: 'links' }, linkRead), /undefined/);
 /** 更新句柄也是标题：抄标题改这一条，不需要任何内部编号。 */
 const retitled = await exec2('memory_save', { updateTitle: linkedA.title, title: linkedA.title, summary: '改过的摘要' });
 assert.equal(retitled.changed, true);

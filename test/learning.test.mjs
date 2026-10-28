@@ -965,10 +965,11 @@ test('L03b 明确长期要求整理为空时也留下规则', () => {
 test('L03c 兜底不把没说范围的要求抬成全项目规则', () => {
   const vague = learning.pendingChangeFrom({ text: '以后口播开头先给结论。', cue: { explicitLongTerm: true } });
   assert.equal(vague.applicability, 'unresolved');
+  /** 「所有口播」限定的是栏目对象，不是整个项目；没有可信栏目就留待确认，不能扩成全项目。 */
   const allLines = learning.pendingChangeFrom({ text: '以后所有口播都先给结论。', cue: { explicitLongTerm: true } });
-  assert.equal(allLines.applicability, 'all_in_scope', '「所有口播」按项目层全范围收集');
+  assert.equal(allLines.applicability, 'unresolved', '「所有口播」不能当全项目授权');
   const always = learning.pendingChangeFrom({ text: '以后一律先给结论。', cue: { explicitLongTerm: true } });
-  assert.equal(always.applicability, 'all_in_scope', '「一律」按项目层全范围收集');
+  assert.equal(always.applicability, 'unresolved', '「一律」不能单独当项目范围');
   assert.deepEqual(vague.conditions, []);
   const scoped = learning.pendingChangeFrom({ text: '以后口播开头先给结论。', cue: { explicitLongTerm: true, taskKind: 'video' } });
   assert.equal(scoped.applicability, 'conditional');

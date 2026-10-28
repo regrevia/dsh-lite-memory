@@ -340,7 +340,7 @@ function keepHandler(webServer, cwdForSession) {
       const conditions = Array.isArray(body.conditions) ? body.conditions : undefined;
       try {
         const result = saveEntry(scope, {
-          id, title, body: text, expectedRevision, scope: 'project', source: 'user_explicit',
+          id, title, body: text, expectedRevision, scope: 'project', origin: 'user_explicit',
           ...(applicability !== undefined ? { applicability } : {}),
           ...(conditions !== undefined ? { conditions } : {}),
         });
@@ -462,7 +462,7 @@ function keepHandler(webServer, cwdForSession) {
         selection: record.selection || null,
         links: Array.isArray(record.links) ? record.links.slice(0, 24).map((link) => ({ type: link.type || 'related', id: link.id })) : [],
         revision: Number(record.revision) || 1,
-        origin: record.origin || 'user_explicit',
+        origin: originOut(record.origin),
         updated: record.updated || '',
         lastUsed: record.lastUsed || '',
         bytes: Number(record.bytes) || 0,
@@ -751,13 +751,26 @@ function keepHandler(webServer, cwdForSession) {
 }
 
 /** 给界面的事件引用：只有定位与版次，不带正文，避免把维护字段当内容画出来。 */
+/** 保存失败的统一回执：字段与成功回执同形，渲染只报这一次没写成。 */
+function saveFailure(message, args) {
+  return {
+    title: String(args && args.title || '').trim(), summary: '', when: '', revision: 0,
+    merged: false, changed: false, scope: '', needsResolution: false, needsScope: false,
+    archived: '', error: String(message || '').replace(/^memory · /, ''),
+  };
+}
+
+function originOut(value) {
+  return value === 'project_evolution' || value === 'model_drafted' ? value : 'user_explicit';
+}
+
 function refsOf(hits) {
   return hits.map((item) => ({
     title: item.title || '',
     scope: item.scope || 'project',
     revision: item.revision || 1,
     status: item.status || 'ok',
-    origin: item.origin === 'project_evolution' ? 'project_evolution' : 'user_explicit',
+    origin: originOut(item.origin),
     /** 界面要按类型分开展示（偏好/约定/流程/资料），维护字段不进正文。 */
     kind: typeof item.kind === 'string' && item.kind ? item.kind : 'note',
     when: typeof item.when === 'string' ? item.when : '',
@@ -1493,7 +1506,16 @@ export function apply(ctx, config) {
       ? Math.max(0, view.CARD.bytes - Buffer.byteLength(auto.normalText || '') - 2)
       : EXPERIMENT_BYTES;
     let used = Buffer.byteLength(EXPERIMENT_RULES_HEADER) + 1;
-    for (const record of matched.slice(0, cardCap)) {
+    /** 实验规则也要过本轮相关度：和当前问题没有交集就不占卡片，不能“来自自进化”就天然优先。 */
+    const query = held && held.query ? String(held.query) : '';
+    const relevant = query
+      ? matched.map((record) => ({ record, score: view.matchScore(record, query).score }))
+        /** 条件明确且已满足的规则按绑定注入；无条件的全项目规则必须和本轮问题有交集。 */
+        .filter((row) => row.score > 0 || (Array.isArray(row.record.conditions) && row.record.conditions.length > 0))
+        .sort((a, b) => b.score - a.score)
+        .map((row) => row.record)
+      : matched;
+    for (const record of relevant.slice(0, cardCap)) {
       const body = String(record.body || '');
       const short = body && body.length <= EXPERIMENT_SHORT_CHARS && body.split('\n').length <= 4;
       const conditions = conditionLabel(record.conditions);
@@ -1802,7 +1824,8 @@ export function apply(ctx, config) {
         revision: value.revision || 0,
         changed: value.changed === true,
         recordKind: typeof value.kind === 'string' && value.kind ? value.kind : '',
-        mode: value.needsScope ? 'needs_scope'
+        mode: value.error ? 'failed'
+          : value.needsScope ? 'needs_scope'
           : value.existingTitle ? 'duplicate'
             : value.needsResolution ? 'needs_resolution'
               : value.changed === false ? 'unchanged' : value.merged ? 'updated' : 'created',
@@ -1834,13 +1857,16 @@ export function apply(ctx, config) {
           supersededTitle: { type: 'string' },
           archived: { type: 'string' },
           pendingConflicts: { type: 'integer' },
+          error: { type: 'string' },
         },
         required: ['title', 'summary', 'when', 'revision', 'merged', 'changed', 'scope', 'needsResolution', 'archived'],
         additionalProperties: false,
       },
       render: (_args, value) => [{
         type: 'text',
-        text: value.needsScope
+        text: value.error
+          ? `memory · ${value.error}`
+          : value.needsScope
           ? value.reason === 'memory_disabled'
             ? `memory · ${memoryOffCopy(projectScope)}`
             : value.reason === 'unconfirmed_project'
@@ -1862,7 +1888,6 @@ export function apply(ctx, config) {
         return {
           title: String(args.title || ''), summary: '', when: '', revision: 0,
           merged: false, changed: false, scope: '', needsScope: true, reason: 'memory_disabled',
-          recoveryPending: controlStatus(projectScope).recoveryPending,
           needsResolution: false, similarTitles: '', similar: '', archived: '',
         };
       }
@@ -1870,17 +1895,18 @@ export function apply(ctx, config) {
       const supersedesId = supersedes && !/^mem_[a-z0-9]+$/.test(supersedes)
         ? (() => { try { return refIdOf(projectScope, { title: supersedes }, '记忆'); } catch { return ''; } })()
         : supersedes;
-      const draft = { ...args, writeMode: args.mode || 'patch' };
+      /** 工具写入的正文由模型写，来源标成模型整理，不能冒充用户原话。 */
+      const draft = { ...args, writeMode: args.mode || 'patch', origin: 'model_drafted' };
       if (supersedes) { if (supersedesId) draft.supersedes = supersedesId; else delete draft.supersedes; }
       /** 更新句柄也用标题：id 只是底层实现，模型抄标题就行。 */
       const updateTitle = String(args.updateTitle || '').trim();
       if (updateTitle) {
         const candidates = args.scope ? [] : titleCandidates(projectScope, updateTitle);
         if (candidates.length > 1) {
-          return { error: `memory · 「${updateTitle}」在项目层和全局层各有一条：改全局加 scope="global"，改项目加 scope="project"` };
+          return saveFailure(`「${updateTitle}」在项目层和全局层各有一条：改全局加 scope="global"，改项目加 scope="project"`, args);
         }
         const updateId = (() => { try { return refIdOf(projectScope, { title: updateTitle, scope: args.scope }, '记忆'); } catch { return ''; } })();
-        if (!updateId) return { error: `memory · 没有「${updateTitle}」这条记忆；要新增就不用 updateTitle` };
+        if (!updateId) return saveFailure(`没有「${updateTitle}」这条记忆；要新增就不用 updateTitle`, args);
         draft.id = updateId;
       }
       /** 关联目标同样按标题解析成内部 id 再落盘。 */
@@ -1888,9 +1914,9 @@ export function apply(ctx, config) {
         const resolved = [];
         for (const link of args.links) {
           const title = typeof link?.title === 'string' ? link.title.trim() : '';
-          if (!title) return { error: 'memory · 关联要写成 {type, title}：给被关联那条记忆的标题' };
+          if (!title) return saveFailure('关联要写成 {type, title}：给被关联那条记忆的标题', args);
           const targetId = (() => { try { return refIdOf(projectScope, { title }, '记忆'); } catch { return ''; } })();
-          if (!targetId) return { error: `memory · 没有「${title}」这条记忆，关联没写成` };
+          if (!targetId) return saveFailure(`没有「${title}」这条记忆，关联没写成`, args);
           resolved.push({ type: link.type || 'related', id: targetId });
         }
         draft.links = resolved;
@@ -2174,7 +2200,7 @@ export function apply(ctx, config) {
           revision: { type: 'integer' },
           scope: { type: 'string' },
           scopeName: { type: 'string' },
-          origin: { type: 'string', enum: ['user_explicit', 'project_evolution'] },
+          origin: { type: 'string', enum: ['user_explicit', 'model_drafted', 'project_evolution'] },
           kind: { type: 'string' },
           status: { type: 'string', enum: ['ok', 'archived', 'needs_context', 'not_applicable', 'gone', 'budget_exhausted', 'memory_disabled'] },
           body: { type: 'string' },
@@ -2211,7 +2237,7 @@ export function apply(ctx, config) {
         title: value.title || '',
         scope: value.scope || '',
         revision: value.revision || 0,
-        origin: value.origin === 'project_evolution' ? 'project_evolution' : 'user_explicit',
+        origin: originOut(value.origin),
         recordKind: typeof value.kind === 'string' && value.kind ? value.kind : '',
         status: value.status || 'ok',
       }),
@@ -2253,7 +2279,7 @@ export function apply(ctx, config) {
           ? '- 有一条已失效'
           : `- ${link.scope === 'global' ? '[global] ' : (scopeName ? `[${scopeName}] ` : '')}「${link.title}」`));
         const text = rows.join('\n') || '(无)';
-        const value = { scope: found.scope, scopeName, status: found.status, links: text };
+        const value = { title: found.title || '', scope: found.scope, scopeName, status: found.status, links: text };
         if (win) {
           const bytes = jsonBytes(value);
           if (!affordableTool(win, bytes)) return { scope: '', status: 'budget_exhausted' };

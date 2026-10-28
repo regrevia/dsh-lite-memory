@@ -41,6 +41,13 @@ const LEGACY_SUMMARY_TAIL = '摘要原文：';
  * 老 ID、病史查询和关联跳转都不能把正文带出来。管理面显式传 allowExperimental。
  */
 export const EXPERIMENTAL_ORIGIN = 'project_evolution';
+/** 谁写下当前这版正文：只有这几种，别把猜测当事实。 */
+export const ORIGINS = ['user_explicit', 'model_drafted', EXPERIMENTAL_ORIGIN];
+
+function originOf(source) {
+  const value = source && (source.origin || source.source);
+  return ORIGINS.includes(value) ? value : 'user_explicit';
+}
 
 export function isExperimentalRecord(record) {
   if (!record) return false;
@@ -110,7 +117,7 @@ function toFlat(entry) {
     lastUsed: maintenance.lastUsed || entry.updatedAt || entry.createdAt || '',
     revision: Number(entry.revision) || 1,
     status: entry.status === 'archived' ? 'archived' : 'active',
-    origin: entry.origin || 'user_explicit',
+    origin: ORIGINS.includes(entry.origin) ? entry.origin : 'user_explicit',
     ownerProjectId: typeof entry.ownerProjectId === 'string' ? entry.ownerProjectId : '',
     hits: Number(maintenance.hits) || 0,
     merges: Number(maintenance.merges) || 0,
@@ -130,7 +137,7 @@ function fromFlat(record, status) {
     id: record.id,
     revision: Number(record.revision) || 1,
     status: status || (record.status === 'archived' ? 'archived' : 'active'),
-    origin: typeof record.origin === 'string' && record.origin ? record.origin : 'user_explicit',
+    origin: ORIGINS.includes(record.origin) ? record.origin : 'user_explicit',
     ownerProjectId: record.ownerProjectId || '',
     createdAt: record.created || at,
     updatedAt: at,
@@ -1113,7 +1120,7 @@ function applyDraft(scope, index, source, now, options = {}) {
       lastUsed: now,
       merges: (record.merges || 0) + 1,
       status: 'active',
-      source: record.source || (source && source.source) || 'user_explicit',
+      origin: originOf(source) === 'user_explicit' ? (ORIGINS.includes(record.origin) ? record.origin : 'user_explicit') : originOf(source),
     };
     nextRecord.maintenance = { ...(record.maintenance || {}) };
     if (summaryFull) nextRecord.maintenance.summaryFull = summaryFull;
@@ -1165,7 +1172,7 @@ function applyDraft(scope, index, source, now, options = {}) {
     lastUsed: now,
     revision: 1,
     status: 'active',
-    source: source && source.source === 'observed' ? 'observed' : 'user_explicit',
+    origin: originOf(source),
     hits: 0,
     merges: 0,
     versions: [],
@@ -1754,7 +1761,7 @@ export function readLinks(scope, id, options = {}) {
         if (target) links.push({ type: link.type || 'related', ...target });
         else links.push({ type: link.type || 'related', id: link.id, status: 'invalid' });
       }
-      return { id, links, scope: source.key === 'global' ? 'global' : 'project', status: view.statusOf(record, options.context || {}) };
+      return { id, title: record.title || '', links, scope: source.key === 'global' ? 'global' : 'project', status: view.statusOf(record, options.context || {}) };
     }
     return null;
   });
@@ -2187,7 +2194,8 @@ export function acceptCandidate(scope, key, operationId = '') {
       return { ok: false, reason: '那条记忆在你确认前改过了，重新建议一次' };
     }
     /** 只把建议里真有的字段交给写入：省略表示保持，显式空正文清空；旧候选没有 has 时按有没有值回退。 */
-    const source = { title: draft.title };
+    /** 候选正文是模型起草的，人只确认要不要留；来源照实记。 */
+    const source = { title: draft.title, origin: 'model_drafted' };
     const has = draft.has && typeof draft.has === 'object' ? draft.has : null;
     if (has) {
       if (has.summary) source.summary = draft.summary;
