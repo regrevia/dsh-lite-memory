@@ -1985,7 +1985,6 @@ export function apply(ctx, config) {
             items: {
               type: 'object',
               properties: {
-                id: { type: 'string' },
                 title: { type: 'string' },
                 scope: { type: 'string' },
                 revision: { type: 'integer' },
@@ -1995,7 +1994,7 @@ export function apply(ctx, config) {
                 when: { type: 'string' },
                 updated: { type: 'string' }, // ui-copy-ignore
               },
-              required: ['id', 'title', 'scope', 'revision', 'status', 'origin', 'kind', 'when'],
+              required: ['title', 'scope', 'revision', 'status', 'origin', 'kind', 'when'],
               additionalProperties: false,
             },
           },

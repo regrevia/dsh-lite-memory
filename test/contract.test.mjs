@@ -592,6 +592,10 @@ assert.ok(['created', 'updated'].includes(savedMeta.mode));
 assert.equal('path' in savedMeta, false);
 const searchMeta = metaOf('memory_search', {}, globalSearch);
 assert.deepEqual(Object.keys(searchMeta.refs[0]).sort(), ['kind', 'origin', 'revision', 'scope', 'status', 'title', 'updated', 'when']);
+/** 输出 schema 不能再要求内部 id：引用对外只有标题，宿主校验会因此整条工具报错。 */
+const searchRefSchema = defs.get('memory_search').output.schema.properties.refs.items;
+assert.equal('id' in searchRefSchema.properties, false);
+assert.deepEqual([...searchRefSchema.required].sort(), ['kind', 'origin', 'revision', 'scope', 'status', 'title', 'when']);
 assert.equal(searchMeta.refs[0].title, '回复用中文');
 assert.equal(searchMeta.refs[0].scope, 'global');
 /** 引用要能区分偏好/约定/流程/资料，界面才不必猜标题文案。 */
