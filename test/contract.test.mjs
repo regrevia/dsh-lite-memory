@@ -200,7 +200,11 @@ const read = await exec('memory_read', { title: saved.title });
 assert.equal(read.status, 'needs_context');
 assert.equal(read.body, '', '条件未知时标题只能定位，不能证明适用，正文不返回');
 assert.doesNotMatch(render('memory_read', {}, read), /发版/);
+assertSchema('memory_read', read);
 const plain = await exec('memory_read', { title: distinct.title });
+/** 工具写入的来源一路带到正文回执：界面靠它标 [模型]，不靠猜。 */
+assert.equal(plain.origin, 'model_drafted');
+assertSchema('memory_read', plain);
 assert.equal(plain.body, '另一条');
 assert.equal(plain.revision, 1);
 assert.match(render('memory_read', {}, plain), /^memory · \[[^\]]+\] 「发布顺序是啥」/);

@@ -288,6 +288,9 @@ assert.equal(refMetaOf(typedSearch), '[全局]');
 assert.equal(citationOf({ kind: 'memory-read', title: 'P', recordKind: 'procedure', scope: 'project', revision: 2 }, 'memory-read').entryKind, 'procedure');
 assert.equal(refMetaOf({ scope: 'project', origin: 'user_explicit' }), '[项目]');
 assert.equal(refMetaOf({ scope: 'global', origin: 'project_evolution' }), '[全局][自进化]');
+/** 模型整理稿只多一个信任标记，层级仍按落盘作用域。 */
+assert.equal(refMetaOf({ scope: 'project', origin: 'model_drafted' }), '[项目][模型]');
+assert.equal(citationOf({ kind: 'memory-save', title: 'M', scope: 'global', revision: 1, origin: 'model_drafted', changed: true }, 'memory-save').origin, 'model_drafted');
 /** 更新距今照旧，只是不再拼类型与「你记的」。 */
 const aged = citationOf({ kind: 'preference', title: 'C', scope: 'global', revision: 1, updated: new Date(Date.now() - 3 * 86_400_000).toISOString() }, 'memory-search');
 assert.equal(aged.entryKind, 'preference');
@@ -337,6 +340,7 @@ assert.equal(recallLineOf(null), '');
 assert.equal(recallLineOf({ reason: 'hit', cards: 1, matched: 1 }), '上次自动提醒 1 条');
 assert.equal(recallLineOf({ reason: 'budget', cards: 0, matched: 2 }), '上次没提醒，2 条相关记忆，本轮自动提醒已用满');
 assert.equal(recallLineOf({ reason: 'needs_context', cards: 0, matched: 1 }), '上次没提醒，1 条相关记忆，适用条件未确认');
+assert.equal(recallLineOf({ reason: 'conflict', cards: 0, matched: 2 }), '上次没提醒，2 条相关记忆，存在冲突的结论');
 assert.equal(recallLineOf({ reason: 'no_overlap', cards: 0, matched: 0 }), '上次没提醒，没有匹配的记忆');
 assert.equal(recallLineOf({ reason: 'memory_off', cards: 0, matched: 0 }), '上次没提醒，记忆已关闭');
 assert.equal(recallLineOf({ reason: 'tools_only', cards: 0, matched: 0 }), '上次没提醒，只在你问时检索');

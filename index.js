@@ -1287,6 +1287,8 @@ export function apply(ctx, config) {
     }
     let waiting = near.some((row) => row.status !== 'ok' || row.record.reviewState === 'legacy_unreviewed');
     let nearMatched = near.length;
+    /** 冲突与「条件未确认」是两种原因：前者要人先裁决，后者只差一句任务说明。 */
+    let conflictNear = false;
     if (!cards.length && !ranked.length) {
       /** 整组被条件或冲突挡下的候选没进 records，单独按同一查询算；只计数，不投放。 */
       for (const group of groups) {
@@ -1296,13 +1298,15 @@ export function apply(ctx, config) {
         });
         if (!hits.length) continue;
         waiting = true;
+        if (group.status === 'conflict') conflictNear = true;
         nearMatched += hits.length;
       }
     }
     const reason = cards.length ? 'hit'
       : ranked.length ? 'budget'
-        : waiting ? 'needs_context'
-          : (gateRuntime && gateRuntime.enabled ? 'no_overlap' : 'needs_context');
+        : conflictNear ? 'conflict'
+          : waiting ? 'needs_context'
+            : (gateRuntime && gateRuntime.enabled ? 'no_overlap' : 'needs_context');
     const matched = ranked.length || nearMatched;
     if (!cards.length) return { text: '', cards: [], bytes: 0, query, reason, matched };
     return { text: finalText, cards, bytes: Buffer.byteLength(finalText), query, reason, matched };
@@ -2315,6 +2319,8 @@ export function apply(ctx, config) {
         scopeName,
         status: record.status,
         kind: record.kind || 'note',
+        /** 来源随正文回执一起给：模型整理稿要能标出来，但不会因此变成全局。 */
+        origin: originOut(record.origin),
         body,
       };
       if (win) {

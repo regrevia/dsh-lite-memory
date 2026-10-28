@@ -601,14 +601,14 @@ export function toModelView(record, purpose, extra = {}) {
   if (purpose === 'search') {
     const view = pick(record, ['id', 'title', 'summary', 'when', 'revision']);
     view.scope = scope;
-    if (record.origin === 'project_evolution') view.origin = 'project_evolution';
+    if (record.origin === 'project_evolution' || record.origin === 'model_drafted') view.origin = record.origin;
     if (extra.status && extra.status !== 'ok') view.state = extra.status;
     return view;
   }
   if (purpose === 'read') {
     const view = pick(record, ['id', 'title', 'summary', 'when', 'kind', 'revision', 'body']);
     view.scope = scope;
-    if (record.origin === 'project_evolution') view.origin = 'project_evolution';
+    if (record.origin === 'project_evolution' || record.origin === 'model_drafted') view.origin = record.origin;
     if (Array.isArray(record.conditions) && record.conditions.length) view.conditions = record.conditions;
     if (record.selection && record.selection.mode === 'complete') view.selection = record.selection.artifactKey;
     const related = linksOf(record).length;

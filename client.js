@@ -94,7 +94,7 @@ window.__ModuleLoader__.load({
         scope: meta.scope === 'global' ? 'global' : 'project',
         revision: Number.isInteger(meta.revision) ? meta.revision : 1,
         status: typeof meta.status === 'string' ? meta.status : 'ok',
-        origin: meta.origin === 'project_evolution' ? 'project_evolution' : 'user_explicit',
+        origin: meta.origin === 'project_evolution' || meta.origin === 'model_drafted' ? meta.origin : 'user_explicit',
         kind,
         exposure: kind === 'memory-save' || kind === 'memory-forget' ? 'update' : 'reference',
         /** 条目类型：读正文看 recordKind，检索看 ref 自己的 kind；工具名不是类型。 */
@@ -599,7 +599,8 @@ window.__ModuleLoader__.load({
     };
     const refMetaOf = (item) => {
       /** 会话里只标层与来源：类型留给面板和工具，不占引用行的宽度。 */
-      const layer = `${item.scope === 'global' ? '[全局]' : '[项目]'}${item.origin === 'project_evolution' ? '[自进化]' : ''}`;
+      /** 来源只标注信任差别：自进化规则与模型整理稿都不会因此升级层级。 */
+      const layer = `${item.scope === 'global' ? '[全局]' : '[项目]'}${item.origin === 'project_evolution' ? '[自进化]' : item.origin === 'model_drafted' ? '[模型]' : ''}`;
       const parts = [];
       const ago = agoLabel(item.updated);
       if (ago) parts.push(ago);
@@ -882,6 +883,7 @@ window.__ModuleLoader__.load({
         case 'hit': return cards > 0 ? `上次自动提醒 ${cards} 条` : '';
         case 'budget': return `上次没提醒，${related}本轮自动提醒已用满`;
         case 'needs_context': return `上次没提醒，${related}适用条件未确认`;
+        case 'conflict': return `上次没提醒，${related}存在冲突的结论`;
         case 'no_overlap': return '上次没提醒，没有匹配的记忆';
         case 'memory_off': return '上次没提醒，记忆已关闭';
         case 'tools_only': return '上次没提醒，只在你问时检索';
@@ -2602,7 +2604,7 @@ window.__ModuleLoader__.load({
                 h('div', { style: { flex: 1, minWidth: 0, fontSize: '13px', lineHeight: '1.45', fontWeight: 600, wordBreak: 'break-word' } }, detail.title),
                 h(Action, { onClick: () => setSelectedMemory('') }, '关闭'),
               ),
-              h('div', { style: PANEL_MUTED }, `${KIND_LABEL[detailRecord && detailRecord.kind] || '记忆'} · ${detail.scopeLabel || ''}${detailProcessing ? ` · ${PROCESSING_LABEL[detailProcessing]}` : ''}`),
+              h('div', { style: PANEL_MUTED }, `${KIND_LABEL[detailRecord && detailRecord.kind] || '记忆'} · ${detail.scopeLabel || ''}${detailRecord && detailRecord.origin === 'model_drafted' ? ' · [模型]' : ''}${detailProcessing ? ` · ${PROCESSING_LABEL[detailProcessing]}` : ''}`),
               Array.isArray(detailRecord && detailRecord.tags) && detailRecord.tags.length
                 ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '4px' } },
                   detailRecord.tags.slice(0, 6).map((tag) => h('span', { key: tag, style: { ...PANEL_MUTED, padding: '0 6px', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '999px' } }, `#${tag}`))) : null,
