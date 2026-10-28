@@ -142,6 +142,26 @@ test('same title with a different when is a second entry', () => {
   assert.equal(again.record.id, b.record.id);
 });
 
+test('expired or superseded records do not block a new same-title save', () => {
+  const scope = fresh('stale-merge');
+  const first = upsert(scope, { title: '旧结论', summary: '这条已经过期', topicKey: 'old-topic', body: '旧' });
+  const expired = loadIndex(scope);
+  expired.entries.find((row) => row.id === first.record.id).validUntil = new Date(Date.now() - 1000).toISOString();
+  saveIndex(scope, expired);
+  const next = upsert(scope, { title: '旧结论', summary: '新结论应该另存', topicKey: 'old-topic', body: '新' });
+  assert.equal(next.needsResolution, false);
+  assert.equal(next.merged, false);
+  assert.notEqual(next.record.id, first.record.id);
+
+  const second = upsert(scope, { title: '被取代的结论', summary: '已经被新版本取代', body: '旧' });
+  const superseded = loadIndex(scope);
+  superseded.entries.find((row) => row.id === second.record.id).supersededBy = 'later';
+  saveIndex(scope, superseded);
+  const replacement = upsert(scope, { title: '被取代的结论', summary: '沿同名标题重写', body: '新' });
+  assert.equal(replacement.needsResolution, false);
+  assert.notEqual(replacement.record.id, second.record.id);
+});
+
 test('oversized body is rejected, old data untouched', () => {
   const scope = fresh('oversize');
   const big = 'x'.repeat(LIMITS.entryBytes + 1);

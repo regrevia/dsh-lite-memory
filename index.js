@@ -173,6 +173,12 @@ function noteRecall(scope, sessionId, receipt) {
   while (recallReceipts.size > 64) recallReceipts.delete(recallReceipts.keys().next().value);
 }
 
+/** 投影没发出去就撤销回执：面板不能显示一条模型从没见过的提醒。 */
+function clearRecall(scope, sessionId) {
+  if (!scope || typeof sessionId !== 'string' || !sessionId) return;
+  recallReceipts.delete(`${scope.key}\u0000${sessionId}`);
+}
+
 function recallReceiptOf(scope, sessionId) {
   if (!scope || typeof sessionId !== 'string' || !sessionId) return null;
   return recallReceipts.get(`${scope.key}\u0000${sessionId}`) || null;
@@ -2596,7 +2602,7 @@ export function apply(ctx, config) {
       const said = view.newestUserQuery(fresh).slice(0, RECALL_QUERY_CHARS);
       /** 「继续」这类续说没有检索词：带上同会话上一轮原话，否则这一轮必然召回为空。 */
       const carried = sameSession && previous?.query && view.isContinuationQuery(said) ? previous.query : '';
-      const query = (carried ? `${carried} ${said}` : said).trim().slice(0, RECALL_QUERY_CHARS);
+      const query = (carried ? `${said} ${carried}` : said).trim().slice(0, RECALL_QUERY_CHARS);
       if (win && query) win.query = query;
 
       if (!query) {
@@ -2658,16 +2664,18 @@ export function apply(ctx, config) {
         win.experiment = null;
         win.contexts.clear();
       };
-      if (generation !== generations.get(agent)) { rollbackBudget(); return decision; }
+      if (generation !== generations.get(agent)) { rollbackBudget(); if (snapshot.cards.length) clearRecall(scope, sessionId); return decision; }
       /** 投影期间开关被改过：丢弃这批内容，不把关闭前的记忆交给当前请求。 */
       if (!memoryEnabled(scope) || (controlStatus(scope).epoch || '') !== controlEpoch) {
         rollbackBudget();
+        if (snapshot.cards.length) clearRecall(scope, sessionId);
         clearPrepared(agent);
         return decision;
       }
       /** 超时或被取消：这一步不留半旧卡片，下一真人请求重新投影。 */
       if (signal?.aborted || Date.now() - startedAt > RECALL_DEADLINE_MS) {
         rollbackBudget();
+        if (snapshot.cards.length) clearRecall(scope, sessionId);
         clearPrepared(agent);
         return decision;
       }
@@ -2703,7 +2711,7 @@ export function apply(ctx, config) {
       if (signal) signalAgents.set(signal, agent);
       const key = agentKey(agent);
       if (key && signal && typeof signal.addEventListener === 'function') {
-        const onAbort = () => clearPrepared(agent);
+        const onAbort = () => { clearPrepared(agent); clearRecall(scope, sessionId); };
         signal.addEventListener('abort', onAbort, { once: true });
         abortCleanups.set(key, () => signal.removeEventListener('abort', onAbort));
       }
