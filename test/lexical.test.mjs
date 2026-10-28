@@ -51,5 +51,18 @@ for (const text of ['继续', '继续。', '然后呢？', '接着', 'go on', 'c
 for (const text of ['继续优化轻量化记忆与前端展示逻辑', '然后发布', '样式', 'next steps for release']) {
   assert.equal(view.isContinuationQuery(text), false, text);
 }
+/* 短续句只由通用动作词组成、没点名新对象：沿用上一句，但不把带对象的长句也算进来。 */
+for (const text of ['继续优化收敛', '继续打磨', '接着改', '继续看看']) {
+  assert.equal(view.isEllipticalContinuation(text), true, text);
+}
+for (const text of ['继续优化轻量化记忆与前端展示逻辑', '继续优化数据库连接池', '接着改数据库', '然后发布']) {
+  assert.equal(view.isEllipticalContinuation(text), false, text);
+}
+
+/* 明确换任务：换做/先别管，或点了一个上一句没有的英文对象。 */
+assert.equal(view.isExplicitSwitch('改用 PostgreSQL 先看连接池', '把前端按钮颜色调一下'), true);
+assert.equal(view.isExplicitSwitch('先别管这个了，帮我看看 nginx 502', '把前端按钮颜色调一下'), true);
+assert.equal(view.isExplicitSwitch('继续优化收敛', '把前端按钮颜色调一下'), false);
+assert.equal(view.isExplicitSwitch('继续优化数据库连接池', '把前端按钮颜色调一下'), false);
 
 console.log('lexical.test.mjs: all passed');

@@ -10,6 +10,8 @@ export const TASK_LIMITS = { sessions: 8, episodes: 12, sourceMessages: 8, idleM
 
 const SWITCH_WORDS = /(改做|改为|改到|改成|换个|换一个|换成|转到|现在做|接下来做|新做|另做|开始做|去做)/;
 const CONTINUE_WORDS = /(继续|再做一期|下一期|再来一期|再开一期|续一集|再拍一期)/;
+/** 短续句只由通用动作词组成、没点名新对象：仍属于当前任务，不能当换任务。 */
+const ELLIPTICAL_CONTINUE = /^(?:继续|接着|再接着|往下)[，,、\s]*(?:把|将|再)?(?:优化|收敛|调整|完善|打磨|推进|处理|改|修|做|写|整理|检查|排查|测试|发布|跑|看看|看下|弄|试|收尾|统一|对齐|细化|补|过一遍|走一遍|一下|下)+[。.!！?？…]*$/u;
 const REVISE_WORDS = /(再改一下|改一版|再改改|调整一下|这版再|继续改)/;
 const THANKS_WORDS = /^(谢谢|多谢|谢了|辛苦了|thanks|thank\s*you)[!！。.～~\s]*$/i;
 const REFERENCE_WORDS = /(这个|这条|这次|上次|之前|刚才|上面|前面|它|这里|继续|接着|还是|同样|再改)/;
@@ -71,6 +73,7 @@ function taskTerms(value) {
 export function looksLikeNewTask(query, previousText) {
   const current = text(query, 200);
   if (!current || isThanks(current)) return false;
+  if (ELLIPTICAL_CONTINUE.test(current)) return false;
   const next = taskTerms(current);
   const previous = taskTerms(previousText);
   const cue = isContinuation(current) || REFERENCE_WORDS.test(current);

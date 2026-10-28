@@ -2714,8 +2714,10 @@ export function apply(ctx, config) {
       /** 工具模式也要记下本轮真人原话：只用于核对绑定，不自动注入。 */
       const said = view.newestUserQuery(fresh).slice(0, RECALL_QUERY_CHARS);
       /** 「继续」这类续说没有检索词：带上同会话上一轮原话，否则这一轮必然召回为空。 */
-      const carried = sameSession && previous?.query && view.isContinuationQuery(said) ? previous.query : '';
-      const query = (carried ? `${said} ${carried}` : said).trim().slice(0, RECALL_QUERY_CHARS);
+      const carried = sameSession && previous?.query
+        && (view.isContinuationQuery(said) || view.isEllipticalContinuation(said))
+        ? previous.query : '';
+      let query = (carried ? `${said} ${carried}` : said).trim().slice(0, RECALL_QUERY_CHARS);
       if (win && query) win.query = query;
 
       if (!query) {
@@ -2757,37 +2759,43 @@ export function apply(ctx, config) {
       const remembered = runtime && runtime.enabled
         ? rememberFeedback(scope, sessionId, fresh, runtime.held, turn)
         : null;
-      let snapshot = projectRecall(scope, query, recalledContext, win, runtime ? runtime.held : null);
-      /**
-       * 预防型记忆约束的是「下一步动作」，词面常写在上一轮助手的话和工具调用里，用户这句话反而没提。
-       * 第一次检索一张卡都没有时，用最近的实词/工具名补一次有界查询，预算仍是同一份。
-       */
       const currentTask = {
         kind: (runtime && runtime.held && runtime.held.task && runtime.held.task.kind) || '',
         episodeId: (runtime && runtime.held && runtime.held.episodeId) || '',
       };
       const rememberedTask = lastTask.get(sessionId) || null;
       const previousTask = previous && previous.task ? previous.task : rememberedTask;
-      const sameTask = Boolean(sameSession || rememberedTask) && view.sameRecallTask(previousTask, currentTask);
+      const sameTask = Boolean(sameSession || rememberedTask)
+        && !view.isExplicitSwitch(said, previous && previous.query ? previous.query : '')
+        && view.sameRecallTask(previousTask, currentTask);
       lastTask.set(sessionId, currentTask);
       while (lastTask.size > 64) lastTask.delete(lastTask.keys().next().value);
-      if (!snapshot.cards.length && !carried && sameTask) {
-        const humanTail = (() => {
-          const messages = Array.isArray(decision.messages) ? decision.messages : [];
-          for (let i = messages.length - 1; i >= 0; i -= 1) {
-            if (messages[i]?.source?.kind === 'user') return messages.slice(0, i);
-          }
-          return messages;
-        })();
-        const trail = view.actionTerms(humanTail, { limit: 12 }).slice(0, 240);
-        if (trail) {
-          const actionQuery = `${trail} ${query}`.trim().slice(0, RECALL_QUERY_CHARS);
-          const retry = projectRecall(scope, actionQuery, recalledContext, win, runtime ? runtime.held : null);
-          /** 补查是为了给出提醒：补不到就保留第一次的「为什么没提醒」，不拿空结果盖掉。 */
-          if (retry.cards.length) {
-            snapshot = retry;
-            if (win) win.query = actionQuery;
-          }
+      /**
+       * 预防型记忆约束的是「下一步动作」，词面常写在上一轮助手的话和工具调用里，用户这句话反而没提。
+       * 续句或没有具体动作的短问句，直接把最近的动作线索并进同一份查询：只查一次，不额外占预算。
+       * 明确换任务时不并，旧任务的动作历史不能给新任务找记忆。
+       */
+      const humanTail = (() => {
+        const messages = Array.isArray(decision.messages) ? decision.messages : [];
+        for (let i = messages.length - 1; i >= 0; i -= 1) {
+          if (messages[i]?.source?.kind === 'user') return messages.slice(0, i);
+        }
+        return messages;
+      })();
+      const trail = sameTask ? view.actionTerms(humanTail, { limit: 12 }).slice(0, 240) : '';
+      const trailInQuery = Boolean(trail) && (Boolean(carried) || !view.hasConcreteAction(said));
+      if (trailInQuery) {
+        query = `${query} ${trail}`.trim().slice(0, RECALL_QUERY_CHARS);
+        if (win) win.query = query;
+      }
+      let snapshot = projectRecall(scope, query, recalledContext, win, runtime ? runtime.held : null);
+      /** 并了动作线索仍一张卡都没有，才补一次有界查询；补到了才替换，不拿空结果盖掉原判断。 */
+      if (!snapshot.cards.length && !carried && sameTask && trail && !trailInQuery) {
+        const actionQuery = `${trail} ${query}`.trim().slice(0, RECALL_QUERY_CHARS);
+        const retry = projectRecall(scope, actionQuery, recalledContext, win, runtime ? runtime.held : null);
+        if (retry.cards.length) {
+          snapshot = retry;
+          if (win) win.query = actionQuery;
         }
       }
       /** 实验规则最后才取预算：普通卡片先占，弱相关实验不能把强相关项目规则挤出去。 */

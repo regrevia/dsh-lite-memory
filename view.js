@@ -711,8 +711,43 @@ export function isContinuationQuery(text) {
 }
 
 /**
+ * 「继续优化收敛」这类短续句：句首是续说标记，剩下的只由通用动作词组成，
+ * 没有点名新的对象。它本身检索不出上一轮的记忆，但仍属于当前任务，要沿用上一句原话。
+ * 明确带对象（「继续优化数据库连接池」「继续优化轻量化记忆」）不算，交给换任务判断。
+ */
+const ELLIPTICAL_BODY = /^(?:把|将|再|接着|继续)?(?:优化|收敛|调整|完善|打磨|推进|处理|改|修|做|写|整理|检查|排查|测试|发布|跑|看看|看下|弄|试|收尾|统一|对齐|细化|补|过一遍|走一遍|一下|下)+[。.!！?？…]*$/u;
+export function isEllipticalContinuation(text) {
+  const raw = plain(text, 40).trim();
+  const cut = raw.replace(/^[\s\u3002\uff01\uff1f?!\uff0c,\u3001\u2026~\uff5e]+/u, '');
+  if (!cut || [...cut].length > 12) return false;
+  const match = cut.match(/^(?:继续|接着|再接着|往下)[，,、\s]*(.+)$/u);
+  if (!match) return false;
+  return ELLIPTICAL_BODY.test(match[1].trim());
+}
+
+/** 这句话有没有具体动作：只用于判断要不要把上一轮的工具线索并进这次查询。 */
+const CONCRETE_ACTION = /(改|写|修|做|建|删|新增|添加|移除|运行|跑|测试|发布|部署|提交|推送|安装|重载|重启|启动|停止|检查|排查|优化|收敛|处理|调整|配置|设置|替换|更换|上传|下载|生成|保存|读取|打开|关闭|合并|拆分|回滚|迁移|接入|修复|定位|复现)/u;
+export function hasConcreteAction(text) {
+  return CONCRETE_ACTION.test(plain(text, 400));
+}
+
+/**
+ * 明确换任务：句子里有换做/改用/先别管这类词，或点了一个上一句没有的英文对象。
+ * 认不出任务类型时，上一轮的动作线索只能靠这条规则隔开，不能因为类型为空就默认同任务。
+ */
+const SWITCH_MARK = /(换成|换个|换一个|改用|改做|改为|改到|转到|先不管|别管|先别|不弄这个|不看这个|另一个|新任务|去做|开始做)/u;
+export function isExplicitSwitch(text, previousText = '') {
+  const current = plain(text, 400);
+  if (!current) return false;
+  if (SWITCH_MARK.test(current)) return true;
+  const previous = plain(previousText, 400).toLowerCase();
+  const objects = current.match(/[A-Za-z][A-Za-z0-9_.-]{1,}|[0-9]{2,}/g) || [];
+  return objects.some((token) => !previous.includes(token.toLowerCase()));
+}
+
+/**
  * 补查只有在「还是同一个任务」时才成立：任务类型或 episode 变了，上一轮的动作历史属于旧任务，
- * 不能拿它给新任务找记忆。缺任一侧身份都按不同任务处理，宁可少补一次也不串旧话题。
+ * 不能拿它给新任务找记忆。类型缺失时保留补查，由调用方的明确换任务判断兜底。
  */
 export function sameRecallTask(previous, current) {
   if (!previous || !current) return true;

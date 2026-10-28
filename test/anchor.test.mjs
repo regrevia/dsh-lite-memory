@@ -344,6 +344,35 @@ test('R22 真正的续改保留原任务范围', () => {
   assert.equal(next.episode.previousEpisodeId, tasks.sessions['sess-switch'].episodeId);
 });
 
+test('R22b 短续句「继续优化收敛」不点名新对象，仍算续作', () => {
+  const tasks = activeVideoSession();
+  const next = anchor.routeTask(tasks, {
+    sessionId: 'sess-switch',
+    batchKey: 'rb_ellipse',
+    messageIds: ['m2'],
+    query: '继续优化收敛',
+    registeredSeries: ['口播'],
+    now: 2000,
+  });
+  assert.equal(next.decision.kind, 'continuation');
+  assert.equal(next.anchor.seriesId, '口播');
+  assert.equal(next.episode.previousEpisodeId, tasks.sessions['sess-switch'].episodeId);
+});
+
+test('R22c 短续句点名新对象时仍然换任务', () => {
+  const tasks = activeVideoSession();
+  const next = anchor.routeTask(tasks, {
+    sessionId: 'sess-switch',
+    batchKey: 'rb_ellipse_obj',
+    messageIds: ['m2'],
+    query: '继续优化数据库连接池',
+    registeredSeries: ['口播'],
+    now: 2000,
+  });
+  assert.equal(next.decision.kind, 'unbound');
+  assert.equal(next.decision.reason, 'new_task');
+});
+
 test('R23 只指代旧稿的局部修改不被当成换任务', () => {
   const tasks = activeVideoSession();
   const next = anchor.routeTask(tasks, {

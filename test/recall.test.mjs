@@ -588,6 +588,127 @@ console.log('recall.test.mjs: ok');
   assert.match(runtime.provider.text({ agent, signal: second }), /改完 client\.js 先重载宿主/, '动作侧线索要能召回预防型记忆');
 }
 
+// A25b：短续句「继续优化收敛」没有自己的检索词，要沿用上一句，不能断在上一轮。
+{
+  const cwdEllipse = mkdir('ellipse');
+  const scopeEllipse = store.scopeOf(cwdEllipse);
+  save(scopeEllipse, {
+    title: '轻量化记忆与前端展示逻辑先定召回顺序',
+    tags: ['轻量化记忆', '前端展示逻辑'],
+    summary: '先定召回顺序，再谈展示；触发机制跟着任务走',
+  });
+  const agent = makeAgent('agent-ellipse', cwdEllipse);
+  const runtime = boot();
+  const first = signal();
+  await runtime.preStep({ agent, signal: first, turn: 'e1' }, enter(human('继续优化轻量化记忆与前端展示逻辑 还有触发机制等')));
+  const second = signal();
+  await runtime.preStep({ agent, signal: second, turn: 'e2' }, enter(human('继续优化收敛')));
+  const prepared = runtime.debug.preparedOf(agent);
+  assert.ok(prepared, '短续句要准备召回');
+  assert.match(prepared.query, /轻量化记忆与前端展示逻辑/, '短续句沿用上一句原话');
+  assert.ok(prepared.cards.some((card) => /轻量化记忆/.test(card.title || card.line || '')), '同一话题的记忆要回来');
+}
+
+// A25c：上一轮有动作、这句话只有「这个怎么弄」时，通用卡片不能挡住动作线索的补查。
+{
+  const cwdGeneric = mkdir('generic');
+  const scopeGeneric = store.scopeOf(cwdGeneric);
+  save(scopeGeneric, {
+    title: '这个怎么弄时先读现有文档',
+    tags: ['怎么弄', '文档'],
+    summary: '没头绪时先读现有文档再动手',
+  });
+  save(scopeGeneric, {
+    title: '改完 client.js 先重载宿主',
+    tags: ['client.js', '重载'],
+    summary: 'client.js 一改就要重载宿主，普通刷新覆盖不到',
+  });
+  const agent = makeAgent('agent-generic', cwdGeneric);
+  const runtime = boot();
+  const first = signal();
+  await runtime.preStep({ agent, signal: first, turn: 'g1' }, enter(human('这个怎么弄')));
+  assert.match(runtime.provider.text({ agent, signal: first }), /先读现有文档/, '第一轮命中通用卡片');
+  const assistantMessage = {
+    role: 'assistant',
+    id: 'asst-generic-1',
+    content: [
+      { type: 'text', text: '我把改动写进文件了。' },
+      { type: 'tool-call', name: 'write', input: { file_path: '/tmp/generic/client.js' } },
+    ],
+  };
+  const second = signal();
+  await runtime.preStep({ agent, signal: second, turn: 'g2' }, enter(assistantMessage, human('这个怎么弄')));
+  assert.match(runtime.provider.text({ agent, signal: second }), /改完 client\.js 先重载宿主/, '通用卡片不能挡住动作线索');
+}
+
+// A25d：换到数据库任务后再说「继续」，只承接数据库这一句，不能把前端任务的记忆带回来。
+{
+  const cwdSwitch = mkdir('switch-cont');
+  const scopeSwitch = store.scopeOf(cwdSwitch);
+  save(scopeSwitch, {
+    title: '前端按钮颜色先对齐设计稿 token',
+    tags: ['前端按钮', '颜色'],
+    summary: '按钮颜色只取设计稿 token，不要另写十六进制',
+  });
+  save(scopeSwitch, {
+    title: 'PostgreSQL 连接池先查 max_connections',
+    tags: ['PostgreSQL', '连接池'],
+    summary: '连接池调大前先看 max_connections 和实际占用',
+  });
+  const agent = makeAgent('agent-switch-cont', cwdSwitch);
+  const runtime = boot();
+  const first = signal();
+  await runtime.preStep({ agent, signal: first, turn: 'sc1' }, enter(human('前端按钮颜色怎么改')));
+  assert.match(runtime.provider.text({ agent, signal: first }), /前端按钮颜色/, '第一轮命中前端任务');
+  const second = signal();
+  await runtime.preStep({ agent, signal: second, turn: 'sc2' }, enter(human('改用 PostgreSQL，先看连接池')));
+  assert.match(runtime.provider.text({ agent, signal: second }), /PostgreSQL 连接池/, '第二轮命中数据库任务');
+  const third = signal();
+  await runtime.preStep({ agent, signal: third, turn: 'sc3' }, enter(human('继续')));
+  const prepared = runtime.debug.preparedOf(agent);
+  assert.match(prepared.query, /PostgreSQL/, '续句承接的是数据库那一句');
+  assert.ok(prepared.cards.some((card) => /PostgreSQL/.test(card.title || card.line || '')), '续句仍命中数据库记忆');
+  assert.ok(!prepared.cards.some((card) => /前端按钮/.test(card.title || card.line || '')), '不把前端任务记忆带回来');
+}
+
+// A25e：认不出任务类型的明确换任务，也不能把上一轮的动作线索带过来。
+{
+  const cwdUnknown = mkdir('unknown-switch');
+  const scopeUnknown = store.scopeOf(cwdUnknown);
+  save(scopeUnknown, {
+    title: '改完 client.js 先重载宿主',
+    tags: ['client.js', '重载'],
+    summary: 'client.js 改动后必须重载宿主，普通刷新覆盖不到',
+  });
+  save(scopeUnknown, {
+    title: 'nginx 502 先看 upstream 日志',
+    tags: ['nginx', '502', 'upstream'],
+    summary: '502 先查 upstream 是否存活，再看超时配置',
+  });
+  const agent = makeAgent('agent-unknown', cwdUnknown);
+  const runtime = boot();
+  const first = signal();
+  await runtime.preStep({ agent, signal: first, turn: 'u1' }, enter(human('把前端按钮颜色调一下')));
+  const assistantMessage = {
+    role: 'assistant',
+    id: 'asst-unknown-1',
+    content: [
+      { type: 'text', text: '我把 client.js 的样式改好了。' },
+      { type: 'tool-call', name: 'write', input: { file_path: '/tmp/unknown/client.js' } },
+    ],
+  };
+  const second = signal();
+  await runtime.preStep({ agent, signal: second, turn: 'u2' }, enter(assistantMessage, human('先别管这个了，帮我看看 nginx 502')));
+  const switchedText = runtime.provider.text({ agent, signal: second });
+  assert.doesNotMatch(switchedText, /改完 client\.js 先重载宿主/, '明确换任务后不带旧动作线索');
+  assert.match(switchedText, /nginx 502/, '新任务本身能命中');
+  const third = signal();
+  await runtime.preStep({ agent, signal: third, turn: 'u3' }, enter(human('继续')));
+  const continuedText = runtime.provider.text({ agent, signal: third });
+  assert.match(continuedText, /nginx 502/, '续句承接新任务');
+  assert.doesNotMatch(continuedText, /改完 client\.js 先重载宿主/, '续句不回旧任务');
+}
+
 // A26：明确换任务后，不能拿上一轮助手的话去补查、把旧任务记忆塞进新任务。
 {
   const cwdSwitch = mkdir('switch');
