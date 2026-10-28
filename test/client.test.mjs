@@ -28,7 +28,7 @@ assert.equal(panel.name, 'shell.overlay');
 assert.equal(panel.order, 30);
 
 const EMPTY_CHILDREN = [];
-const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags } = seen;
+const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, conflictVisibleRows, conflictFactsOf } = seen;
 
 // 图谱只按真实数据画：共享标签成枢纽，显式关联成边，位置由 id 决定。
 const graph = graphOf([
@@ -368,3 +368,31 @@ assert.equal(recallLineOf({ reason: 'made_up', cards: 0, matched: 0 }), '');
 assert.doesNotMatch(recallLineOf({ reason: 'needs_context', cards: 0, matched: 1 }), /needs_context|reasonCode/);
 console.log('client.test.mjs: 22 passed + palace');
 
+
+
+// 待裁决面板：先露两条，查看全部后不截断；展开区给全层级、条件、范围、触发词与完整正文。
+const pendingRows = [
+  { id: 'cf_1', scope: 'global', title: '一', draft: { body: '正文一' } },
+  { id: 'cf_2', scope: 'project', title: '二', draft: { body: '正文二' } },
+  { id: 'cf_3', scope: 'project', title: '三', draft: { body: '正文三' } },
+];
+assert.deepEqual(conflictVisibleRows(pendingRows, false).map((row) => row.id), ['cf_1', 'cf_2']);
+assert.deepEqual(conflictVisibleRows(pendingRows, true).map((row) => row.id), ['cf_1', 'cf_2', 'cf_3']);
+const facts = conflictFactsOf({
+  scope: 'global',
+  candidates: [{ title: '旧结论' }, { title: '另一条' }],
+  draft: {
+    title: '发布窗口', summary: '摘要', body: '周四晚上再发版。', when: '发版前',
+    conditions: [{ key: 'phase', value: 'release' }], triggers: ['发版', '发布'],
+    selection: { mode: 'complete', artifactKey: 'release' },
+  },
+});
+assert.equal(facts.scope, '总记忆');
+assert.equal(facts.when, '发版前');
+assert.equal(facts.conditions, 'phase=release');
+assert.equal(facts.selection, '清单完整 · release');
+assert.equal(facts.triggers, '发版、发布');
+assert.equal(facts.near, '旧结论、另一条');
+assert.equal(facts.body, '周四晚上再发版。');
+assert.equal(conflictFactsOf({ scope: 'project', draft: { selection: { mode: 'examples', items: ['a.md', 'b.md'] } } }).selection, '举例：a.md、b.md');
+assert.equal(conflictFactsOf({ draft: { body: '' } }).body, '（没有正文）');

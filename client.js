@@ -813,6 +813,38 @@ window.__ModuleLoader__.load({
       return text.length > size ? `${text.slice(0, size)}…` : text;
     };
 
+    /** 待裁决先露两条；「查看全部 N 条」后按队列原样全列，不截断。 */
+    const conflictVisibleRows = (queued, all) => (all ? queued : queued.slice(0, 2));
+
+    /** 面板展开区一次给全：层级、适用条件、范围清单、触发词、相近条目、完整正文。 */
+    const conflictFactsOf = (row) => {
+      const draft = row && row.draft && typeof row.draft === 'object' ? row.draft : {};
+      const conditions = (Array.isArray(draft.conditions) ? draft.conditions : []).map((item) => {
+        if (!item || typeof item !== 'object') return '';
+        const key = String(item.key || item.name || '').trim();
+        const value = String(item.value || '').trim();
+        return key && value ? `${key}=${value}` : key || value;
+      }).filter(Boolean).join(' · ');
+      const selection = draft.selection && typeof draft.selection === 'object' ? draft.selection : null;
+      let selectionText = '';
+      if (selection && selection.mode === 'complete') selectionText = `清单完整${selection.artifactKey ? ` · ${selection.artifactKey}` : ''}`;
+      else if (selection && selection.mode === 'examples') {
+        const items = Array.isArray(selection.items) ? selection.items.filter(Boolean) : [];
+        selectionText = items.length > 0 ? `举例：${items.join('、')}` : '举例';
+      }
+      const triggers = Array.isArray(draft.triggers) ? draft.triggers.filter(Boolean).join('、') : '';
+      const near = Array.isArray(row && row.candidates) ? row.candidates.map((item) => item && item.title).filter(Boolean) : [];
+      return {
+        scope: row && row.scope === 'global' ? '总记忆' : '本项目',
+        when: typeof draft.when === 'string' ? draft.when : '',
+        conditions,
+        selection: selectionText,
+        triggers,
+        near: near.join('、'),
+        body: String(draft.body || draft.summary || '（没有正文）'),
+      };
+    };
+
     /** 显示设置只决定画不画，不改学习状态；按项目 key 存在本机。 */
     const DISPLAY_DEFAULTS = Object.freeze({ graph: false, palace: false });
     const displayKeyOf = (projectKey) => `lite-memory:display:${projectKey || 'default'}`;
@@ -2158,6 +2190,7 @@ window.__ModuleLoader__.load({
       const [hubFilter, setHubFilter] = React.useState(null);
       const [checkup, setCheckup] = React.useState(false);
       const [expandedConflict, setExpandedConflict] = React.useState('');
+      const [conflictAll, setConflictAll] = React.useState(false);
       const alive = React.useRef(true);
       const generation = React.useRef(0);
       const scopeRef = React.useRef('');
@@ -2192,6 +2225,7 @@ window.__ModuleLoader__.load({
             setDetail(null);
             setDetailNote('');
             setShowReason(false);
+            setConflictAll(false);
           } else {
             setFailed(true);
             setNote(failure(result, '读不到记忆'));
@@ -2225,6 +2259,7 @@ window.__ModuleLoader__.load({
         setShowSettings(false);
         setHubFilter(null);
         setExpandedConflict('');
+        setConflictAll(false);
       }, [selectedKey]);
       React.useEffect(() => {
         setMemoryView((value) => viewModeOf(display, value));
@@ -2732,14 +2767,17 @@ window.__ModuleLoader__.load({
       const evolutionViewActive = graphViewOf(display.graph, evolutionView);
 
       const conflictReadOnly = !memoryOn || (!globalView && selectedKey !== currentKey);
-      const draftScope = (row) => (row.scope === 'global' ? '总记忆' : '本项目');
+      const visibleConflicts = conflictVisibleRows(queued, conflictAll);
       const conflictBar = queued.length === 0 ? null : h('div', {
         style: { display: 'flex', flexDirection: 'column', gap: '3px', padding: '7px 9px 8px', borderBottom: '1px solid var(--dsw-alias-border-l1)', flex: '0 0 auto' },
       },
-      h('div', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, `${queued.length} 条保存没确认${conflictReadOnly ? ' · 只读' : ''}`),
-      queued.slice(0, 2).map((row) => {
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
+        h('span', { style: { ...PANEL_MUTED, lineHeight: '18px', flex: 1, minWidth: 0 } }, `${queued.length} 条保存没确认${conflictReadOnly ? ' · 只读' : ''}`),
+        queued.length > 2 ? h(Action, { disabled: busy, onClick: () => setConflictAll((value) => !value) }, conflictAll ? '收起' : `查看全部 ${queued.length} 条`) : null,
+      ),
+      visibleConflicts.map((row) => {
         const open = expandedConflict === row.id;
-        const draft = row.draft || {};
+        const facts = conflictFactsOf(row);
         return h('div', {
           key: row.id || row.title,
           style: { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 },
@@ -2759,11 +2797,15 @@ window.__ModuleLoader__.load({
           conflictReadOnly ? null : h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'drop') }, '忽略'),
         ),
         open ? h('div', {
-          style: { ...PANEL_MUTED, padding: '2px 0 4px', lineHeight: '18px', overflowWrap: 'anywhere' },
+          style: { ...PANEL_MUTED, padding: '2px 0 4px', lineHeight: '18px', overflowWrap: 'anywhere', maxHeight: '180px', overflowY: 'auto' },
         },
-        h('div', null, `范围：${draftScope(row)}`),
-        draft.when ? h('div', null, `适用：${draft.when}`) : null,
-        h('div', null, String(draft.body || draft.summary || '（没有正文）').slice(0, 400)),
+        h('div', null, `存到：${facts.scope}`),
+        facts.when ? h('div', null, `什么时候用：${facts.when}`) : null,
+        facts.conditions ? h('div', null, `条件：${facts.conditions}`) : null,
+        facts.selection ? h('div', null, `适用范围：${facts.selection}`) : null,
+        facts.triggers ? h('div', null, `触发词：${facts.triggers}`) : null,
+        facts.near ? h('div', null, `相近：${facts.near}`) : null,
+        h('div', { style: { whiteSpace: 'pre-wrap', color: 'var(--dsw-alias-label-primary)' } }, facts.body),
         ) : null);
       }));
       const memoryListPane = h('div', {
@@ -3014,7 +3056,7 @@ window.__ModuleLoader__.load({
 
     // 测试缝：Node 里验引用投影，浏览器里没有任何副作用。
     if (typeof globalThis.__LITE_MEMORY_TEST__ === 'function') {
-      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row });
+      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row, conflictVisibleRows, conflictFactsOf });
     }
 
     return {
