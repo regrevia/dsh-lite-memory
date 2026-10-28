@@ -1101,8 +1101,15 @@ test('归属路由：本机痕迹的「通用流程」留在项目层，干净�
     title: '提交前跑测试', summary: '提交前跑测试', body: 'pnpm test',
     memoryClass: 'portable_procedure', evidenceRef: '团队 wiki 的提交流程页',
   }, { project });
-  assert.equal(withEvidence.chosenScope, 'global');
-  assert.equal(withEvidence.reasonCode, 'class_portable_procedure');
+  assert.equal(withEvidence.chosenScope, 'project', '模型自动归类即便有依据也要先留在项目层');
+  assert.equal(withEvidence.reasonCode, 'model_class_project');
+
+  const withEvidenceConfirmed = store.routeScope({
+    title: '提交前跑测试', summary: '提交前跑测试', body: 'pnpm test',
+    memoryClass: 'portable_procedure', evidenceRef: '团队 wiki 的提交流程页',
+  }, { project, humanScope: true });
+  assert.equal(withEvidenceConfirmed.chosenScope, 'global', '人确认后才按归类落全局');
+  assert.equal(withEvidenceConfirmed.reasonCode, 'class_portable_procedure');
 
   const evidencePath = store.routeScope({
     title: '提交前跑测试', summary: '提交前跑测试', body: 'pnpm test',
@@ -1133,8 +1140,17 @@ test('归属路由：本机痕迹的「通用流程」留在项目层，干净�
     memoryClass: 'portable_procedure',
     conditions: [{ key: 'machine', value: 'macOS 桌面机' }],
   }, { project });
-  assert.equal(scopedProcedure.chosenScope, 'global', '声明了机器条件的本机流程可进全局层');
-  assert.equal(scopedProcedure.reasonCode, 'machine_scoped_procedure');
+  assert.equal(scopedProcedure.chosenScope, 'project', '模型自动归类不能自己搬去全局层');
+  assert.equal(scopedProcedure.reasonCode, 'model_class_project');
+
+  const scopedProcedureConfirmed = store.routeScope({
+    title: 'npm 操作走 dsh-npm', summary: '本机 npm 命令用包装脚本',
+    body: '本机 npm 一律用 dsh-npm；裸 npm 报 ENEEDAUTH 不是缺凭据',
+    memoryClass: 'portable_procedure',
+    conditions: [{ key: 'machine', value: 'macOS 桌面机' }],
+  }, { project, humanScope: true });
+  assert.equal(scopedProcedureConfirmed.chosenScope, 'global', '人确认后带机器条件的流程可进全局层');
+  assert.equal(scopedProcedureConfirmed.reasonCode, 'machine_scoped_procedure');
 
   const scopedExplicit = store.routeScope({
     title: 'npm 操作走 dsh-npm', summary: '本机 npm 命令用包装脚本',

@@ -29,11 +29,15 @@ Lightweight memory for the DeepSeek Harness. Nothing resident: no standing promp
 
 真命中看这句话和记忆的标题（含旧标题）、标签、触发词、摘要有没有对得上的词：有就多一行「已有记忆可能相关」，最多三条标题，每条前面标归属（`[global]` 或项目目录名如 `[DSH]`）；没对上就不出现，不改命中计数，正文要 `memory_read` 才读。一条记忆写了触发词，用户说到那个词也算命中。
 
+普通记忆卡片和实验规则共用一份额度：一次最多 3 条、1200 字节，按整条准入，先到先占；自动提示只带标题和摘要，不带正文。实验短规则（正文不超过 240 字且不超过 4 行）直接带正文，更长的只给标题和用途，正文仍要 `memory_read`。
+
 | Case | Behaviour |
 | --- | --- |
 | **L0** you ask it to remember | written immediately, one confirmation line |
 | **L1** it spots something worth keeping | one muted line `memory · suggested "X" · sug_x` with a single 「保留」 button — readable before you click, nothing written unless you click, at most once per two days |
 | **L2** common sense, one-off parameters, credential values | never written |
+
+The automatic hint carries titles and summaries, never bodies. Normal cards and experimental rules share one budget: at most 3 cards / 1200 bytes per request, admitted as whole cards, first come first served. An experimental rule with a body of at most 240 characters and 4 lines is inlined; a longer one gives only its title and purpose, and the body still requires `memory_read`.
 
 Those lines belong to the turn that made them: each turn is rebuilt from its own tool results, so reopening the session shows them again and no other turn leaks in. Saving again updates an entry only when the title (or one of its earlier titles) matches exactly under the same precondition. A merely similar title writes nothing first: the result names the closest entry, so the caller either re-saves with that title or adds `resolution="distinct"`. An update keeps every field it was not given and replaces the body wholesale; the previous body is kept only for internal undo and never shown or searched. The same subject under different preconditions stays two entries.
 

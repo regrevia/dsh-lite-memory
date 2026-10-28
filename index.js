@@ -1176,10 +1176,20 @@ export function apply(ctx, config) {
 
   const agentKey = (agent) => String(agent?.id ?? '');
 
+  /** 回合收尾/换请求时批量记账：一次锁，不在 provider 输出路径上。 */
+  const flushUsage = (state) => {
+    if (!state || !state.scope || !(state.deliveredIds instanceof Set) || state.deliveredIds.size === 0) return;
+    const ids = [...state.deliveredIds].filter(Boolean);
+    state.deliveredIds = new Set();
+    if (!ids.length) return;
+    try { markUsed(state.scope, ids); } catch { /* usage is best-effort */ }
+  };
+
   const clearPrepared = (agent) => {
     if (!agent) return;
     const state = prepared.get(agent);
     if (state && state.signal) signalAgents.delete(state.signal);
+    flushUsage(state);
     prepared.delete(agent);
     const key = agentKey(agent);
     const cleanup = key ? abortCleanups.get(key) : null;
@@ -1920,8 +1930,11 @@ export function apply(ctx, config) {
         const now = Date.now();
         const live = state.lines.filter((row) => !row.validUntil || now <= Date.parse(String(row.validUntil)));
         normalText = live.length ? `${RECALL_HEADER}\n${live.map((row) => row.line).join('\n')}` : '';
-        /** 真正交付的卡片才记使用：到期被撤下的、准备后被丢弃的都不算。 */
-        if (live.length && state.scope) markUsed(state.scope, live.map((row) => row.id).filter(Boolean));
+        /** 真正交付的卡片才记使用；记账推迟到回合收尾，provider 不碰写锁。 */
+        if (live.length && state.scope) {
+          if (!(state.deliveredIds instanceof Set)) state.deliveredIds = new Set();
+          for (const row of live) if (row.id) state.deliveredIds.add(row.id);
+        }
         /** 投影时还在、发出时已过期：回执跟着真实输出改，别在面板上说「提醒了 2 条」而正文是空的。 */
         if (state.scope && live.length !== state.cards.length) {
           noteRecall(state.scope, state.sessionId, {
@@ -2024,8 +2037,21 @@ export function apply(ctx, config) {
       const supersedesId = supersedes && !/^mem_[a-z0-9]+$/.test(supersedes)
         ? (() => { try { return refIdOf(projectScope, { title: supersedes }, '记忆'); } catch { return ''; } })()
         : supersedes;
-      /** 工具写入的正文由模型写，来源标成模型整理，不能冒充用户原话。 */
-      const draft = { ...args, writeMode: args.mode || 'patch', origin: 'model_drafted' };
+      /**
+       * 模型写进参数里的 scope 只是提案：只有本轮真人原话明确说「所有项目/全局」，
+       * 或面板直接确认过，才允许落到全局层。工具写入的正文由模型写，不能冒充用户原话。
+       */
+      const preparedState = prepared.get(execution && execution.agent);
+      const humanSaid = String(preparedState && preparedState.saidOnly || '');
+      const humanGlobal = humanAskedGlobal(humanSaid);
+      const draft = {
+        ...args,
+        writeMode: args.mode || 'patch',
+        origin: 'model_drafted',
+        scopeConfirmed: humanGlobal,
+        requestedScope: args.scope,
+      };
+      if (humanGlobal) draft.scope = 'global'; else delete draft.scope;
       if (supersedes) { if (supersedesId) draft.supersedes = supersedesId; else delete draft.supersedes; }
       /** 更新句柄也用标题：id 只是底层实现，模型抄标题就行。 */
       const updateTitle = String(args.updateTitle || '').trim();
@@ -2097,8 +2123,9 @@ export function apply(ctx, config) {
       /** 显式要了全局却被硬冲突挡回项目层时说清原因：否则模型只能看到 scope=project，无从纠。 */
       const scopeNote = (() => {
         if (args.scope !== 'global' || scope.key === 'global') return '';
-        if (saved.reasonCode === 'machine_bound_scope') return '按本机痕迹留在项目层：正文或依据里写了本机路径/端口，改成别的项目仍成立的通用规则再存全局；只在本机适用的流程可补 machine 条件后存全局';
-        if (saved.reasonCode === 'model_global_project_fact') return '按项目事实留在项目层：换成别的项目就不成立；确实是通用流程就改 memoryClass';
+        if (saved.reasonCode === 'machine_bound_scope' || saved.reasonCode === 'machine_bound_procedure') return '按本机痕迹留在项目层：正文或依据里写了本机路径/端口，改成别的项目仍成立的通用规则再存全局；只在本机适用的流程可补 machine 条件后存全局';
+        if (saved.reasonCode === 'model_global_project_fact' || saved.reasonCode === 'class_project_fact') return '按项目事实留在项目层：换成别的项目就不成立；确实是通用流程就改 memoryClass';
+        if (saved.reasonCode === 'model_class_project' || saved.reasonCode === 'unclassified_project') return '按当前项目保存：模型归类只是提案，要存全局得由用户明确说「所有项目都这样」';
         return '';
       })();
       if (saved.needsResolution) {
@@ -2617,14 +2644,66 @@ export function apply(ctx, config) {
     }), 'lite-memory: recall context');
   }
 
+  /**
+   * 只有人在这句话里明确要求「存到全局/所有项目」才算跨项目授权。
+   * 不能因为句子里同时出现「全局」和「保存」就放行：那可能只是在说全局变量。
+   */
+  const humanAskedGlobal = (said) => {
+    const text = String(said || '');
+    return /(?:存|记|写|放|加|保存|放到|记到|写进).{0,10}(?:全局|所有项目|跨项目)/u.test(text)
+      || /(?:全局|所有项目|跨项目).{0,10}(?:都|一律|通用|适用|记住)/u.test(text)
+      || /(?:以后|今后).{0,16}(?:所有项目|每个项目|全局|跨项目)/u.test(text);
+  };
+
+  /**
+   * npm 原生命令最容易把「没登录」误判成「没凭据」：whoami 报 ENEEDAUTH 之后，
+   * 会话常会反复试 login/token，真正该走的 dsh-npm 反而没人提。
+   * 这里只在动作发生前拦一次，把已有记忆正文直接交给模型；同一轮不重复，不产生循环。
+   */
+  const npmProbeHint = (agent, execution) => {
+    try {
+      const name = String(execution?.name || '');
+      if (!/^(bash|run_command|shell|terminal|exec)$/.test(name)) return undefined;
+      const command = String(execution?.arguments?.command || execution?.arguments?.cmd || execution?.arguments?.input || '');
+      if (!command || command.length > 4000 || !/\bnpm\b/.test(command)) return undefined;
+      if (/dsh-npm/.test(command)) return undefined;
+      if (!/(^|[;&|]\s*)(?:sudo\s+)?npm\s+(?:whoami|publish|login|adduser|add-user|token|config\s+get)\b/.test(command)) return undefined;
+      const held = prepared.get(agent);
+      if (!held || held.npmHinted) return undefined;
+      if (!memoryOnForAgent(agent)) return undefined;
+      const index = loadIndex(globalScope());
+      const row = (index.entries || []).find((entry) => {
+        if (!entry || entry.archived || entry.origin === 'project_evolution') return false;
+        /** 过期/被取代的规则不能再在动作前拦人。 */
+        if (view.lifecycleStatusOf(entry)) return false;
+        if (held.deliveredIds instanceof Set && held.deliveredIds.has(entry.id)) return false;
+        const head = `${entry.title || ''} ${entry.summary || ''} ${(entry.tags || []).join(' ')}`;
+        const body = String(entry.body || '').slice(0, 800);
+        return /npm|dsh-npm/i.test(head)
+          && /(凭据|登录|token|whoami|发布|publish|ENEEDAUTH|Keychain)/i.test(`${head} ${body}`);
+      });
+      if (!row) return undefined;
+      held.npmHinted = true;
+      /** 这条正文真的交给模型了，按交付记使用。 */
+      if (!(held.deliveredIds instanceof Set)) held.deliveredIds = new Set();
+      if (row.id) held.deliveredIds.add(row.id);
+      const body = String(row.body || row.summary || '').trim().slice(0, 600);
+      return `[lite-memory] 这条 npm 命令先别执行：它容易被登录态误导。已有记忆「${row.title}」：${body}\n按记忆改用 dsh-npm；这条提示同一轮只出现一次，直接继续，不要重复探测凭据。`;
+    } catch {
+      return undefined;
+    }
+  };
+
   /** 执行入口再拦一次：工具若已出现在旧快照里，调用时也不放行。 */
   if (typeof ctx.on === 'function') ctx.on('agent/created', (payload) => {
     const agent = payload?.agent;
     if (!agent?.ctx?.tools) return;
     try {
       agent.ctx.effect(() => agent.ctx.tools.guard((execution) => {
-        if (!MEMORY_TOOLS.includes(execution?.name)) return undefined;
-        return memoryOnForAgent(agent) ? undefined : '本项目记忆已关闭，先在面板打开';
+        if (MEMORY_TOOLS.includes(execution?.name)) {
+          return memoryOnForAgent(agent) ? undefined : '本项目记忆已关闭，先在面板打开';
+        }
+        return npmProbeHint(agent, execution);
       }), 'lite-memory: tool guard');
     } catch { /* older host without guards */ }
     syncMemoryTools(agent);
@@ -2664,6 +2743,7 @@ export function apply(ctx, config) {
         .filter((message) => message?.source?.kind === 'user');
       const fresh = freshHumans(sessionId, humans);
       const previous = prepared.get(agent);
+      if (fresh.length > 0 && previous) flushUsage(previous);
       const sameSession = Boolean(previous && previous.sessionId === sessionId);
       const sessionTask = recallTasks.get(sessionId) || null;
 
@@ -2713,24 +2793,31 @@ export function apply(ctx, config) {
          * 只补一次、共用一个请求额度，补到的卡片追加到已发布快照，超出仍由预算挡。
          */
         const stepMessages = Array.isArray(decision.messages) ? decision.messages : [];
-        const seenAt = Number.isInteger(previous.seenMessages) ? previous.seenMessages : 0;
-        const stepActions = seenAt < stepMessages.length ? stepMessages.slice(seenAt) : [];
+        const seenIds = previous.seenIds instanceof Set ? previous.seenIds : new Set(previous.seenIds || []);
+        const stepActions = stepMessages.filter((message) => {
+          const id = String(message?.id ?? '');
+          return id ? !seenIds.has(id) : false;
+        });
+        previous.seenIds = new Set([...seenIds, ...stepMessages.map((message) => String(message?.id ?? '')).filter(Boolean)].slice(-64));
         previous.seenMessages = stepMessages.length;
+        /** 只读文件、搜索、记忆工具都不算动作；一次请求最多补查一次。 */
         const actionQuery = previous.recalledContext && !previous.actionRetried
+          && view.hasEffectiveAction(stepActions)
           ? view.actionTerms(stepActions, { limit: 10 }).slice(0, 240) : '';
         if (actionQuery) {
           previous.actionRetried = true;
           const win = windowOf(agent);
           if (win && generation === generations.get(agent) && !signal?.aborted) {
-            const retry = projectRecall(scope, `${actionQuery} ${previous.query}`.trim().slice(0, RECALL_QUERY_CHARS), previous.recalledContext, win, previous.runtimeHeld || null);
-            const known = new Set((previous.cards || []).map((card) => card.id));
-            const added = (retry.cards || []).filter((card) => !known.has(card.id));
-            if (added.length) {
-              const addedIds = new Set(added.map((card) => card.id));
-              const extraLines = (retry.lines || []).filter((row, index) => addedIds.has(retry.cards[index] && retry.cards[index].id));
-              previous.cards = [...(previous.cards || []), ...added];
-              previous.lines = [...(previous.lines || []), ...extraLines];
-              previous.text = `${RECALL_HEADER}\n${previous.lines.map((row) => row.line).join('\n')}`;
+            const nextQuery = `${actionQuery} ${previous.query}`.trim().slice(0, RECALL_QUERY_CHARS);
+            const retry = projectRecall(scope, nextQuery, previous.recalledContext, win, previous.runtimeHeld || null);
+            if (retry.cards.length) {
+              /** 补查结果整体替换展示快照；账本与正文来自同一次准入。 */
+              previous.text = retry.text;
+              previous.cards = retry.cards;
+              previous.lines = retry.lines;
+              previous.query = nextQuery;
+              previous.matched = retry.matched || retry.cards.length;
+              if (win) win.query = nextQuery;
             }
           }
         }
@@ -2748,9 +2835,10 @@ export function apply(ctx, config) {
       } : null;
       /** 工具模式也要记下本轮真人原话：只用于核对绑定，不自动注入。 */
       const said = view.newestUserQuery(fresh).slice(0, RECALL_QUERY_CHARS);
+      const continuationHint = view.isContinuationQuery(said) || view.isEllipticalContinuation(said);
       /** 「继续」这类续说没有检索词：带上同会话上一轮原话，否则这一轮必然召回为空。 */
-      const carried = (view.isContinuationQuery(said) || view.isEllipticalContinuation(said))
-        ? (previous?.query || sessionTask?.query || '') : '';
+      const carried = continuationHint
+        ? (sessionTask?.taskQuery || previous?.query || sessionTask?.query || '') : '';
       let query = (carried ? `${said} ${carried}` : said).trim().slice(0, RECALL_QUERY_CHARS);
       if (win && query) win.query = query;
 
@@ -2800,14 +2888,19 @@ export function apply(ctx, config) {
       const rememberedTask = lastTask.get(sessionId) || null;
       const previousTask = (previous && previous.task) || (sessionTask && sessionTask.task) || rememberedTask;
       const previousText = (previous && previous.query) || (sessionTask && sessionTask.query) || '';
+      const previousSaid = (previous && previous.saidOnly) || (sessionTask && sessionTask.saidOnly) || '';
+      const sameQuery = Boolean(previousSaid && said && previousSaid === said);
       const sameTask = Boolean(sameSession || sessionTask || rememberedTask)
         && !view.isExplicitSwitch(said, previousText)
-        && view.sameRecallTask(previousTask, currentTask);
+        && view.sameRecallTask(previousTask, currentTask, { continuation: continuationHint, sameQuery });
       const taskStartMessageId = sameTask && sessionTask && sessionTask.startMessageId
         ? sessionTask.startMessageId : ids[0];
       lastTask.set(sessionId, currentTask);
       recallTasks.set(sessionId, {
         query,
+        saidOnly: said,
+        /** 当前任务的稳定原话：续说只拼这一份，不把上一轮的动作线索越滚越长。 */
+        taskQuery: sameTask ? (sessionTask?.taskQuery || carried || said) : said,
         task: currentTask,
         startMessageId: taskStartMessageId,
         updatedAt: Date.now(),
@@ -2837,12 +2930,16 @@ export function apply(ctx, config) {
         if (win) win.query = query;
       }
       let snapshot = projectRecall(scope, query, recalledContext, win, runtime ? runtime.held : null);
-      /** 并了动作线索仍一张卡都没有，才补一次有界查询；补到了才替换，不拿空结果盖掉原判断。 */
+      /**
+       * 并了动作线索仍一张卡都没有，才补一次有界查询。
+       * 补到就用补查结果整体替换：两批卡片各量一次会绕过 3 条 / 1200 字节的共用额度。
+       */
       if (!snapshot.cards.length && !carried && sameTask && trail && !trailInQuery) {
         const actionQuery = `${trail} ${query}`.trim().slice(0, RECALL_QUERY_CHARS);
         const retry = projectRecall(scope, actionQuery, recalledContext, win, runtime ? runtime.held : null);
         if (retry.cards.length) {
           snapshot = retry;
+          query = actionQuery;
           if (win) win.query = actionQuery;
         }
       }
@@ -2881,12 +2978,10 @@ export function apply(ctx, config) {
         clearPrepared(agent);
         return decision;
       }
-      /** 实验上下文即使本轮零注入也要留着：工具绑定后同一请求还能补上规则。 */
-      if ((!snapshot || !snapshot.cards.length) && !experiment) {
-        rollbackBudget();
-        clearPrepared(agent);
-        return decision;
-      }
+      /**
+       * 零命中也要保留请求状态：这一轮第一步没命中，下一步的动作仍可能触发一次补查。
+       * 展示快照为空即可，不把任务身份和额度窗口一起丢掉。
+       */
       let evolutionEpoch = '';
       try { evolutionEpoch = String(evolutionStatus(scope).epoch || ''); } catch { evolutionEpoch = ''; }
       const state = {
@@ -2900,6 +2995,7 @@ export function apply(ctx, config) {
         task: currentTask,
         scope,
         query,
+        saidOnly: said,
         sessionId,
         turn,
         signal,
@@ -2909,7 +3005,9 @@ export function apply(ctx, config) {
         recalledContext,
         runtimeHeld: runtime && runtime.held ? runtime.held : null,
         seenMessages: Array.isArray(decision.messages) ? decision.messages.length : 0,
+        seenIds: Array.isArray(decision.messages) ? decision.messages.map((message) => String(message?.id ?? '')).filter(Boolean).slice(-64) : [],
         actionRetried: false,
+        deliveredIds: new Set(),
         at: Date.now(),
       };
       prepared.set(agent, state);
@@ -3219,6 +3317,7 @@ export function apply(ctx, config) {
       windowOf: (agent) => windowOf(agent),
       /** 测试专用：CI 冷启动偶尔超过 150ms，逻辑测试不该被耗时上限判失败。 */
       setDeadlineMs: (ms) => { if (Number.isFinite(ms) && ms > 0) recallDeadlineMs = ms; },
+      humanAskedGlobal,
     };
     return () => {
       delete globalThis.__liteMemoryRecall;

@@ -755,18 +755,30 @@ export function isExplicitSwitch(text, previousText = '') {
  * 补查只有在「还是同一个任务」时才成立：任务类型或 episode 变了，上一轮的动作历史属于旧任务，
  * 不能拿它给新任务找记忆。类型缺失时保留补查，由调用方的明确换任务判断兜底。
  */
-export function sameRecallTask(previous, current) {
-  if (!previous || !current) return true;
+export function sameRecallTask(previous, current, options = {}) {
+  if (!previous || !current) return false;
+  const continuation = options.continuation === true;
   const kind = (value) => plain(value && value.kind, 40).trim().toLowerCase();
   const episode = (value) => plain(value && value.episodeId, 120).trim();
+  const previousKind = kind(previous);
+  const currentKind = kind(current);
   /** 两侧都认出了任务类型且不同：明确换任务，上一轮的动作历史不再属于当前请求。 */
-  if (kind(previous) && kind(current) && kind(previous) !== kind(current)) return false;
-  /** 同类型但是另一个 episode：同类任务的新一轮，也不沿用旧任务的动作线索。 */
-  if (kind(previous) && kind(current) && episode(previous) && episode(current)) {
-    return episode(previous) === episode(current);
+  if (previousKind && currentKind && previousKind !== currentKind) return false;
+  const previousEpisode = episode(previous);
+  const currentEpisode = episode(current);
+  if (previousEpisode && currentEpisode) {
+    if (previousEpisode === currentEpisode) return true;
+    /** 同一句追问又出现在下一轮：episode 只是平台切的新轮次，任务没有变。 */
+    if (options.sameQuery === true && !previousKind && !currentKind) return true;
+    /** 真正的续说可能新开 episode：只有明确续说才允许跨 episode 沿用上一任务。 */
+    return continuation && (!previousKind || !currentKind || previousKind === currentKind);
   }
-  /** 认不出类型（或只有一侧有）时保留补查：这正是该机制要救的场景。 */
-  return true;
+  /**
+   * 认不出新任务类型时不能默认沿用旧任务：上一轮的动作线索只属于旧任务。
+   * 只有明确续说、或真人原话与上一轮完全相同（同一条追问的下一步）才接着用。
+   */
+  if (!previousKind && !currentKind && options.sameQuery === true) return true;
+  return continuation;
 }
 
 /**
@@ -782,6 +794,31 @@ function isMemoryNoise(name, text) {
   if (name && MEMORY_TOOL.test(String(name))) return true;
   return Boolean(text && MEMORY_TEXT.test(String(text).trimStart()));
 }
+/** 纯读取不会改变下一步动作：读 README / 搜索 / 记忆工具都不消耗唯一补查。 */
+const PASSIVE_TOOL = /^(?:read|glob|grep|list|view|fetch|web_search|web_fetch|job_output|job_list|todo_write|question|ask|memory(?:[_-].*)?)$/i;
+const EFFECTIVE_COMMAND = /(?:^|[\s;&|])(?:npm|npx|pnpm|yarn|git|gh|docker|kubectl|helm|systemctl|launchctl|make|cargo|go|python|node|curl|ssh|rsync|deploy|publish|install|test|build|migrate|reload)(?:[\s;&|]|$)/i;
+/** 动作侧是否真的发生了一个会改变状态的动作；只有这种动作才允许补查一次。 */
+export function hasEffectiveAction(messages) {
+  if (!Array.isArray(messages)) return false;
+  for (const message of messages) {
+    const content = message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      if (!part || typeof part !== 'object') continue;
+      if (part.type !== 'tool-call' && part.type !== 'tool_call') continue;
+      const name = String(part.name || '');
+      if (isMemoryNoise(name, '')) continue;
+      if (!PASSIVE_TOOL.test(name)) return true;
+      const input = part.input || part.arguments || part.args;
+      if (!input || typeof input !== 'object') continue;
+      for (const value of Object.values(input)) {
+        if (typeof value === 'string' && EFFECTIVE_COMMAND.test(value)) return true;
+      }
+    }
+  }
+  return false;
+}
+
 export function actionTerms(messages, options = {}) {
   if (!Array.isArray(messages)) return '';
   const limit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : 16;
@@ -804,8 +841,12 @@ export function actionTerms(messages, options = {}) {
         if (typeof part.name === 'string') push(part.name);
         const input = part.input || part.arguments || part.args;
         if (input && typeof input === 'object') {
-          for (const value of Object.values(input)) {
-            if (typeof value === 'string' && /[./_-]/.test(value)) {
+          for (const [key, value] of Object.entries(input)) {
+            if (typeof value !== 'string' || value.length > 300) continue;
+            /** 命令参数要按空格切词，否则 `npm whoami` 只剩工具名 bash，动作线索就丢了。 */
+            const commandish = /^(?:command|cmd|script|args?|input|shell)$/i.test(key)
+              || EFFECTIVE_COMMAND.test(value);
+            if (commandish || /[./_-]/.test(value)) {
               for (const piece of value.split(/[^\p{L}\p{N}_.-]+/u)) push(piece);
             }
           }

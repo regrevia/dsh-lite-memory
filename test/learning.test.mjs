@@ -1408,4 +1408,43 @@ test('L10 整理器规则先稳定排序再取 8', () => {
   assert.equal(learning.orderOrganizerRules([], { limit: 3 }).length, 0);
 });
 
+/* 收敛：连续纠正同一主题只留一条现行规则；换栏目不适用；关掉再开还是同一现行版。 */
+test('B30 连续纠正同一规则收敛到一条现行版', () => {
+  const scope = fresh('converge');
+  enable(scope);
+  const firstEpisode = seedEpisode(scope, { sessionId: 'conv1', messageIds: ['cm1'] });
+  const firstStart = begin(scope, firstEpisode);
+  assert.equal(commitNew(scope, firstEpisode, firstStart, NEW_CHANGE).ok, true);
+  const id = ruleRows(scope)[0].id;
+  const bodies = ['开头两句内给结论。', '开头一句内给结论。'];
+  bodies.forEach((body, index) => {
+    const episode = seedEpisode(scope, { sessionId: `conv${index + 2}`, messageIds: [`cm${index + 2}`] });
+    const started = begin(scope, episode);
+    assert.equal(started.ok, true, started.reason);
+    const result = commitExisting(scope, episode, started, id, {
+      target: 'r0', feedbackType: 'spec_change', currentText: body, evidence: ['u0'],
+    });
+    assert.equal(result.ok, true, result.reason);
+  });
+  const rows = ruleRows(scope);
+  assert.equal(rows.length, 1, '同一主题不堆多份现行规则');
+  const current = rows[0];
+  assert.equal(current.id, id);
+  assert.match(current.body, /一句内给结论/);
+  assert.ok((current.versions || []).length <= 2, '旧版有上限');
+  const wrongColumn = view.eligibility(current, {
+    projectId: scope.key,
+    context: { seriesId: '字幕' },
+    task: { taskKind: 'video', seriesId: '字幕' },
+  }, 'auto');
+  assert.equal(wrongColumn.ok, false, '换栏目不适用');
+  store.setMemoryEnabled(scope, false, { operationId: 'conv-close' });
+  assert.equal(ruleRows(scope).length, 1, '关闭不清成果');
+  store.setMemoryEnabled(scope, true, { operationId: 'conv-open' });
+  const reopened = ruleOf(scope, id);
+  assert.equal(reopened.body, current.body);
+  assert.equal(reopened.revision, current.revision);
+  assert.equal(reopened.learning.state, current.learning.state);
+});
+
 console.log(`learning.test.mjs: ${passed} passed`);

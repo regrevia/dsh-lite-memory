@@ -172,7 +172,7 @@ const globalDraft = store.saveEntry(store.scopeOf(projectB), {
   title: 'npm 发布凭据取用与发布后验版',
   summary: 'npm 发布用 account regrevia，发布后轮询 dist-tags 验版',
   body: '发布用 regrevia 身份；发完轮询 dist-tags.latest 判上线。',
-  memoryClass: 'personal_preference',
+  memoryClass: 'personal_preference', scope: 'global', scopeConfirmed: true,
 });
 assert.equal(globalDraft.chosenScope, 'global');
 const near = await exec('memory_save', {

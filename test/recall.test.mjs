@@ -355,8 +355,11 @@ assert.notEqual(bootA.provider.text({ agent: agentB, signal: signalB }), prepare
   const preparedOnly = store.readEntry(scopeUse, only.record.id, { usage: () => false });
   assert.equal(preparedOnly.lastUsed, saved.lastUsed, '准备但没输出时不能改 lastUsed');
   assert.match(runtime.provider.text({ agent, signal: sig }), /交付才算用过的记忆/);
+  const afterProvider = store.readEntry(scopeUse, only.record.id, { usage: () => false });
+  assert.equal(afterProvider.lastUsed, saved.lastUsed, 'provider 输出路径不写使用时间');
+  runtime.handlers.get('agent/turn-stopping').at(-1)({ turn: 'u1', signal: sig });
   const delivered = store.readEntry(scopeUse, only.record.id, { usage: () => false });
-  assert.notEqual(delivered.lastUsed, saved.lastUsed, '真正交付后才记使用');
+  assert.notEqual(delivered.lastUsed, saved.lastUsed, '回合收尾只给真正交付的卡片记使用');
 }
 
 // A12：额度状态与冻结快照分开；清掉快照后重准备不重新分配。
@@ -659,7 +662,11 @@ console.log('recall.test.mjs: ok');
   };
   const second = signal();
   await runtime.preStep({ agent, signal: second, turn: 't2' }, enter(assistantMessage, human('这个怎么弄')));
-  assert.match(runtime.provider.text({ agent, signal: second }), /改完 client\.js 先重载宿主/, '动作侧线索要能召回预防型记忆');
+  const actionText = runtime.provider.text({ agent, signal: second });
+  assert.match(actionText, /改完 client\.js 先重载宿主/, '动作侧线索要能召回预防型记忆');
+  const actionWin = runtime.debug.windowOf(agent);
+  assert.equal(actionWin.autoBudget.totalBytes, Buffer.byteLength(actionText), '最终交付字节与预算账本一致');
+  assert.equal(actionWin.autoBudget.cards, runtime.debug.preparedOf(agent).cards.length, '最终卡片数与预算账本一致');
 }
 
 // A25b：短续句「继续优化收敛」没有自己的检索词，要沿用上一句，不能断在上一轮。
@@ -807,4 +814,164 @@ console.log('recall.test.mjs: ok');
   const second = signal();
   await runtime.preStep({ agent, signal: second, turn: 't2' }, enter(assistantMessage, human('开始写 PostgreSQL 迁移脚本，先建表')));
   assert.equal(runtime.provider.text({ agent, signal: second }), '', '换任务后不补查旧任务的动作线索');
+}
+
+// A27：npm 原生命令在动作发生前拦一次，把凭据用法直接交给模型；同一轮不重复。
+{
+  const cwdNpm = mkdir('npm-guard');
+  const scopeNpm = store.scopeOf(cwdNpm);
+  store.setRecallMode(scopeNpm, 'adaptive', { operationId: 'npm-guard-mode' });
+  assert.ok(store.upsert(global, {
+    title: 'npm 发布一律走 dsh-npm，ENEEDAUTH 不是缺凭据',
+    summary: '发布走 dsh-npm，不要用 npm whoami 判断凭据',
+    body: '本机 npm 凭据在 Keychain，npm whoami 常报 ENEEDAUTH；发布一律用 dsh-npm publish，不要重新登录。',
+    tags: ['npm', 'dsh-npm', '凭据'],
+    applicability: 'all_in_scope',
+  }).record);
+  const guards = [];
+  const agent = makeAgent('agent-npm-guard', cwdNpm);
+  agent.ctx = {
+    tools: { guard: (fn) => { guards.push(fn); return () => {}; } },
+    effect: (fn) => fn(),
+  };
+  const runtime = boot();
+  runtime.handlers.get('agent/created').at(-1)({ agent });
+  assert.equal(guards.length, 1, '每个 agent 装一个执行前守卫');
+  const sig = signal();
+  await runtime.preStep({ agent, signal: sig, turn: 'npm-1' }, enter(human('帮我发布这个包')));
+  const blocked = guards[0]({ name: 'bash', callId: 'call-npm-1', arguments: { command: 'npm whoami' } });
+  assert.match(String(blocked), /npm 发布一律走 dsh-npm/, '动作发生前给已有记忆正文');
+  assert.match(String(blocked), /Keychain/, '给正文而不是只给标题');
+  assert.equal(guards[0]({ name: 'bash', callId: 'call-npm-2', arguments: { command: 'npm publish' } }), undefined, '同一轮只提示一次');
+  assert.ok(scopeNpm.key, '项目层不受影响');
+}
+
+// A28：零命中的同一轮里，关键动作发生后补查一次；补到后不再重复注入。
+{
+  const cwdActionKey = mkdir('action-key');
+  const scopeActionKey = store.scopeOf(cwdActionKey);
+  store.setRecallMode(scopeActionKey, 'adaptive', { operationId: 'action-key-mode' });
+  const agent = makeAgent('agent-action-key', cwdActionKey);
+  const runtime = boot();
+  const first = signal();
+  await runtime.preStep({ agent, signal: first, turn: 'ak1' }, enter(human('这个怎么弄')));
+  assert.equal(runtime.provider.text({ agent, signal: first }), '', '第一步没有线索时不凭空命中');
+  const assistantMessage = {
+    role: 'assistant',
+    id: 'asst-action-key-1',
+    content: [
+      { type: 'text', text: '我先看一下。' },
+      { type: 'tool-call', name: 'bash', input: { command: 'npm whoami' } },
+    ],
+  };
+  const toolResult = { role: 'user', id: 'tool-action-key-1', source: { kind: 'tool' }, content: [{ type: 'text', text: '已完成' }] };
+  const second = signal();
+  await runtime.preStep({ agent, signal: second, turn: 'ak1' }, enter(assistantMessage, toolResult));
+  const text = runtime.provider.text({ agent, signal: second });
+  assert.match(text, /npm 发布一律走 dsh-npm/, '关键动作让凭据记忆在动作后补进来');
+  assert.equal(runtime.debug.preparedOf(agent).actionRetried, true, '一次请求只补查一次');
+  const actionWin = runtime.debug.windowOf(agent);
+  assert.equal(actionWin.autoBudget.totalBytes, Buffer.byteLength(text), '补查后的最终字节与账本一致');
+  assert.equal(actionWin.autoBudget.cards, runtime.debug.preparedOf(agent).cards.length, '补查后的卡片数与账本一致');
+  const third = signal();
+  await runtime.preStep({ agent, signal: third, turn: 'ak1' }, enter({
+    role: 'assistant',
+    id: 'asst-action-key-2',
+    content: [{ type: 'tool-call', name: 'bash', input: { command: 'npm publish' } }],
+  }, { role: 'user', id: 'tool-action-key-2', source: { kind: 'tool' }, content: [{ type: 'text', text: 'ERR' }] }));
+  assert.equal(runtime.provider.text({ agent, signal: third }), text, '同一请求不重复补查，也不花第二份额度');
+}
+
+// A29：没有「换任务」这类明说，但新话题已经可判定为另一件事时，旧动作线索不能跟过来。
+{
+  const cwdFree = mkdir('free-switch');
+  const scopeFree = store.scopeOf(cwdFree);
+  save(scopeFree, {
+    title: '改完 client.js 先重载宿主',
+    tags: ['client.js', '重载'],
+    summary: 'client.js 改动后必须重载宿主，普通刷新覆盖不到',
+  });
+  save(scopeFree, {
+    title: 'PostgreSQL 连接池先查 max_connections',
+    tags: ['PostgreSQL', '连接池'],
+    summary: '连接池调大前先看 max_connections 和实际占用',
+  });
+  const agent = makeAgent('agent-free-switch', cwdFree);
+  const runtime = boot();
+  const first = signal();
+  await runtime.preStep({ agent, signal: first, turn: 'f1' }, enter(human('前端按钮颜色怎么改')));
+  const assistantMessage = {
+    role: 'assistant',
+    id: 'asst-free-1',
+    content: [
+      { type: 'text', text: '我把 client.js 的样式改好了。' },
+      { type: 'tool-call', name: 'write', input: { file_path: '/tmp/free/client.js' } },
+    ],
+  };
+  const second = signal();
+  await runtime.preStep({ agent, signal: second, turn: 'f2' }, enter(assistantMessage, human('PostgreSQL 连接池满了怎么排查')));
+  const text = runtime.provider.text({ agent, signal: second });
+  assert.match(text, /PostgreSQL 连接池/, '新话题命中自己的记忆');
+  assert.doesNotMatch(text, /改完 client\.js 先重载宿主/, '旧任务线索不能进新任务');
+}
+
+// A30：只读文件、memory 工具输出不算「关键动作」，不能提前花掉一次补查机会。
+{
+  const cwdRead = mkdir('read-action');
+  const scopeRead = store.scopeOf(cwdRead);
+  store.setRecallMode(scopeRead, 'adaptive', { operationId: 'read-action-mode' });
+  save(scopeRead, {
+    title: 'npm 发布一律走 dsh-npm，ENEEDAUTH 不是缺凭据',
+    tags: ['npm', 'dsh-npm', '凭据'],
+    summary: '发布走 dsh-npm，不要用 npm whoami 判断凭据',
+    body: '本机 npm 凭据在 Keychain，npm whoami 常报 ENEEDAUTH；发布一律用 dsh-npm publish，不要重新登录。',
+  });
+  const agent = makeAgent('agent-read-action', cwdRead);
+  const runtime = boot();
+  const first = signal();
+  await runtime.preStep({ agent, signal: first, turn: 'ra1' }, enter(human('这个怎么弄')));
+  assert.equal(runtime.provider.text({ agent, signal: first }), '', '第一步没有线索时不凭空命中');
+  const passiveStep = {
+    role: 'assistant',
+    id: 'asst-read-action-1',
+    content: [
+      { type: 'text', text: '先看文档和已有记录。' },
+      { type: 'tool-call', name: 'read', input: { file_path: '/tmp/lite-memory/README.md' } },
+      { type: 'tool-call', name: 'memory_search', input: { query: 'npm 凭据怎么用' } },
+    ],
+  };
+  const readResult = { role: 'user', id: 'tool-read-action-1', source: { kind: 'tool' }, content: [{ type: 'text', text: '# README 一段普通说明' }] };
+  const second = signal();
+  await runtime.preStep({ agent, signal: second, turn: 'ra1' }, enter(passiveStep, readResult));
+  const heldAfterRead = runtime.debug.preparedOf(agent);
+  assert.equal(heldAfterRead?.actionRetried, false, '只读操作不触发补查');
+  assert.equal(runtime.provider.text({ agent, signal: second }), '', '只读操作后仍保持空快照');
+  const activeStep = {
+    role: 'assistant',
+    id: 'asst-read-action-2',
+    content: [{ type: 'tool-call', name: 'bash', input: { command: 'npm whoami' } }],
+  };
+  const activeResult = { role: 'user', id: 'tool-read-action-2', source: { kind: 'tool' }, content: [{ type: 'text', text: '已完成' }] };
+  const third = signal();
+  await runtime.preStep({ agent, signal: third, turn: 'ra1' }, enter(activeStep, activeResult));
+  const text = runtime.provider.text({ agent, signal: third });
+  assert.match(text, /npm 发布一律走 dsh-npm/, '真正关键动作仍能补查一次');
+  assert.equal(runtime.debug.preparedOf(agent).actionRetried, true);
+  const fourth = signal();
+  await runtime.preStep({ agent, signal: fourth, turn: 'ra1' }, enter({
+    role: 'assistant', id: 'asst-read-action-3', content: [{ type: 'tool-call', name: 'bash', input: { command: 'npm publish' } }],
+  }, { role: 'user', id: 'tool-read-action-3', source: { kind: 'tool' }, content: [{ type: 'text', text: 'ERR' }] }));
+  assert.equal(runtime.provider.text({ agent, signal: fourth }), text, '同一请求不重复补查');
+}
+
+// A31：只有真人明确说「存到全局/所有项目」才算跨项目授权，普通「全局变量」不能放行。
+{
+  const runtime = boot();
+  const asked = runtime.debug.humanAskedGlobal;
+  for (const text of ['以后这条存全局', '记到全局记忆里', '所有项目都按这个来', '以后所有项目都这样做']) {
+    assert.equal(asked(text), true, text);
+  }
+  for (const text of ['把全局变量保存一下', '全局搜索这个函数', '这个项目保存一下', '都改完了保存']) {
+    assert.equal(asked(text), false, text);
+  }
 }

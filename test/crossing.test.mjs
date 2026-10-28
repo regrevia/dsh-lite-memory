@@ -44,12 +44,18 @@ const idsOfPrev = (scope) => {
 };
 
 // ── S03 范围路由 ────────────────────────────────────────────────────────────
-await test('S03 个人偏好没有显式范围就进全局层，项目层不落副本', () => {
+await test('S03 个人偏好：模型自动归类留项目层，人明确要全局才落全局', () => {
   const scope = fresh('route-pref');
-  const saved = saveEntry(scope, { title: '回答用中文', summary: '回复语言偏好', body: '中文、简短', memoryClass: 'personal_preference' });
+  const automatic = saveEntry(scope, { title: '回答用中文（自动）', summary: '回复语言偏好', body: '中文、简短（自动）', memoryClass: 'personal_preference' });
+  assert.equal(automatic.chosenScope, 'project', '模型归类只是提案，不能自己跨项目');
+  assert.equal(automatic.reasonCode, 'model_class_project');
+  assert.equal(idsOf(scope).length, 1);
+  const saved = saveEntry(scope, {
+    title: '回答用中文', summary: '回复语言偏好', body: '中文、简短',
+    memoryClass: 'personal_preference', scopeConfirmed: true, resolution: 'distinct',
+  });
   assert.equal(saved.chosenScope, 'global');
   assert.equal(saved.reasonCode, 'class_personal_preference');
-  assert.equal(idsOf(scope).length, 0);
   assert.equal(stateOf(globalScope()).entries.filter((row) => row.current.title === '回答用中文').length, 1);
 });
 
@@ -100,7 +106,7 @@ await test('S03 设备事实没给设备条件就返回 needsScope，不落盘',
 await test('S03 设备事实带条件进全局层且是条件适用', () => {
   const scope = fresh('route-env-ok');
   const saved = saveEntry(scope, {
-    title: '本机 Node', summary: '本机 Node 版本', body: 'v24', memoryClass: 'environment_fact',
+    title: '本机 Node', summary: '本机 Node 版本', body: 'v24', memoryClass: 'environment_fact', scopeConfirmed: true,
     conditions: [{ key: 'machine', value: 'mac-mini' }],
   });
   assert.equal(saved.chosenScope, 'global');

@@ -38,7 +38,7 @@ apply(ctx);
 
 const cwd = path.join(os.tmpdir(), 'lite-memory-bench-project');
 fs.mkdirSync(cwd, { recursive: true });
-const agent = { cwd, session: { id: 'bench-session', header: { cwd } } };
+const agent = { id: 'bench-agent', cwd, session: { id: 'bench-session', header: { cwd } } };
 const exec = (name, args) => defs.get(name).execute(args, { agent });
 const save = (args) => exec('memory_save', args);
 
@@ -63,16 +63,22 @@ for (let i = 0; i < 200; i += 1) {
     resolution: 'distinct',
   });
 }
+/**
+ * 全局层用受信任写入直接种：经 memory_save 的模型提案会被降到项目层，
+ * 这里要测的是两层都在时的召回路径，不是降级路径。
+ */
+const globalScope = store.globalScope();
 for (let i = 0; i < 200; i += 1) {
-  save({
+  const saved = store.saveEntry(globalScope, {
     title: `全局条目 ${i} 交付规范`,
     summary: `全局条目 ${i} 的通用说明`,
     when: `全局场景 ${i}`,
     body: `全局正文 ${i}：交付前清零告警。`,
-    scope: 'global',
     applicability: 'all_in_scope',
+    scopeConfirmed: true,
     resolution: 'distinct',
   });
+  if (!saved || !saved.record) throw new Error(`global seed ${i} failed: ${JSON.stringify(saved).slice(0, 500)}`);
 }
 report.seedMs = Date.now() - started;
 report.entries = {
@@ -108,6 +114,19 @@ report.prepare = {
   avgContextBytes: Math.round(bytes / timings.length),
 };
 
+// Positive scenario: a normal question must actually receive budgeted memory text.
+const positiveSignal = new AbortController().signal;
+await preStep({ agent, signal: positiveSignal, turn: '9000' }, async () => ({
+  kind: 'enter',
+  messages: [{ role: 'user', id: 'bench-positive', source: { kind: 'user' }, content: [{ type: 'text', text: '全局条目 7 的交付规范是什么' }] }],
+}));
+const positiveText = recall.text({ agent, signal: positiveSignal });
+report.positive = {
+  bytes: Buffer.byteLength(positiveText, 'utf8'),
+  hasGlobalCard: /全局条目 7 交付规范/.test(positiveText),
+  underCap: Buffer.byteLength(positiveText, 'utf8') <= 1300,
+};
+
 // File reads per prepare, measured on the same path.
 let reads = 0;
 const original = fs.readFileSync;
@@ -140,6 +159,9 @@ report.afterSequence = {
   files: fs.readdirSync(store.scopeOf(cwd).dir).sort(),
 };
 report.rssEndMB = rss();
-report.ok = project.entries.length <= store.LIMITS.entries + store.LIMITS.hardEntries;
+report.ok = project.entries.length <= store.LIMITS.entries + store.LIMITS.hardEntries
+  && report.entries.project >= 200 && report.entries.global >= 200
+  && report.prepare.avgContextBytes > 0
+  && report.positive.bytes > 0 && report.positive.hasGlobalCard && report.positive.underCap;
 
 console.log(JSON.stringify(report, null, 2));

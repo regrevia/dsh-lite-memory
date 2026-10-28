@@ -2595,16 +2595,16 @@ export function routeScope(draft, options = {}) {
       requiredConditions: [{ key: 'machine', value: '' }, { key: 'runtime', value: '' }],
     };
   };
-  /** 人明确点过「就存全局」才算数；模型自己提的 global 不抵消本机痕迹。 */
+  /** 人明确点过「就存全局」才算数；模型自己提的 scope 只是提案。 */
   const humanConfirmed = options.humanScope === true || source.scopeConfirmed === true;
+  /** 实验/自动整理的产物永远留在项目层：它们没有「用户要求跨项目」这层依据。 */
+  const autoOrigin = source.origin === 'project_evolution' || source.origin === 'model_drafted';
   /** 「本项目里…」是项目事实的措辞，类别写成偏好/流程也不能这样进通用层。 */
   const projectBound = projectBoundText(source);
   if (durability === 'task') return { ...base, needsScope: true, reasonCode: 'task_state' };
-  if (explicit) {
+  if (explicit && (humanConfirmed || !autoOrigin)) {
     /**
-     * 显式 scope 代表「用户这个消息里要的那一层」：这是唯一能让全局层落地的输入，
-     * 所以不能再按模型自荐降级，只有本机痕迹和项目事实两种硬冲突能改落点。
-     * 没显式 scope 时才用 memoryClass 提案，缺可搬依据的流程留在项目层。
+     * 只有人确认过的 scope 才代表「用户这个消息里要的那一层」；模型写进参数的 scope 只是提案。
      */
     if (explicit === 'global' && !humanConfirmed) {
       if (machineConflict) return fallbackToProject('machine_bound_scope');
@@ -2631,21 +2631,28 @@ export function routeScope(draft, options = {}) {
     }
     return { ...base, chosenScope: 'project', reasonCode: 'class_project_fact' };
   }
+  /**
+   * 自动归类只能决定「它像哪类」，不能决定跨项目；默认落点一律是当前项目。
+   * 具体冲突（本机痕迹、「本项目」措辞）仍按原原因报告，其余全局结论统一降级。
+   */
+  const globalOutcome = (reasonCode) => (humanConfirmed
+    ? { ...base, chosenScope: 'global', reasonCode }
+    : fallbackToProject('model_class_project'));
   if (cls === 'personal_preference') {
     /** 偏好也分「我的习惯」和「这台机器上的习惯」：后者绑机器，不进通用层。 */
     if (machineConflict) return fallbackToProject('machine_bound_preference');
     /** 说了「本项目」的偏好其实是项目约定，类别写错也不能跨项目。 */
     if (projectBound) return fallbackToProject('project_bound_preference');
-    return { ...base, chosenScope: 'global', reasonCode: 'class_personal_preference' };
+    return globalOutcome('class_personal_preference');
   }
   if (cls === 'portable_procedure') {
     if (machineConflict) return fallbackToProject('machine_bound_procedure');
     if (projectBound) return fallbackToProject('project_bound_procedure');
     /** 带适用环境条件的本机流程：条件成立时才用，换台机器自然不生效。 */
-    if (envScoped) return { ...base, chosenScope: 'global', reasonCode: 'machine_scoped_procedure' };
+    if (envScoped) return globalOutcome('machine_scoped_procedure');
     /** 说能搬去别的项目，就要有能搬的依据；没有就先留在本项目。 */
     if (!evidence) return fallbackToProject('unbound_evidence');
-    return { ...base, chosenScope: 'global', reasonCode: 'class_portable_procedure' };
+    return globalOutcome('class_portable_procedure');
   }
   if (projectBound) return fallbackToProject('project_bound_environment');
   const conditions = view.normalizeConditions(source.conditions) || [];
@@ -2658,7 +2665,7 @@ export function routeScope(draft, options = {}) {
       requiredConditions: [{ key: 'machine', value: '' }, { key: 'runtime', value: '' }],
     };
   }
-  return { ...base, chosenScope: 'global', reasonCode: 'class_environment_fact' };
+  return globalOutcome('class_environment_fact');
 }
 
 function locateInLayers(projectScope, id) {

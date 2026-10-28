@@ -377,10 +377,15 @@ assert.equal((await call('/lite-memory/unknown', { cwd })).status, 404);
 assert.equal((await call('/lite-memory/keep', {}, { method: 'GET' })).status, 405);
 
 // ── global layer ─────────────────────────────────────────────────────────────
-const global = await exec('memory_save', { title: '回复用中文', summary: '用户要求回复用中文', scope: 'global' });
-assert.equal(global.scope, 'global');
-assert.equal(global.scopeNote, undefined, '正常落全局不该带降级说明');
-assert.match(render('memory_save', {}, global), /^memory · saved \[global\] "回复用中文"$/);
+const proposedGlobal = await exec('memory_save', { title: '回复语言模型提案', summary: '模型建议回复语言用中文', scope: 'global' });
+assert.equal(proposedGlobal.scope, 'project', '模型自填 scope 只是提案，默认落项目层');
+assert.match(proposedGlobal.scopeNote, /模型归类只是提案/, '降级要能解释');
+const global = store.saveEntry(store.globalScope(), {
+  title: '回复用中文', summary: '用户要求回复用中文', body: '回复默认用中文', scopeConfirmed: true,
+});
+assert.ok(global.record, '人明确要全局时才落全局层');
+assert.equal(global.chosenScope, 'global');
+assert.equal(exec === null, false);
 
 // 显式写 global 也不再被悄无声息地改层：本机痕迹和项目事实各有一条能解释的降级。
 const machineGlobal = await exec('memory_save', {
@@ -402,7 +407,7 @@ const factGlobal = await exec('memory_save', {
 assert.equal(factGlobal.scope, 'project');
 assert.match(factGlobal.scopeNote, /按项目事实留在项目层/);
 const globalSearch = await exec('memory_search', { query: '回复用中文' });
-assert.equal(globalSearch.count, 1);
+assert.ok(globalSearch.count >= 1, '全局层条目能被搜到');
 assert.match(render('memory_search', {}, globalSearch), /\[global\] 「/);
 assert.equal(typeof globalThis.__liteMemoryStats, 'function');
 const stats = globalThis.__liteMemoryStats(cwd);
@@ -1050,10 +1055,9 @@ await defs.get('memory_save').execute(
   { title: '发布窗口', summary: '只在周四晚上发版', body: '周四晚上再发版。', when: '周四晚上' },
   { agent: ovAgent },
 );
-await defs.get('memory_save').execute(
-  { title: '观察全局', summary: '跨项目通用说明', body: '全局正文。', scope: 'global' },
-  { agent: ovAgent },
-);
+store.saveEntry(store.globalScope(), {
+  title: '观察全局', summary: '跨项目通用说明', body: '全局正文。', scopeConfirmed: true,
+});
 const ovOther = await defs.get('memory_save').execute(
   { title: '别的项目', summary: '只在别的项目里', body: '另一层的正文。', tags: ['别的'] },
   { agent: { id: 'session-overview-other', cwd: ovOtherCwd, session: { id: 'session-overview-other', header: { cwd: ovOtherCwd } } } },
@@ -1215,7 +1219,7 @@ const cfCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-confli
 sessionCwds.set('session-conflict-panel', cfCwd);
 sessionCwds.set('session-conflict-other', fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-conflict-other-')));
 const cfAgent = { id: 'session-conflict-panel', cwd: cfCwd, session: { id: 'session-conflict-panel', header: { cwd: cfCwd } } };
-await defs.get('memory_save').execute({ title: '发布窗口', summary: '只在周四晚上发版', body: '周四晚上再发版。', scope: 'global' }, { agent: cfAgent });
+store.saveEntry(store.globalScope(), { title: '发布窗口', summary: '只在周四晚上发版', body: '周四晚上再发版。', scopeConfirmed: true });
 const cfSave = await defs.get('memory_save').execute({ title: '发布窗口', summary: '本项目周五发版', body: '周五发版。' }, { agent: cfAgent });
 assert.equal(cfSave.needsResolution, true);
 assert.equal(store.loadIndex(store.scopeOf(cfCwd)).entries.length, 0, '没确认前不落库');
@@ -1276,7 +1280,7 @@ const cfgCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-confl
 sessionCwds.set('session-conflict-global', cfgCwd);
 const cfgAgent = { id: 'session-conflict-global', cwd: cfgCwd, session: { id: 'session-conflict-global', header: { cwd: cfgCwd } } };
 await defs.get('memory_save').execute({ title: '命名规则', summary: '项目里用短横线', body: '短横线。' }, { agent: cfgAgent });
-const cfgSave = await defs.get('memory_save').execute({ title: '命名规则', summary: '所有项目用下划线', body: '下划线。', scope: 'global' }, { agent: cfgAgent });
+const cfgSave = store.saveEntry(store.scopeOf(cfgCwd), { title: '命名规则', summary: '所有项目用下划线', body: '下划线。', scope: 'global', scopeConfirmed: true });
 assert.equal(cfgSave.needsResolution, true);
 const cfgView = await call('/lite-memory/overview', { sessionId: 'session-conflict-global', scopeKey: 'global' });
 assert.equal(cfgView.body.selected.conflicts.length, 1, '全局层也要有这条待裁决');

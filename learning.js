@@ -618,10 +618,6 @@ export function validateChange(change, { refs, rules, ranges, expectedTarget } =
     if (!Array.isArray(change.conditions)) return { ok: false, reason: '条件不是列表' };
     conditions = normalizeConditions(change.conditions);
     if (conditions.length !== change.conditions.length) return { ok: false, reason: '条件里有不认的键或空值' };
-    for (const condition of conditions) {
-      const allowed = conditionValueAllowed(condition, { ranges, existing });
-      if (!allowed) return { ok: false, reason: '条件值不在本项目的栏目或阶段里' };
-    }
   }
   /** 收集时固定的作用域只能沿用或收窄：整理器不能把待确认候选抬成全项目规则。 */
   const expected = expectedTarget && typeof expectedTarget === 'object' ? expectedTarget : null;
@@ -668,6 +664,17 @@ export function validateChange(change, { refs, rules, ranges, expectedTarget } =
   for (const row of effectiveConditions) {
     if (conditionKeys.has(row.key)) return { ok: false, reason: '同一条件键给了两个值' };
     conditionKeys.add(row.key);
+  }
+  /**
+   * 统一校验最终条件：收集阶段带进来的 taskKind/seriesId 是可信范围，历史范围里没有也允许；
+   * 模型新提的条件仍必须落在本项目已有栏目或阶段里。
+   */
+  for (const condition of effectiveConditions) {
+    const fromCollected = expectedConditions.some((row) => row.key === condition.key && row.value === condition.value);
+    if (fromCollected) continue;
+    if (!conditionValueAllowed(condition, { ranges, existing })) {
+      return { ok: false, reason: '条件值不在本项目的栏目或阶段里' };
+    }
   }
   if (applicability === 'all_in_scope' && effectiveConditions.length) {
     return { ok: false, reason: '全项目规则不能带条件' };

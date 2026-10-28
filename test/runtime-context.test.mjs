@@ -166,6 +166,10 @@ const seedRule = (scope, { title, body, summary, conditions = [], learning = { s
   assert.ok(auto.experimentBytes <= 1200, 'experiment bytes over cap');
   assert.ok(auto.cardBytes <= 1200);
   assert.ok(Buffer.byteLength(text) <= 1300, 'rendered text exceeds budget');
+  assert.equal(auto.totalBytes, Buffer.byteLength(text), '最终交付字节与预算账本一致');
+  const held = runtime.debug.preparedOf(agent);
+  assert.equal(auto.cards, (auto.normalCards || 0) + (auto.experimentCards || 0), '卡片账本内部一致');
+  assert.equal(auto.normalCards || 0, (held?.cards || []).length, '普通卡片数与预算账本一致');
   const heads = new Set(text.split('\n').filter((line) => /口播(节奏规范|实验规则)/.test(line)).map((line) => line.trim()));
   assert.ok(heads.size <= 3, `too many cards: ${heads.size}`);
 }
