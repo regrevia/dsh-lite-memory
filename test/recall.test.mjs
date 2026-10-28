@@ -94,7 +94,10 @@ const patchState = (scope, id, patch) => {
   const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
   const entry = raw.payload.entries.find((row) => row.id === id);
   assert.ok(entry, `state 里没有 ${id}`);
-  Object.assign(entry, patch);
+  for (const [key, value] of Object.entries(patch)) {
+    entry[key] = value && typeof value === 'object' && !Array.isArray(value)
+      ? { ...(entry[key] || {}), ...value } : value;
+  }
   raw.checksum = `sha256:${crypto.createHash('sha256').update(JSON.stringify(raw.payload)).digest('hex')}`;
   fs.writeFileSync(file, `${JSON.stringify(raw, null, 2)}\n`);
 };
@@ -337,6 +340,25 @@ assert.notEqual(bootA.provider.text({ agent: agentB, signal: signalB }), prepare
   assert.equal(bootA.debug.windowOf(agentReads).reads, 8);
 }
 
+// A11b：准备阶段不算使用；只有真正交付给模型的卡片才更新 lastUsed。
+{
+  const cwdUse = mkdir('delivered');
+  const scopeUse = store.scopeOf(cwdUse);
+  const only = save(scopeUse, { title: '交付才算用过的记忆', tags: ['交付测试'], summary: '只看不交付不该改变使用时间' });
+  const agent = makeAgent('agent-delivered', cwdUse);
+  const runtime = boot();
+  const sig = signal();
+  patchState(scopeUse, only.record.id, { maintenance: { lastUsed: '2020-01-01T00:00:00.000Z' } });
+  const saved = store.readEntry(scopeUse, only.record.id, { usage: () => false });
+  assert.equal(saved.lastUsed, '2020-01-01T00:00:00.000Z', 'patch 生效');
+  await runtime.preStep({ agent, signal: sig, turn: 'u1' }, enter(human('交付测试怎么做')));
+  const preparedOnly = store.readEntry(scopeUse, only.record.id, { usage: () => false });
+  assert.equal(preparedOnly.lastUsed, saved.lastUsed, '准备但没输出时不能改 lastUsed');
+  assert.match(runtime.provider.text({ agent, signal: sig }), /交付才算用过的记忆/);
+  const delivered = store.readEntry(scopeUse, only.record.id, { usage: () => false });
+  assert.notEqual(delivered.lastUsed, saved.lastUsed, '真正交付后才记使用');
+}
+
 // A12：额度状态与冻结快照分开；清掉快照后重准备不重新分配。
 {
   const agent = makeAgent('agent-preserve', cwdA);
@@ -351,6 +373,58 @@ assert.notEqual(bootA.provider.text({ agent: agentB, signal: signalB }), prepare
   await bootA.preStep({ agent, signal: sig, turn: 't2' }, enter(human('插件改完怎么让它生效？再确认一下')));
   assert.ok(bootA.provider.text({ agent, signal: sig }).startsWith(HEADER));
   assert.equal(win.bytes, used, 'same window does not re-allocate for already provided cards');
+}
+
+// A13b：轮次收尾清的是投影，不是任务；下一句「继续」仍要接上上一轮的原话。
+{
+  const agent = makeAgent('agent-after-turn', cwdA);
+  const first = signal();
+  await bootA.preStep({ agent, signal: first, turn: 'n1' }, enter(human('插件改完怎么让它生效？')));
+  assert.ok(bootA.provider.text({ agent, signal: first }));
+  bootA.handlers.get('agent/turn-stopping').at(-1)({ turn: 'n1', signal: first });
+  assert.equal(bootA.provider.text({ agent, signal: first }), '');
+  const second = signal();
+  await bootA.preStep({ agent, signal: second, turn: 'n2' }, enter(human('继续')));
+  assert.match(bootA.provider.text({ agent, signal: second }), /插件改完先试热刷新/, '收尾后「继续」仍属原任务');
+}
+
+// A13c：新任务零召回也照样记下新查询；再说「继续」不能把旧任务的记忆带回来。
+{
+  const agent = makeAgent('agent-zero-task', cwdA);
+  const first = signal();
+  await bootA.preStep({ agent, signal: first, turn: 'z1' }, enter(human('插件改完怎么让它生效？')));
+  bootA.handlers.get('agent/turn-stopping').at(-1)({ turn: 'z1', signal: first });
+  const second = signal();
+  await bootA.preStep({ agent, signal: second, turn: 'z2' }, enter(human('帮我算一下 17 乘以 23 等于多少')));
+  bootA.handlers.get('agent/turn-stopping').at(-1)({ turn: 'z2', signal: second });
+  const third = signal();
+  await bootA.preStep({ agent, signal: third, turn: 'z3' }, enter(human('继续')));
+  assert.doesNotMatch(bootA.provider.text({ agent, signal: third }), /插件改完先试热刷新/, '零召回的新任务不能被旧任务续上');
+}
+
+// A13d：工具续步没有新的真人原话，刚执行的动作可以换来一次有界补查。
+{
+  const cwdStep = mkdir('tool-step');
+  const scopeStep = store.scopeOf(cwdStep);
+  save(scopeStep, { title: '记忆插件先看状态再改', tags: ['记忆插件', '排查'], summary: '先看状态文件再动代码' });
+  save(scopeStep, { title: '改完 client.js 先重载宿主', tags: ['client.js', '重载'], summary: '普通刷新覆盖不到 client.js' });
+  const agent = makeAgent('agent-tool-step', cwdStep);
+  const runtime = boot();
+  const said = human('记忆插件怎么排查');
+  const first = signal();
+  await runtime.preStep({ agent, signal: first, turn: 's1' }, enter(said));
+  assert.match(runtime.provider.text({ agent, signal: first }), /记忆插件先看状态再改/);
+  const toolStep = {
+    role: 'assistant',
+    id: 'asst-tool-step',
+    content: [
+      { type: 'text', text: '我把改动写进文件了。' },
+      { type: 'tool-call', name: 'write', input: { file_path: '/tmp/step/client.js' } },
+    ],
+  };
+  const second = signal();
+  await runtime.preStep({ agent, signal: second, turn: 's1' }, enter(said, toolStep));
+  assert.match(runtime.provider.text({ agent, signal: second }), /改完 client\.js 先重载宿主/, '工具动作后补查一次');
 }
 
 // A14：上一轮注入过的文字不会被当成这一轮的来源；只有合成消息的新 turn 不继承。

@@ -2738,7 +2738,7 @@ function bindSameTopic(projectScope, ref) {
 const CONFLICT_LIMIT = 20;
 
 /** 待办里留一份可重放的草稿：面板能直接另存，不用用户回忆刚才想记什么。 */
-const CONFLICT_DRAFT_KEYS = ['title', 'summary', 'body', 'when', 'kind', 'tags', 'conditions', 'applicability', 'topicKey', 'source', 'origin'];
+const CONFLICT_DRAFT_KEYS = ['title', 'summary', 'body', 'when', 'kind', 'tags', 'conditions', 'applicability', 'selection', 'triggers', 'links', 'topicKey', 'source', 'origin'];
 function conflictDraftOf(draft) {
   const out = {};
   if (!draft || typeof draft !== 'object') return out;
@@ -2754,6 +2754,10 @@ function conflictDraftOf(draft) {
     else if (key === 'conditions') out.conditions = Array.isArray(value) ? value.slice(0, 8) : undefined;
     else if (key === 'applicability') out.applicability = value;
     else if (key === 'topicKey') out.topicKey = normalizeText(value, 80);
+    /** 适用范围、召回触发词与关联整份重放：经过待裁决不能改变语义。 */
+    else if (key === 'selection') out.selection = value && typeof value === 'object' && !Array.isArray(value) ? { ...value } : null;
+    else if (key === 'triggers') out.triggers = Array.isArray(value) ? value.slice(0, 8).map((item) => normalizeText(item, 40)).filter(Boolean) : [];
+    else if (key === 'links') out.links = Array.isArray(value) ? value.slice(0, 3).map((item) => (item && typeof item === 'object' ? { ...item } : null)).filter(Boolean) : [];
     else if (key === 'source') out.source = value;
     else if (key === 'origin') out.origin = value;
   }
@@ -2821,30 +2825,35 @@ function staleDraft(row, ref) {
 
 /** 确认另存：用队列里的草稿按 distinct 重放一次，成功后按 id 出队。 */
 export function resolveConflict(scope, ref, options = {}) {
-  const row = conflictRowLocked(scope, ref);
-  if (!row) return { ok: false, reason: '这条待裁决已经不在了，刷新面板看看' };
-  if (staleDraft(row, ref)) return { ok: false, reasonCode: 'stale_draft', reason: '这条待裁决又更新了，刷新后再处理' };
-  const draft = { ...(row.draft || {}), resolution: 'distinct', writeMode: options.writeMode === 'append' ? 'append' : 'patch' };
-  if (scope.key === 'global') draft.scope = 'global';
-  else draft.scope = 'project';
-  if (!draft.title) draft.title = row.title;
-  const result = saveEntry(scope, draft);
-  if (result && result.needsResolution) return { ok: false, reason: '还是相近：换一个标题或等确认', result };
-  if (result && result.needsScope) {
-    const reason = result.reasonCode === 'memory_disabled' ? '这层记忆已关闭' : '这条记忆的适用范围还没定，先说明当前环境';
-    return { ok: false, reason, result };
-  }
-  clearConflictLocked(scope, { id: row.id });
-  return { ok: true, result, record: result && result.record };
+  /** 版本检查、另存和出队必须在同一临界区：中间被新反馈改写时，旧面板不能批准新草稿。 */
+  return withLocks([scope, globalScope()], () => {
+    const row = conflictRowLocked(scope, ref);
+    if (!row) return { ok: false, reason: '这条待裁决已经不在了，刷新面板看看' };
+    if (staleDraft(row, ref)) return { ok: false, reasonCode: 'stale_draft', reason: '这条待裁决又更新了，刷新后再处理' };
+    const draft = { ...(row.draft || {}), resolution: 'distinct', writeMode: options.writeMode === 'append' ? 'append' : 'patch' };
+    if (scope.key === 'global') draft.scope = 'global';
+    else draft.scope = 'project';
+    if (!draft.title) draft.title = row.title;
+    const result = saveEntry(scope, draft);
+    if (result && result.needsResolution) return { ok: false, reason: '还是相近：换一个标题或等确认', result };
+    if (result && result.needsScope) {
+      const reason = result.reasonCode === 'memory_disabled' ? '这层记忆已关闭' : '这条记忆的适用范围还没定，先说明当前环境';
+      return { ok: false, reason, result };
+    }
+    clearConflictLocked(scope, { id: row.id });
+    return { ok: true, result, record: result && result.record };
+  });
 }
 
 /** 删掉待裁决：用户决定不再另存。 */
 export function dropConflict(scope, ref) {
-  const row = conflictRowLocked(scope, ref);
-  if (!row) return { ok: false, reason: '这条待裁决已经不在了，刷新面板看看' };
-  if (staleDraft(row, ref)) return { ok: false, reasonCode: 'stale_draft', reason: '这条待裁决又更新了，刷新后再处理' };
-  clearConflictLocked(scope, { id: row.id });
-  return { ok: true };
+  return withLocks([scope, globalScope()], () => {
+    const row = conflictRowLocked(scope, ref);
+    if (!row) return { ok: false, reason: '这条待裁决已经不在了，刷新面板看看' };
+    if (staleDraft(row, ref)) return { ok: false, reasonCode: 'stale_draft', reason: '这条待裁决又更新了，刷新后再处理' };
+    clearConflictLocked(scope, { id: row.id });
+    return { ok: true };
+  });
 }
 
 /** 当前层还有几条没处理的冲突。 */

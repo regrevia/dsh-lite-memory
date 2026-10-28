@@ -1157,6 +1157,8 @@ export function apply(ctx, config) {
   const prepared = new WeakMap();
   /** 最近一次请求的任务身份：本轮没注入任何内容时 prepared 会清掉，补查仍需要知道上一轮任务。 */
   const lastTask = new Map();
+  /** 任务本身也要独立于 prepared：轮次收尾只清投影，不把「刚才在做什么」一起清掉。 */
+  const recallTasks = new Map();
   /** turn-stopping 只回 signal，不带头 agent；这里记 signal → agent 供收尾清理。 */
   const signalAgents = new Map();
   const generations = new WeakMap();
@@ -1299,6 +1301,8 @@ export function apply(ctx, config) {
       try { index = loadIndex(source); } catch { continue; }
       for (const item of index.entries) {
         if (!item || !item.title || item.status === 'archived') continue;
+        /** 生命周期先于主题裁决：过期/被取代的条目不再参与分组，不能把现行条目标成冲突。 */
+        if (view.lifecycleStatusOf(item)) continue;
         /** 实验来源只走任务绑定后的专用读取，不混进普通自动召回。 */
         if (item.origin === 'project_evolution') continue;
         if (seen.has(item.id)) continue;
@@ -1359,7 +1363,7 @@ export function apply(ctx, config) {
       lines.push(line);
       cards.push({ id: card.id, revision, scope: card.scope, title: card.title });
       /** 卡片行与到期时间一起留到最后输出：中间隔了系统提示组装，不能拿投影时的判断当现在。 */
-      linesMeta.push({ line, validUntil: row.record.validUntil || '' });
+      linesMeta.push({ id: card.id, line, validUntil: row.record.validUntil || '' });
     }
     const finalText = `${RECALL_HEADER}\n${lines.join('\n')}`;
     if (auto) {
@@ -1916,6 +1920,8 @@ export function apply(ctx, config) {
         const now = Date.now();
         const live = state.lines.filter((row) => !row.validUntil || now <= Date.parse(String(row.validUntil)));
         normalText = live.length ? `${RECALL_HEADER}\n${live.map((row) => row.line).join('\n')}` : '';
+        /** 真正交付的卡片才记使用：到期被撤下的、准备后被丢弃的都不算。 */
+        if (live.length && state.scope) markUsed(state.scope, live.map((row) => row.id).filter(Boolean));
         /** 投影时还在、发出时已过期：回执跟着真实输出改，别在面板上说「提醒了 2 条」而正文是空的。 */
         if (state.scope && live.length !== state.cards.length) {
           noteRecall(state.scope, state.sessionId, {
@@ -2659,6 +2665,7 @@ export function apply(ctx, config) {
       const fresh = freshHumans(sessionId, humans);
       const previous = prepared.get(agent);
       const sameSession = Boolean(previous && previous.sessionId === sessionId);
+      const sessionTask = recallTasks.get(sessionId) || null;
 
       if (fresh.length === 0) {
         /** 工具续步：内容冻结，只把快照绑到本步的 signal；盘上版本变了才重投影。 */
@@ -2701,6 +2708,32 @@ export function apply(ctx, config) {
             }
           }
         }
+        /**
+         * 工具续步里没有新的真人原话，但刚执行的动作本身就是线索。
+         * 只补一次、共用一个请求额度，补到的卡片追加到已发布快照，超出仍由预算挡。
+         */
+        const stepMessages = Array.isArray(decision.messages) ? decision.messages : [];
+        const seenAt = Number.isInteger(previous.seenMessages) ? previous.seenMessages : 0;
+        const stepActions = seenAt < stepMessages.length ? stepMessages.slice(seenAt) : [];
+        previous.seenMessages = stepMessages.length;
+        const actionQuery = previous.recalledContext && !previous.actionRetried
+          ? view.actionTerms(stepActions, { limit: 10 }).slice(0, 240) : '';
+        if (actionQuery) {
+          previous.actionRetried = true;
+          const win = windowOf(agent);
+          if (win && generation === generations.get(agent) && !signal?.aborted) {
+            const retry = projectRecall(scope, `${actionQuery} ${previous.query}`.trim().slice(0, RECALL_QUERY_CHARS), previous.recalledContext, win, previous.runtimeHeld || null);
+            const known = new Set((previous.cards || []).map((card) => card.id));
+            const added = (retry.cards || []).filter((card) => !known.has(card.id));
+            if (added.length) {
+              const addedIds = new Set(added.map((card) => card.id));
+              const extraLines = (retry.lines || []).filter((row, index) => addedIds.has(retry.cards[index] && retry.cards[index].id));
+              previous.cards = [...(previous.cards || []), ...added];
+              previous.lines = [...(previous.lines || []), ...extraLines];
+              previous.text = `${RECALL_HEADER}\n${previous.lines.map((row) => row.line).join('\n')}`;
+            }
+          }
+        }
         return decision;
       }
 
@@ -2716,9 +2749,8 @@ export function apply(ctx, config) {
       /** 工具模式也要记下本轮真人原话：只用于核对绑定，不自动注入。 */
       const said = view.newestUserQuery(fresh).slice(0, RECALL_QUERY_CHARS);
       /** 「继续」这类续说没有检索词：带上同会话上一轮原话，否则这一轮必然召回为空。 */
-      const carried = sameSession && previous?.query
-        && (view.isContinuationQuery(said) || view.isEllipticalContinuation(said))
-        ? previous.query : '';
+      const carried = (view.isContinuationQuery(said) || view.isEllipticalContinuation(said))
+        ? (previous?.query || sessionTask?.query || '') : '';
       let query = (carried ? `${said} ${carried}` : said).trim().slice(0, RECALL_QUERY_CHARS);
       if (win && query) win.query = query;
 
@@ -2766,12 +2798,22 @@ export function apply(ctx, config) {
         episodeId: (runtime && runtime.held && runtime.held.episodeId) || '',
       };
       const rememberedTask = lastTask.get(sessionId) || null;
-      const previousTask = previous && previous.task ? previous.task : rememberedTask;
-      const sameTask = Boolean(sameSession || rememberedTask)
-        && !view.isExplicitSwitch(said, previous && previous.query ? previous.query : '')
+      const previousTask = (previous && previous.task) || (sessionTask && sessionTask.task) || rememberedTask;
+      const previousText = (previous && previous.query) || (sessionTask && sessionTask.query) || '';
+      const sameTask = Boolean(sameSession || sessionTask || rememberedTask)
+        && !view.isExplicitSwitch(said, previousText)
         && view.sameRecallTask(previousTask, currentTask);
+      const taskStartMessageId = sameTask && sessionTask && sessionTask.startMessageId
+        ? sessionTask.startMessageId : ids[0];
       lastTask.set(sessionId, currentTask);
+      recallTasks.set(sessionId, {
+        query,
+        task: currentTask,
+        startMessageId: taskStartMessageId,
+        updatedAt: Date.now(),
+      });
       while (lastTask.size > 64) lastTask.delete(lastTask.keys().next().value);
+      while (recallTasks.size > 64) recallTasks.delete(recallTasks.keys().next().value);
       /**
        * 预防型记忆约束的是「下一步动作」，词面常写在上一轮助手的话和工具调用里，用户这句话反而没提。
        * 续句或没有具体动作的短问句，直接把最近的动作线索并进同一份查询：只查一次，不额外占预算。
@@ -2784,7 +2826,11 @@ export function apply(ctx, config) {
         }
         return messages;
       })();
-      const trail = sameTask ? view.actionTerms(humanTail, { limit: 12 }).slice(0, 240) : '';
+      /** 只拿当前任务开始之后的消息，旧任务的工具痕迹不能混进新任务。 */
+      const taskStart = taskStartMessageId
+        ? decision.messages.findIndex((message) => String(message?.id ?? '') === taskStartMessageId) : -1;
+      const tailMessages = sameTask && taskStart >= 0 ? decision.messages.slice(taskStart + 1) : humanTail;
+      const trail = sameTask ? view.actionTerms(tailMessages, { limit: 12 }).slice(0, 240) : '';
       const trailInQuery = Boolean(trail) && (Boolean(carried) || !view.hasConcreteAction(said));
       if (trailInQuery) {
         query = `${query} ${trail}`.trim().slice(0, RECALL_QUERY_CHARS);
@@ -2860,10 +2906,14 @@ export function apply(ctx, config) {
         fingerprint,
         controlEpoch,
         evolutionEpoch,
+        recalledContext,
+        runtimeHeld: runtime && runtime.held ? runtime.held : null,
+        seenMessages: Array.isArray(decision.messages) ? decision.messages.length : 0,
+        actionRetried: false,
         at: Date.now(),
       };
       prepared.set(agent, state);
-      if (snapshot && snapshot.ids && snapshot.ids.length) markUsed(scope, snapshot.ids);
+      /** 真正输出给模型时才算使用；准备阶段被丢弃/中止的快照不能改 lastUsed。 */
       payloadBytes.set(sessionId, win.bytes);
       while (payloadBytes.size > 64) payloadBytes.delete(payloadBytes.keys().next().value);
       if (signal) signalAgents.set(signal, agent);
@@ -3125,7 +3175,7 @@ export function apply(ctx, config) {
     clearPrepared(agent);
     windows.delete(agentKey(agent));
     const sessionId = String(agent?.session?.id ?? '');
-    if (sessionId) seenHumans.delete(sessionId);
+    if (sessionId) { seenHumans.delete(sessionId); recallTasks.delete(sessionId); }
   });
 
   /**

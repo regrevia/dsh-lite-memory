@@ -370,9 +370,11 @@ export function pendingChangeFrom(feedback = {}) {
    */
   const expected = feedback.expectedTarget && typeof feedback.expectedTarget === 'object' ? feedback.expectedTarget : null;
   const taskKind = String(feedback.cue?.taskKind || expected?.taskKind || '').trim();
-  const expectedConditions = ['taskKind', 'seriesId', 'phase']
+  /** 采集阶段是「在哪儿学到」的证据，不是长期适用范围：只把任务身份与系列带进条件。 */
+  const collectedConditions = ['taskKind', 'seriesId']
     .filter((key) => String(expected?.[key] || '').trim())
     .map((key) => ({ key, value: String(expected[key]).trim() }));
+  const expectedConditions = collectedConditions;
   /**
    * 兜底不重新推导作用域：候选收集时已经固定 expectedTarget 就照抄（只能沿用或收窄），
    * 没有 expectedTarget 的旧调用才退回原句判断。
@@ -623,18 +625,29 @@ export function validateChange(change, { refs, rules, ranges, expectedTarget } =
   }
   /** 收集时固定的作用域只能沿用或收窄：整理器不能把待确认候选抬成全项目规则。 */
   const expected = expectedTarget && typeof expectedTarget === 'object' ? expectedTarget : null;
-  const expectedConditions = ['taskKind', 'seriesId', 'phase']
+  /** 采集阶段是「在哪儿学到」的证据，不是长期适用范围：只把任务身份与系列带进条件。 */
+  const collectedConditions = ['taskKind', 'seriesId']
     .filter((key) => String(expected?.[key] || '').trim())
     .map((key) => ({ key, value: String(expected[key]).trim() }));
+  const expectedConditions = collectedConditions;
   /** 作品里学到的规范必须带上当时的任务范围：模型想写成全项目时收窄成条件规则，而不是丢掉这条反馈。 */
   const narrowToEpisode = target === 'new' && expected?.scope === 'episode' && expectedConditions.length > 0;
   if (narrowToEpisode) {
     if (applicability === undefined || applicability === 'all_in_scope') applicability = 'conditional';
     const merged = conditions !== undefined ? [...conditions] : [];
     for (const row of expectedConditions) {
-      if (merged.some((item) => item.key === row.key && item.value === row.value)) continue;
-      if (!conditionValueAllowed(row, { ranges, existing })) return { ok: false, reason: '收集时的任务范围不在本项目里' };
+      const sameKey = merged.find((item) => item.key === row.key);
+      if (sameKey) {
+        if (sameKey.value !== row.value) return { ok: false, reason: '条件与收集时的任务范围冲突' };
+        continue;
+      }
+      /** 采集条件来自已绑定的真实任务，不要求它先出现在历史规则里；模型新提的条件仍走范围校验。 */
       merged.push(row);
+    }
+    const keys = new Set();
+    for (const row of merged) {
+      if (keys.has(row.key)) return { ok: false, reason: '同一条件键给了两个值' };
+      keys.add(row.key);
     }
     conditions = merged;
   }
@@ -650,6 +663,12 @@ export function validateChange(change, { refs, rules, ranges, expectedTarget } =
     return { ok: false, reason: '作品规则不能抬成全项目' };
   }
   const effectiveConditions = conditions !== undefined ? conditions : normalizeConditions(existing?.conditions);
+  /** 条件键必须唯一：phase=script 与 phase=brief 同时存在，规则会显示生效却永远不适用。 */
+  const conditionKeys = new Set();
+  for (const row of effectiveConditions) {
+    if (conditionKeys.has(row.key)) return { ok: false, reason: '同一条件键给了两个值' };
+    conditionKeys.add(row.key);
+  }
   if (applicability === 'all_in_scope' && effectiveConditions.length) {
     return { ok: false, reason: '全项目规则不能带条件' };
   }

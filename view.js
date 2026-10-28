@@ -741,7 +741,7 @@ export function hasConcreteAction(text) {
  * 明确换任务：句子里有换做/改用/先别管这类词，或点了一个上一句没有的英文对象。
  * 认不出任务类型时，上一轮的动作线索只能靠这条规则隔开，不能因为类型为空就默认同任务。
  */
-const SWITCH_MARK = /(换成|换个|换一个|改用|改做|改为|改到|转到|先不管|别管|先别|不弄这个|不看这个|另一个|新任务|去做|开始做)/u;
+const SWITCH_MARK = /(换成|换个|换一个|改用|改做|改为|改到|转到|先不管|别管|先别|不弄这个|不看这个|另一个|新任务|换任务|先结束|结束刚才|结束上一个|去做|开始做)/u;
 export function isExplicitSwitch(text, previousText = '') {
   const current = plain(text, 400);
   if (!current) return false;

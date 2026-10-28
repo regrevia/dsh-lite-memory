@@ -1036,6 +1036,54 @@ test('L03d2 代码任务学到的规则不会在数据库任务里生效', () =>
   assert.equal(db.reason, 'condition_mismatch');
 });
 
+test('L03d3 空项目的第一条反馈能带上真实任务范围保存', () => {
+  const parsed = learning.parseOutput(JSON.stringify({
+    changes: [{
+      target: 'new', feedbackType: 'spec_change', topicKey: '前端边框',
+      currentText: '前端页面默认采用细边框', applicability: 'all_in_scope', evidence: ['u0'],
+    }],
+  }), {
+    finish: { kind: 'stop' }, refs: { feedback: { u0: 'm1' }, rules: {} }, rules: [],
+    ranges: { taskKinds: [], series: [], projects: ['p'] },
+    expectedTarget: { scope: 'episode', projectId: 'p', episodeId: 'ep1', taskKind: 'code', phase: 'brief' },
+  });
+  assert.equal(parsed.ok, true, parsed.reason);
+  assert.equal(parsed.changes[0].applicability, 'conditional');
+  assert.deepEqual(parsed.changes[0].conditions, [{ key: 'taskKind', value: 'code' }], '采集阶段不该锁死长期适用范围');
+});
+
+test('L03d4 模型条件与采集任务范围冲突时拒绝，不生成永不生效的规则', () => {
+  const parsed = learning.parseOutput(JSON.stringify({
+    changes: [{
+      target: 'new', feedbackType: 'spec_change', topicKey: '迁移',
+      currentText: '先跑迁移再改代码', applicability: 'conditional',
+      conditions: [{ key: 'taskKind', value: 'database' }], evidence: ['u0'],
+    }],
+  }), {
+    finish: { kind: 'stop' }, refs: { feedback: { u0: 'm1' }, rules: {} }, rules: [],
+    ranges: { ...RANGES, taskKinds: ['code', 'database'] },
+    expectedTarget: { scope: 'episode', projectId: 'p', episodeId: 'ep1', taskKind: 'code' },
+  });
+  assert.equal(parsed.ok, false);
+  assert.match(parsed.reason, /冲突/);
+});
+
+test('L03d5 同一条件键的两个值不能都留下', () => {
+  const parsed = learning.parseOutput(JSON.stringify({
+    changes: [{
+      target: 'new', feedbackType: 'spec_change', topicKey: '阶段冲突',
+      currentText: '只在脚本阶段生效', applicability: 'conditional',
+      conditions: [{ key: 'phase', value: 'script' }, { key: 'phase', value: 'brief' }], evidence: ['u0'],
+    }],
+  }), {
+    finish: { kind: 'stop' }, refs: { feedback: { u0: 'm1' }, rules: {} }, rules: [],
+    ranges: { ...RANGES },
+    expectedTarget: { scope: 'episode', projectId: 'p', episodeId: 'ep1', taskKind: 'code', phase: 'brief' },
+  });
+  assert.equal(parsed.ok, false);
+  assert.match(parsed.reason, /条件/);
+});
+
 test('L03e 先按相关性排序再截断，输入顺序不挤掉真正相关的旧规则', () => {
   const rules = [];
   for (let index = 0; index < 32; index += 1) {

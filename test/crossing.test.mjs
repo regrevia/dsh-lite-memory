@@ -434,7 +434,32 @@ await test('S12 待裁决留可重放草稿，面板确认另存后才落库', (
   assert.equal(pendingConflictsOf(scope), 0);
   assert.equal(loadIndex(scope).entries.length, 1);
   assert.equal(loadIndex(scope).entries[0].body, '项目补充');
+  assert.equal(loadIndex(scope).entries[0].when, '本仓库', 'when 经过待裁决不能丢');
   assert.equal(dropConflict(scope, '不存在').ok, false);
+});
+
+await test('S12 经过待裁决另存不改变适用范围、触发词和关联', () => {
+  const scope = fresh('conflict-semantics');
+  const globalOne = saveEntry(globalScope(), { title: '发票抬头规则', summary: '开票信息固定', body: '全局版本', resolution: 'distinct' });
+  const linked = saveEntry(globalScope(), { title: '生效核验顺序', summary: '先验规则再验页面', body: '先验规则', resolution: 'distinct' });
+  const near = saveEntry(scope, {
+    title: '发票抬头规则', summary: '本项目发票只认这套抬头', body: '项目版本',
+    selection: { mode: 'complete', artifactKey: 'artifact-invoice-v1' },
+    triggers: ['artifact-hookword'],
+    links: [{ type: 'related', id: linked.record.id }],
+    topicKey: 'invoice',
+  });
+  assert.equal(near.needsResolution, true);
+  const [row] = conflictsOf(scope);
+  assert.deepEqual(row.draft.selection, { mode: 'complete', artifactKey: 'artifact-invoice-v1', items: [] });
+  assert.deepEqual(row.draft.triggers, ['artifact-hookword']);
+  assert.deepEqual(row.draft.links, [{ type: 'related', id: linked.record.id }]);
+  const kept = resolveConflict(scope, { id: row.id, expectedRevision: row.revision });
+  assert.equal(kept.ok, true, JSON.stringify(kept));
+  const [record] = loadIndex(scope).entries;
+  assert.deepEqual(record.selection, { mode: 'complete', artifactKey: 'artifact-invoice-v1', items: [] });
+  assert.deepEqual(record.triggers, ['artifact-hookword']);
+  assert.deepEqual(record.links, [{ type: 'related', id: linked.record.id }]);
 });
 
 console.log(`crossing.test.mjs: ${passed} passed`);
