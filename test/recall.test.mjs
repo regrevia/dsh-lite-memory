@@ -113,8 +113,8 @@ const linuxOnly = save(scopeA, {
   tags: ['插件', '构建'],
   when: '',
   applicability: 'conditional',
-  conditions: [{ key: 'targetOs', value: 'linux' }],
-  summary: '只在 Linux CI 上跑构建检查',
+  conditions: [{ key: 'machine', value: '别的机器' }],
+  summary: '只在另一台机器上跑构建检查',
 });
 const unresolved = save(scopeA, { title: '发布前要检查什么', tags: ['发布', '检查'], when: '发布前', applicability: 'unresolved' });
 const globalHot = save(global, { title: '插件改动后先热刷新', tags: ['插件', '热刷新'], summary: '全局规矩：先热刷新再谈重启' });
@@ -268,10 +268,10 @@ assert.notEqual(bootA.provider.text({ agent: agentB, signal: signalB }), prepare
   const cwdC = mkdir('c');
   const scopeC = store.scopeOf(cwdC);
   save(scopeC, {
-    title: '只在 Linux 上跑构建检查',
+    title: '只在另一台机器上跑构建检查',
     tags: ['构建'],
     applicability: 'conditional',
-    conditions: [{ key: 'targetOs', value: 'linux' }],
+    conditions: [{ key: 'machine', value: '别的机器' }],
   });
   save(scopeC, { title: '发布前检查清单', tags: ['发布'], when: '发布前', applicability: 'unresolved' });
   const agent = makeAgent('agent-cond', cwdC);

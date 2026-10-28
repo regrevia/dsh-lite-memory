@@ -70,7 +70,11 @@ test('条件裁决：不把不知道当不存在，也不把未解决当普遍�
   const record = { id: 'mem_000000000001', applicability: 'conditional', conditions: [{ key: 'targetOs', value: 'macOS' }], when: '' };
   assert.equal(view.evaluate(record, ctxOf(null, { targetOs: 'macos' })).state, 'match');
   assert.equal(view.evaluate(record, ctxOf(null, { targetOs: 'linux' })).state, 'mismatch');
-  assert.equal(view.evaluate(record, ctxOf(null, {})).state, 'unknown');
+  assert.equal(ctxOf(null, {}).targetOs, view.hostTargetOs());
+  const hostRecord = { ...record, conditions: [{ key: 'targetOs', value: view.hostTargetOs() || 'macos' }] };
+  assert.equal(view.evaluate(hostRecord, ctxOf(null, {})).state, 'match');
+  const machineOnly = { ...record, conditions: [{ key: 'machine', value: '这台机器' }] };
+  assert.equal(view.evaluate(machineOnly, ctxOf(null, {})).state, 'unknown');
   const unresolved = { ...record, applicability: 'unresolved', conditions: [] };
   assert.equal(view.statusOf(unresolved, ctxOf(null, {})), 'needs_context');
   assert.equal(view.canAutoRecall(unresolved, ctxOf(null, {})), false);

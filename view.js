@@ -152,7 +152,8 @@ export function validateApplicability(applicability, conditions, selection, when
 export function trustedContext(scope, options = {}) {
   const cwd = typeof options.cwd === 'string' && options.cwd ? options.cwd : (scope && scope.cwd) || '';
   return {
-    targetOs: options.targetOs,
+    /** 宿主的真实平台是可信上下文：条件里写 targetOs 的规则本职就是按平台生效。 */
+    targetOs: options.targetOs === undefined ? hostTargetOs() : options.targetOs,
     shell: options.shell,
     runtime: options.runtime,
     machine: options.machine,
@@ -164,6 +165,15 @@ export function trustedContext(scope, options = {}) {
     ...(options.seriesId ? { seriesId: String(options.seriesId) } : {}),
     ...(options.phase ? { phase: String(options.phase) } : {}),
   };
+}
+
+/** 只报归一化后的平台名；未知平台不硬猜，留给条件判 unknown。 */
+export function hostTargetOs() {
+  const platform = typeof process !== 'undefined' && process ? process.platform : '';
+  if (platform === 'darwin') return 'macos';
+  if (platform === 'win32') return 'windows';
+  if (platform === 'linux') return 'linux';
+  return '';
 }
 
 function sameText(left, right) {
