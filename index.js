@@ -804,7 +804,7 @@ const SAVE_PARAMS = {
       enum: ['distinct'],
       description: '明确表示「这确实是另一条」。返回 needsResolution 时，只有确认不是同一件事才带上它再存一次',
     },
-    scope: { type: 'string', enum: ['auto', 'project', 'global'], description: '存哪一层：auto 按记忆类别判定（默认）；只有用户这一次明确说「以后所有项目都这样」才用 global，模型自己判断通用不是理由；明确说只在这个项目用 project。本机路径/端口和项目事实即使写 global 也会留在项目层，降级原因见 scopeNote' },
+    scope: { type: 'string', enum: ['auto', 'project', 'global'], description: '存哪一层：auto 按记忆类别判定（默认）；只有用户这一次明确说「以后所有项目都这样」才用 global，模型自己判断通用不是理由；明确说只在这个项目用 project。本机路径/端口和项目事实即使写 global 也会留在项目层，降级原因见 scopeNote；只在本机成立的命令/流程声明 machine 或 runtime 条件后可进全局层' },
     memoryClass: { type: 'string', enum: ['personal_preference', 'project_fact', 'environment_fact', 'portable_procedure'], description: '归属提案：个人偏好 / 项目事实 / 设备事实 / 可搬流程。服务端据此判定存哪层；设备事实必须同时给设备条件' },
     durability: { type: 'string', enum: ['durable', 'task'], description: '一般认为 durable；只是一次性任务参数用 task，服务端会拒绝落盘' },
     evidenceRef: { type: 'string', description: '归属判定的依据（哪条消息、哪个文件、哪次观察）；用户没说范围时用来判断能不能存' },
@@ -1993,7 +1993,7 @@ export function apply(ctx, config) {
       /** 显式要了全局却被硬冲突挡回项目层时说清原因：否则模型只能看到 scope=project，无从纠。 */
       const scopeNote = (() => {
         if (args.scope !== 'global' || scope.key === 'global') return '';
-        if (saved.reasonCode === 'machine_bound_scope') return '按本机痕迹留在项目层：正文或依据里写了本机路径/端口，改成别的项目仍成立的通用规则再存全局';
+        if (saved.reasonCode === 'machine_bound_scope') return '按本机痕迹留在项目层：正文或依据里写了本机路径/端口，改成别的项目仍成立的通用规则再存全局；只在本机适用的流程可补 machine 条件后存全局';
         if (saved.reasonCode === 'model_global_project_fact') return '按项目事实留在项目层：换成别的项目就不成立；确实是通用流程就改 memoryClass';
         return '';
       })();

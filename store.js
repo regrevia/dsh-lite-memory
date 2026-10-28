@@ -2520,7 +2520,8 @@ function machineBoundText(source) {
 
 /**
  * 适用范围判定：内容/依据的普适性优先，模型声明的 scope 只是提案。
- * 模型说 global、但正文写死了本机路径或依据是本机文件时，先留在项目层（或问一次条件）。
+ * 写死了本机路径/端口又没有声明适用环境时留在项目层；声明了机器/系统条件的
+ * 本机流程可以进全局层——换台机器条件不成立，自然不会拿出来用。
  */
 export function routeScope(draft, options = {}) {
   const source = draft || {};
@@ -2532,6 +2533,16 @@ export function routeScope(draft, options = {}) {
   const evidence = typeof source.evidenceRef === 'string' ? source.evidenceRef.trim() : '';
   /** 依据本身是本机文件/路径的，不能算通用流程；正文里带本机痕迹同理。 */
   const machineBound = machineBoundText(source) || (evidence ? machineBoundText({ title: evidence }) : false);
+  /** 声明了机器/系统条件，本机痕迹就被这条条件收住：规则仍可搬到所有满足条件的机器上。 */
+  const envScoped = (() => {
+    try {
+      return (view.normalizeConditions(source.conditions) || []).some((item) => ENVIRONMENT_KEYS.includes(item.key));
+    } catch {
+      return false;
+    }
+  })();
+  /** 真正挡回项目层的只有「本机痕迹 + 没有声明适用环境」；只写命令名不算本机痕迹。 */
+  const machineConflict = machineBound && !envScoped;
   const base = { chosenScope: '', reasonCode: '', requiredConditions: [], needsScope: false, explicit };
   /** 通用层拿不出普适证据时：有项目就留在项目层，没有就问一次运行环境。 */
   const fallbackToProject = (reasonCode) => {
@@ -2553,7 +2564,7 @@ export function routeScope(draft, options = {}) {
      * 没显式 scope 时才用 memoryClass 提案，缺可搬依据的流程留在项目层。
      */
     if (explicit === 'global' && !humanConfirmed) {
-      if (machineBound) return fallbackToProject('machine_bound_scope');
+      if (machineConflict) return fallbackToProject('machine_bound_scope');
       if (cls === 'project_fact') return fallbackToProject('model_global_project_fact');
     }
     if (explicit === 'project' && !projectReady) {
@@ -2578,11 +2589,13 @@ export function routeScope(draft, options = {}) {
   }
   if (cls === 'personal_preference') {
     /** 偏好也分「我的习惯」和「这台机器上的习惯」：后者绑机器，不进通用层。 */
-    if (machineBound) return fallbackToProject('machine_bound_preference');
+    if (machineConflict) return fallbackToProject('machine_bound_preference');
     return { ...base, chosenScope: 'global', reasonCode: 'class_personal_preference' };
   }
   if (cls === 'portable_procedure') {
-    if (machineBound) return fallbackToProject('machine_bound_procedure');
+    if (machineConflict) return fallbackToProject('machine_bound_procedure');
+    /** 带适用环境条件的本机流程：条件成立时才用，换台机器自然不生效。 */
+    if (envScoped) return { ...base, chosenScope: 'global', reasonCode: 'machine_scoped_procedure' };
     /** 说能搬去别的项目，就要有能搬的依据；没有就先留在本项目。 */
     if (!evidence) return fallbackToProject('unbound_evidence');
     return { ...base, chosenScope: 'global', reasonCode: 'class_portable_procedure' };
