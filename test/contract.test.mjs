@@ -409,6 +409,9 @@ assert.equal(hitsAfter, hitsBefore);
 const sig2 = new AbortController().signal;
 await preStep({ agent: recallAgent, signal: sig2, turn: '3' }, pass('周四晚上发版要注意什么', 'h2'));
 assert.equal(recall.text({ agent: recallAgent, signal: sig2 }).includes('发布窗口在周四晚上'), false);
+const waitingReceipt = await call('/lite-memory/overview', { sessionId: 'session-recall' });
+assert.equal(waitingReceipt.body.current.recall.reason, 'needs_context', '有候选但条件未确认时，不误报成没有匹配');
+assert.equal(waitingReceipt.body.current.recall.cards, 0);
 
 const sig3 = new AbortController().signal;
 await preStep({ agent: recallAgent, signal: sig3, turn: '4' }, pass('把这个按钮的圆角改小一点', 'h3'));

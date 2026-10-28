@@ -870,6 +870,24 @@ window.__ModuleLoader__.load({
       explainBus.add(listener);
       return () => explainBus.delete(listener);
     };
+    /**
+     * 面板只说判断结果，不说内部原因码；条数来自上一次自动召回的回执。
+     */
+    const recallLineOf = (receipt) => {
+      if (!receipt || typeof receipt !== 'object') return '';
+      const cards = Number.isInteger(receipt.cards) ? receipt.cards : 0;
+      const matched = Number.isInteger(receipt.matched) ? receipt.matched : 0;
+      const related = matched > 0 ? `${matched} 条相关记忆，` : '';
+      switch (receipt.reason) {
+        case 'hit': return cards > 0 ? `上次自动提醒 ${cards} 条` : '';
+        case 'budget': return `上次没提醒，${related}本轮自动提醒已用满`;
+        case 'needs_context': return `上次没提醒，${related}适用条件未确认`;
+        case 'no_overlap': return '上次没提醒，没有匹配的记忆';
+        case 'memory_off': return '上次没提醒，记忆已关闭';
+        case 'tools_only': return '上次没提醒，只在你问时检索';
+        default: return '';
+      }
+    };
     /** 功能关闭时视图统一回列表，不保留一个画不出来的页签。 */
     const graphViewOf = (enabled, view) => (enabled === true && view === 'graph' ? 'graph' : 'list');
     const viewModeOf = (display, view) => {
@@ -2448,6 +2466,7 @@ window.__ModuleLoader__.load({
       ),
       hint ? h('span', { style: { ...PANEL_MUTED, lineHeight: '16px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, hint) : null);
       const evolutionOn = Boolean(memoryOn && evolution && evolution.enabled === true);
+      const recallLine = recallLineOf(current && current.recall);
       const switchBar = h('div', {
         style: { display: 'flex', flexDirection: 'column', gap: '3px', padding: '7px 18px 8px', borderBottom: '1px solid var(--dsw-alias-border-l1)', flex: '0 0 auto' },
       },
@@ -2462,6 +2481,7 @@ window.__ModuleLoader__.load({
         ),
       !globalView && !canToggle ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, '只读，切换回当前项目后可修改') : null,
       note ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px', color: 'var(--dsw-alias-state-error-primary)' } }, note) : null,
+      !globalView && recallLine ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, recallLine) : null,
       );
 
       const switchTab = (key) => {
@@ -2827,7 +2847,7 @@ window.__ModuleLoader__.load({
 
     // 测试缝：Node 里验引用投影，浏览器里没有任何副作用。
     if (typeof globalThis.__LITE_MEMORY_TEST__ === 'function') {
-      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, agoLabel, checkupOf, titleCountsOf, rowKeyOf, rowKeepFlags, Row });
+      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, agoLabel, checkupOf, titleCountsOf, rowKeyOf, rowKeepFlags, Row });
     }
 
     return {

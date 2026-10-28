@@ -28,7 +28,7 @@ assert.equal(panel.name, 'shell.overlay');
 assert.equal(panel.order, 30);
 
 const EMPTY_CHILDREN = [];
-const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, agoLabel, checkupOf, titleCountsOf, rowKeyOf, rowKeepFlags } = seen;
+const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, agoLabel, checkupOf, titleCountsOf, rowKeyOf, rowKeepFlags } = seen;
 
 // 图谱只按真实数据画：共享标签成枢纽，显式关联成边，位置由 id 决定。
 const graph = graphOf([
@@ -332,5 +332,15 @@ assert.deepEqual(rowKeepFlags(blockedKeys), [true, false]);
 assert.equal(blockedKeys.filter((_key, at) => rowKeepFlags(blockedKeys)[at]).length, 1);
 assert.deepEqual(rowKeepFlags([rowKeyOf('memory_search', blockedBlock(blockedText)), rowKeyOf('memory_read', blockedBlock(blockedText))]), [true, true]);
 assert.deepEqual(rowKeepFlags([rowKeyOf('memory_read', blockedBlock('memory · stopped'))]), [true]);
+// 面板要能回答「为什么这次没提醒我」：只给结论和条数，不露原因码。
+assert.equal(recallLineOf(null), '');
+assert.equal(recallLineOf({ reason: 'hit', cards: 1, matched: 1 }), '上次自动提醒 1 条');
+assert.equal(recallLineOf({ reason: 'budget', cards: 0, matched: 2 }), '上次没提醒，2 条相关记忆，本轮自动提醒已用满');
+assert.equal(recallLineOf({ reason: 'needs_context', cards: 0, matched: 1 }), '上次没提醒，1 条相关记忆，适用条件未确认');
+assert.equal(recallLineOf({ reason: 'no_overlap', cards: 0, matched: 0 }), '上次没提醒，没有匹配的记忆');
+assert.equal(recallLineOf({ reason: 'memory_off', cards: 0, matched: 0 }), '上次没提醒，记忆已关闭');
+assert.equal(recallLineOf({ reason: 'tools_only', cards: 0, matched: 0 }), '上次没提醒，只在你问时检索');
+assert.equal(recallLineOf({ reason: 'made_up', cards: 0, matched: 0 }), '');
+assert.doesNotMatch(recallLineOf({ reason: 'needs_context', cards: 0, matched: 1 }), /needs_context|reasonCode/);
 console.log('client.test.mjs: 22 passed + palace');
 

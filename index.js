@@ -1179,10 +1179,10 @@ export function apply(ctx, config) {
       records.push(group.record);
       layerOf.set(group.record.id, group.scope === 'global' ? 'global' : 'project');
     }
+    const gateRuntime = runtime || (win && win.runtime) || null;
+    const task = runtime && runtime.task ? runtime.task : null;
     const ranked = view.rank(records, query, {
-      limit: 8, requireApplicable: true, context,
-      runtime: runtime || (win && win.runtime) || null,
-      task: runtime && runtime.task ? runtime.task : null,
+      limit: 8, requireApplicable: true, context, runtime: gateRuntime, task,
     });
     /** 普通记忆与实验规则共用一份自动注入预算：总条数和最终完整文本字节一起算。 */
     const auto = win && win.autoBudget ? win.autoBudget : null;
@@ -1233,11 +1233,21 @@ export function apply(ctx, config) {
       });
     }
     /** 没卡片也要给出判断依据：面板要能回答「为什么这次没提醒我」。 */
+    let near = [];
+    if (!cards.length && !ranked.length) {
+      /** 自动召回只认完全适用；再放宽一层看有没有字面匹配，好把「条件未确认」和「没有匹配」分开。 */
+      near = view.rank(records, query, {
+        limit: 8, requireApplicable: false, context, runtime: gateRuntime, task,
+      });
+    }
+    const waiting = near.some((row) => row.status !== 'ok' || row.record.reviewState === 'legacy_unreviewed');
     const reason = cards.length ? 'hit'
-      : !ranked.length ? (runtime && runtime.enabled ? 'no_overlap' : 'needs_context')
-        : 'budget';
-    if (!cards.length) return { text: '', cards: [], bytes: 0, query, reason, matched: ranked.length };
-    return { text: finalText, cards, bytes: Buffer.byteLength(finalText), query, reason, matched: ranked.length };
+      : ranked.length ? 'budget'
+        : waiting ? 'needs_context'
+          : (gateRuntime && gateRuntime.enabled ? 'no_overlap' : 'needs_context');
+    const matched = ranked.length || near.length;
+    if (!cards.length) return { text: '', cards: [], bytes: 0, query, reason, matched };
+    return { text: finalText, cards, bytes: Buffer.byteLength(finalText), query, reason, matched };
   }
 
   /* ---------------- 项目自进化：任务锚点、读取决策、上下文解析 ---------------- */
