@@ -1653,23 +1653,27 @@ export function readEntry(scope, id, options = {}) {
       if (!record && !archived) continue;
       if (!readableRecord(record || archived, options, index)) continue;
       const body = readBody(source, id);
+      /** 生命周期先判定：过期/被取代的条目不能再报成现行规则。 */
+      const lifecycle = view.lifecycleStatusOf(record || archived, options.now || Date.now());
       return {
         source,
         archived: Boolean(archived),
+        lifecycle,
         record: {
           ...(record || archived),
           scope: source.key === 'global' ? 'global' : 'project',
           body,
-          status: archived ? 'archived' : view.statusOf(record, options.context || {}),
+          status: lifecycle || view.statusOf(record, options.context || {}),
         },
       };
     }
     return null;
   });
   if (!found) return null;
-  /** 读过才算用过；归档、被取代、过期或条件不匹配的读取都不算「在用」。 */
+  /** 读过才算用过；归档、被取代、过期、空正文或条件不匹配的读取都不算「在用」。 */
   const countsAsUsage = typeof options.usage !== 'function' || options.usage(found.record) !== false;
-  if (!found.archived && countsAsUsage) touchUsed(found.source, [id]);
+  const hasBody = typeof found.record.body === 'string' && found.record.body.trim() !== '';
+  if (!found.archived && !found.lifecycle && hasBody && countsAsUsage) touchUsed(found.source, [id]);
   return found.record;
 }
 

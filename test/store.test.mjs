@@ -162,6 +162,28 @@ test('expired or superseded records do not block a new same-title save', () => {
   assert.notEqual(replacement.record.id, second.record.id);
 });
 
+test('expired reads report their lifecycle and empty reads do not count as usage', () => {
+  const scope = fresh('lifecycle-read');
+  const first = upsert(scope, { title: '过期条目', summary: '已经过了有效期', body: '旧正文' });
+  const index = loadIndex(scope);
+  index.entries.find((row) => row.id === first.record.id).validUntil = new Date(Date.now() - 1000).toISOString();
+  index.entries.find((row) => row.id === first.record.id).lastUsed = '2026-01-01T00:00:00.000Z';
+  saveIndex(scope, index);
+  const expired = readEntry(scope, first.record.id);
+  assert.equal(expired.status, 'expired');
+  assert.equal(expired.body, '旧正文');
+  assert.equal(loadIndex(scope).entries.find((row) => row.id === first.record.id).lastUsed, '2026-01-01T00:00:00.000Z');
+
+  const empty = upsert(scope, { title: '空正文条目', summary: '只有摘要', body: '' }).record;
+  loadIndex(scope).entries.find((row) => row.id === empty.id).lastUsed = '2026-01-01T00:00:00.000Z';
+  const saved = loadIndex(scope);
+  saved.entries.find((row) => row.id === empty.id).lastUsed = '2026-01-01T00:00:00.000Z';
+  saveIndex(scope, saved);
+  const record = readEntry(scope, empty.id);
+  assert.equal(record.body, '');
+  assert.equal(loadIndex(scope).entries.find((row) => row.id === empty.id).lastUsed, '2026-01-01T00:00:00.000Z', '空读不算用过');
+});
+
 test('oversized body is rejected, old data untouched', () => {
   const scope = fresh('oversize');
   const big = 'x'.repeat(LIMITS.entryBytes + 1);

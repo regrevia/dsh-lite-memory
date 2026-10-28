@@ -241,13 +241,19 @@ export function contextWithTask(context = {}, task = {}) {
   return out;
 }
 
-export function eligibility(record, runtime = {}, purpose = 'read', now = Date.now()) {
-  if (!record) return { ok: false, status: 'gone', reason: 'gone' };
-  if (record.status === 'archived') return { ok: false, status: 'gone', reason: 'archived' };
-  /** 生命周期与手动检索共用一条：被取代或过期的条目不再像现行规则一样进入召回和正文读取。 */
-  if (record.supersededBy) return { ok: false, status: 'gone', reason: 'superseded' };
+/** 生命周期先于适用范围：归档、被取代、过期这三类都不该再算现行规则。 */
+export function lifecycleStatusOf(record, now = Date.now()) {
+  if (!record) return 'gone';
+  if (record.status === 'archived') return 'archived';
+  if (record.supersededBy) return 'superseded';
   const validUntil = Date.parse(record.validUntil || '');
-  if (Number.isFinite(validUntil) && validUntil <= now) return { ok: false, status: 'gone', reason: 'expired' };
+  if (Number.isFinite(validUntil) && validUntil <= now) return 'expired';
+  return '';
+}
+
+export function eligibility(record, runtime = {}, purpose = 'read', now = Date.now()) {
+  const lifecycle = lifecycleStatusOf(record, now);
+  if (lifecycle) return { ok: false, status: 'gone', reason: lifecycle };
   const pid = runtime && runtime.projectId;
   if (pid && record.ownerProjectId && record.ownerProjectId !== pid) {
     return { ok: false, status: 'not_applicable', reason: 'owner_mismatch' };

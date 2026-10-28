@@ -2449,6 +2449,8 @@ export function apply(ctx, config) {
       }
       const revision = record.revision || 1;
       const body = String(record.body ?? '');
+      /** 空正文只回标题与状态：没有正文可交付，就不占正文额度、不算引用。 */
+      const hasBody = body.trim() !== '';
       const value = {
         title: record.title,
         when: record.when || '',
@@ -2474,14 +2476,14 @@ export function apply(ctx, config) {
           return receipt;
         }
         const bytes = jsonBytes(value);
-        if (!affordableTool(win, bytes, 1)) return { scope: '', status: 'budget_exhausted' };
+        if (!affordableTool(win, bytes, hasBody ? 1 : 0)) return { scope: '', status: 'budget_exhausted' };
         win.bytes += bytes;
         win.toolBytes += bytes;
-        win.bodies += 1;
+        if (hasBody) win.bodies += 1;
         win.reads += 1;
-        win.readBodies.set(record.id, revision);
+        if (hasBody) win.readBodies.set(record.id, revision);
       }
-      recordCitations(scope, sessionIdOf(execution), [record]);
+      if (hasBody) recordCitations(scope, sessionIdOf(execution), [record]);
       return value;
     },
   }), 'lite-memory: memory_read');
@@ -2959,6 +2961,9 @@ export function apply(ctx, config) {
     const operationId = `learn_${crypto.createHash('sha256')
       .update(`${scope.key}|${candidate.episodeId}|${candidate.messageIds.join(',')}`)
       .digest('hex').slice(0, 16)}`;
+    /** 没有可用模型就别先扣滚动额度：扣了却发不出调用，额度会白烧一整窗口。 */
+    const llm = getService('llm');
+    if (!llm || typeof llm.prepareCall !== 'function') return;
     const begin = beginLearningAttempt(scope, { episodeId: candidate.episodeId, operationId: `${operationId}_start`, now: Date.now() });
     if (!begin || begin.ok !== true || begin.replayed) return;
     const ranges = rangesOf(scope);
@@ -2977,11 +2982,6 @@ export function apply(ctx, config) {
       revision: record.revision || 1,
       specDigest: learning.specDigestOf(record),
     }));
-    const llm = getService('llm');
-    if (!llm || typeof llm.prepareCall !== 'function') {
-      recordLearningFailure(scope, { operationId: `${operationId}_fail`, episodeId: candidate.episodeId, reason: '宿主没有可用模型', epoch: begin.epoch });
-      return;
-    }
     const controller = new AbortController();
     learningAborts.set(scope.key, controller);
     const deadline = setTimeout(() => { try { controller.abort(); } catch { /* already aborted */ } }, learning.LIMITS.timeoutMs);

@@ -626,6 +626,18 @@ export function validateChange(change, { refs, rules, ranges, expectedTarget } =
   const expectedConditions = ['taskKind', 'seriesId', 'phase']
     .filter((key) => String(expected?.[key] || '').trim())
     .map((key) => ({ key, value: String(expected[key]).trim() }));
+  /** 作品里学到的规范必须带上当时的任务范围：模型想写成全项目时收窄成条件规则，而不是丢掉这条反馈。 */
+  const narrowToEpisode = target === 'new' && expected?.scope === 'episode' && expectedConditions.length > 0;
+  if (narrowToEpisode) {
+    if (applicability === undefined || applicability === 'all_in_scope') applicability = 'conditional';
+    const merged = conditions !== undefined ? [...conditions] : [];
+    for (const row of expectedConditions) {
+      if (merged.some((item) => item.key === row.key && item.value === row.value)) continue;
+      if (!conditionValueAllowed(row, { ranges, existing })) return { ok: false, reason: '收集时的任务范围不在本项目里' };
+      merged.push(row);
+    }
+    conditions = merged;
+  }
   const expectedApplicability = expected
     ? (expected.applicability === 'all_in_scope'
       ? 'all_in_scope'

@@ -8,6 +8,7 @@ const store = await import('../store.js');
 const learning = await import('../learning.js');
 const anchor = await import('../anchor.js');
 const state = await import('../state.js');
+const view = await import('../view.js');
 
 let passed = 0;
 const test = (name, fn) => {
@@ -996,16 +997,43 @@ test('L03d 作用域在收集时固定，整理只能沿用或收窄', () => {
   assert.equal(learning.validateChange({ ...base, applicability: 'all_in_scope' }, { refs, rules: [], ranges: RANGES, expectedTarget: wide.expectedTarget }).ok, true);
 
   const video = { scope: 'episode', episodeId: 'ep_x', taskKind: 'video' };
+  /** 作品里学到的规范：想说成全项目时收窄成任务条件，而不是整条作废。 */
   const episodeWide = learning.validateChange({ ...base, applicability: 'all_in_scope' }, { refs, rules: [], ranges: RANGES, expectedTarget: video });
-  assert.equal(episodeWide.ok, false, '作品规则不能抬成全项目');
+  assert.equal(episodeWide.ok, true, episodeWide.reason);
+  assert.equal(episodeWide.change.applicability, 'conditional');
+  assert.deepEqual(episodeWide.change.conditions, [{ key: 'taskKind', value: 'video' }]);
   const droppedKind = learning.validateChange({ ...base, applicability: 'conditional', conditions: [{ key: 'phase', value: 'script' }] }, { refs, rules: [], ranges: RANGES, expectedTarget: video });
-  assert.equal(droppedKind.ok, false, '不能删掉收集时的任务范围');
+  assert.equal(droppedKind.ok, true, droppedKind.reason);
+  assert.deepEqual(droppedKind.change.conditions, [{ key: 'phase', value: 'script' }, { key: 'taskKind', value: 'video' }], '缺的任务范围自动补回，不能丢');
   const keptKind = learning.validateChange({ ...base, applicability: 'conditional', conditions: [{ key: 'taskKind', value: 'video' }, { key: 'phase', value: 'script' }] }, { refs, rules: [], ranges: RANGES, expectedTarget: video });
   assert.equal(keptKind.ok, true, keptKind.reason);
+  assert.deepEqual(keptKind.change.conditions, [{ key: 'taskKind', value: 'video' }, { key: 'phase', value: 'script' }]);
 
   const fallback = learning.pendingChangeFrom({ text: '以后所有开头都先给结论。', cue: { explicitLongTerm: true }, expectedTarget: narrow.expectedTarget });
   assert.equal(fallback.applicability, 'unresolved', '兜底不重新推导作用域');
   assert.equal(learning.pendingChangeFrom({ text: '以后开头都先给结论。', cue: { explicitLongTerm: true }, expectedTarget: wide.expectedTarget }).applicability, 'all_in_scope');
+});
+
+test('L03d2 代码任务学到的规则不会在数据库任务里生效', () => {
+  const refs = { feedback: { u0: 'm1' }, rules: {} };
+  const parsed = learning.parseOutput(JSON.stringify({
+    changes: [{
+      target: 'new', feedbackType: 'spec_change', topicKey: '迁移',
+      currentText: '先跑迁移再改代码', applicability: 'all_in_scope', evidence: ['u0'],
+    }],
+  }), {
+    finish: { kind: 'stop' }, refs, rules: [], ranges: { ...RANGES, taskKinds: ['code', 'database'] },
+    expectedTarget: { scope: 'episode', projectId: 'p', episodeId: 'ep_code', taskKind: 'code' },
+  });
+  assert.equal(parsed.ok, true, parsed.reason);
+  const change = parsed.changes[0];
+  assert.equal(change.applicability, 'conditional');
+  assert.deepEqual(change.conditions, [{ key: 'taskKind', value: 'code' }]);
+  const code = view.eligibility({ id: 'mem_1', title: '迁移', status: 'active', origin: 'project_evolution', conditions: change.conditions, learning: { state: 'active' } }, { task: { kind: 'code' } }, 'auto');
+  const db = view.eligibility({ id: 'mem_1', title: '迁移', status: 'active', origin: 'project_evolution', conditions: change.conditions, learning: { state: 'active' } }, { task: { kind: 'database' } }, 'auto');
+  assert.equal(code.ok, true);
+  assert.equal(db.ok, false);
+  assert.equal(db.reason, 'condition_mismatch');
 });
 
 test('L03e 先按相关性排序再截断，输入顺序不挤掉真正相关的旧规则', () => {
