@@ -168,6 +168,22 @@ assert.match(afterExpiry, /^已有记忆可能相关/);
 expiring.lines[0].validUntil = '';
 assert.equal(bootA.provider.text({ agent: agentA, signal: signalA }), preparedText, 'unexpired card still delivered');
 
+// A02b：同一会话里只说「继续」时沿用上一句的查询，短追问也能接上刚才那条记忆。
+const contAgent = makeAgent('agent-cont', cwdA);
+const contSignal = signal();
+await bootA.preStep({ agent: contAgent, signal: contSignal, turn: 'c1' }, enter(human('发布前文案检查要怎么过？')));
+const contFirst = bootA.debug.preparedOf(contAgent);
+assert.ok(contFirst && contFirst.cards.length, 'first turn recalls the publish rule');
+assert.match(contFirst.query, /发布前文案检查/);
+const contSignal2 = signal();
+await bootA.preStep({ agent: contAgent, signal: contSignal2, turn: 'c2' }, enter(human('继续')));
+const contNext = bootA.debug.preparedOf(contAgent);
+assert.ok(contNext, 'short continuation still prepares a snapshot');
+assert.match(contNext.query, /^继续 /);
+assert.match(contNext.query, /发布前文案检查/, 'continuation carries the previous query');
+assert.ok(contNext.cards.length, 'continuation still resolves cards');
+assert.ok(contNext.cards.some((card) => /文案检查/.test(card.title || card.line || '')), 'same topic comes back');
+
 // A03：provider 纯内存，不写盘、不动 hits。
 const statePath = path.join(scopeA.dir, 'state.json');
 const before = fs.readFileSync(statePath);

@@ -239,6 +239,16 @@ assert.equal(await exec('memory_save', { title: '发布顺序是啥', summary: '
 await exec('memory_save', { title: '跨层同名', summary: '项目层这一条', body: '项目正文' });
 /** 直接落全局层：正常保存有跨层相近拦截，同层/跨层同名只可能来自历史数据。 */
 store.saveEntry(store.globalScope(), { title: '跨层同名', summary: '全局层另一条', body: '全局正文', writeMode: 'patch' });
+/** 同名两层各有一条时，读哪条由 scope 决定：默认项目层，显式 global 才拿全局正文。 */
+const readTwin = await exec('memory_read', { title: '跨层同名' });
+assert.equal(readTwin.scope, 'project');
+assert.equal(readTwin.body, '项目正文');
+const readGlobalTwin = await exec('memory_read', { title: '跨层同名', scope: 'global' });
+assert.equal(readGlobalTwin.scope, 'global');
+assert.equal(readGlobalTwin.body, '全局正文');
+const readProjectTwin = await exec('memory_read', { title: '跨层同名', scope: 'project' });
+assert.equal(readProjectTwin.scope, 'project');
+assert.equal(readProjectTwin.body, '项目正文');
 const ambiguousSave = await exec('memory_save', { title: '别的标题', summary: '尝试改同名条目', updateTitle: '跨层同名' });
 assert.ok(ambiguousSave.error, '跨层同名要报改哪一层');
 assertSchema('memory_save', ambiguousSave);
