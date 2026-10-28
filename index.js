@@ -553,14 +553,42 @@ function keepHandler(webServer, cwdForSession) {
       const cwd = typeof cwdForSession === 'function' ? cwdForSession(sessionId) : '';
       if (!cwd) return sendJson(res, 409, { ok: false, reason: '这个会话还没有项目目录' });
       const projectScope = scopeOf(cwd);
+      if (!projectScope.confirmed) return sendJson(res, 409, { ok: false, reason: '项目根还没确认，先重新打开这个项目' });
+      /** 请求里的目标必须与当前会话项目一致；别的项目只读，不能借面板改过去。 */
       const requested = typeof body.scopeKey === 'string' ? body.scopeKey : '';
+      if (!requested) return sendJson(res, 400, { ok: false, reason: '缺少目标范围' });
+      if (requested !== 'global' && requested !== projectScope.key) {
+        return sendJson(res, 409, { ok: false, reason: '别的项目只读，回到那个项目里再改' });
+      }
       const target = requested === 'global' ? globalScope() : projectScope;
-      const title = typeof body.title === 'string' ? body.title.trim() : '';
-      if (!title) return sendJson(res, 400, { ok: false, reason: '缺少标题' });
+      /** 关闭的项目记忆不能从这个入口绕过；选全局时全局总开关也必须开着。 */
+      if (!memoryEnabled(projectScope)) {
+        return sendJson(res, 409, { ok: false, code: 'memory_disabled', reason: memoryOffCopy(projectScope) });
+      }
+      if (target.key === 'global' && !memoryEnabled(target)) {
+        return sendJson(res, 409, { ok: false, code: 'memory_disabled', reason: '总记忆已关闭，先在面板打开' });
+      }
+      const op = body.op;
+      if (op !== 'keep' && op !== 'drop') return sendJson(res, 400, { ok: false, reason: '不认识这个操作' });
+      const conflictId = typeof body.conflictId === 'string' ? body.conflictId.trim() : '';
+      if (!conflictId) return sendJson(res, 400, { ok: false, reason: '缺少这条待裁决' });
+      const expectedRevision = Number(body.expectedRevision);
+      if (!Number.isInteger(expectedRevision) || expectedRevision < 1) {
+        return sendJson(res, 409, { ok: false, reason: '这条待裁决的版本不清楚，先刷新再处理' });
+      }
       try {
-        const outcome = body.op === 'drop' ? { ok: dropConflict(target, title) } : resolveConflict(target, title);
-        if (!outcome.ok) return sendJson(res, 409, { ok: false, reason: outcome.reason || '这条待裁决还没处理成' });
-        return sendJson(res, 200, { ok: true, remaining: conflictsOf(target).length });
+        const ref = { id: conflictId, expectedRevision };
+        const outcome = op === 'drop' ? dropConflict(target, ref) : resolveConflict(target, ref);
+        if (!outcome.ok) {
+          return sendJson(res, outcome.reasonCode === 'stale_draft' ? 409 : 409, {
+            ok: false, code: outcome.reasonCode || '', reason: outcome.reason || '这条待裁决还没处理成',
+          });
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          remaining: conflictsOf(target).length,
+          record: outcome.record ? { id: outcome.record.id, title: outcome.record.title, revision: outcome.record.revision } : null,
+        });
       } catch (error) {
         return sendJson(res, 409, { ok: false, reason: error instanceof Error ? error.message : '待裁决处理失败' });
       }

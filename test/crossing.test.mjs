@@ -434,7 +434,7 @@ await test('S12 待裁决留可重放草稿，面板确认另存后才落库', (
   assert.equal(pendingConflictsOf(scope), 0);
   assert.equal(loadIndex(scope).entries.length, 1);
   assert.equal(loadIndex(scope).entries[0].body, '项目补充');
-  assert.equal(dropConflict(scope, '不存在'), false);
+  assert.equal(dropConflict(scope, '不存在').ok, false);
 });
 
 console.log(`crossing.test.mjs: ${passed} passed`);

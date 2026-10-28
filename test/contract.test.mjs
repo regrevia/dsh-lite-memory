@@ -1213,6 +1213,7 @@ assert.equal(ovArchivedBody.body.body, '右侧留白。');
 // 待裁决：面板看得到队列，确认后按草稿另存，不预写正文
 const cfCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-conflict-'));
 sessionCwds.set('session-conflict-panel', cfCwd);
+sessionCwds.set('session-conflict-other', fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-conflict-other-')));
 const cfAgent = { id: 'session-conflict-panel', cwd: cfCwd, session: { id: 'session-conflict-panel', header: { cwd: cfCwd } } };
 await defs.get('memory_save').execute({ title: '发布窗口', summary: '只在周四晚上发版', body: '周四晚上再发版。', scope: 'global' }, { agent: cfAgent });
 const cfSave = await defs.get('memory_save').execute({ title: '发布窗口', summary: '本项目周五发版', body: '周五发版。' }, { agent: cfAgent });
@@ -1221,15 +1222,77 @@ assert.equal(store.loadIndex(store.scopeOf(cfCwd)).entries.length, 0, '没确认
 const cfBefore = await call('/lite-memory/overview', { sessionId: 'session-conflict-panel' });
 assert.equal(cfBefore.status, 200);
 assert.equal(cfBefore.body.selected.conflicts.length, 1);
-assert.equal(cfBefore.body.selected.conflicts[0].title, '发布窗口');
-assert.equal(cfBefore.body.selected.conflicts[0].draft.body, '周五发版。');
-const cfKeep = await call('/lite-memory/conflict', { sessionId: 'session-conflict-panel', scopeKey: cfBefore.body.selected.key, title: '发布窗口', op: 'keep' });
+const cfRow = cfBefore.body.selected.conflicts[0];
+assert.equal(cfRow.title, '发布窗口');
+assert.equal(cfRow.draft.body, '周五发版。');
+assert.ok(cfRow.id, '待裁决要有稳定 id');
+assert.equal(cfRow.revision, 1);
+const cfScopeKey = cfBefore.body.selected.key;
+
+// 跨项目：当前会话是 A，请求 B 的范围必须拒绝，且不能动到 A 的草稿
+const cfCross = await call('/lite-memory/conflict', {
+  sessionId: 'session-conflict-panel', scopeKey: '另一个项目', conflictId: cfRow.id, expectedRevision: 1, op: 'drop',
+});
+assert.equal(cfCross.status, 409);
+assert.match(cfCross.body.reason, /只读/);
+assert.equal(store.loadIndex(store.scopeOf(cfCwd)).conflicts.length, 1, '跨项目请求不改数据');
+
+// 关闭项目记忆后，本入口也不能落盘
+await call('/lite-memory/control', { sessionId: 'session-conflict-panel', enabled: false, operationId: 'op_cf_close' });
+const cfClosed = await call('/lite-memory/conflict', {
+  sessionId: 'session-conflict-panel', scopeKey: cfScopeKey, conflictId: cfRow.id, expectedRevision: 1, op: 'keep',
+});
+assert.equal(cfClosed.status, 409);
+assert.equal(cfClosed.body.code, 'memory_disabled');
+assert.equal(store.loadIndex(store.scopeOf(cfCwd)).entries.length, 0, '关闭状态不写记忆');
+await call('/lite-memory/control', { sessionId: 'session-conflict-panel', enabled: true, operationId: 'op_cf_reopen' });
+
+// 草稿被后来的反馈替换：旧版本点击必须拒绝
+await defs.get('memory_save').execute({ title: '发布窗口', summary: '本项目改成周六发版', body: '周六发版。' }, { agent: cfAgent });
+const cfStale = await call('/lite-memory/conflict', {
+  sessionId: 'session-conflict-panel', scopeKey: cfScopeKey, conflictId: cfRow.id, expectedRevision: 1, op: 'keep',
+});
+assert.equal(cfStale.status, 409);
+assert.equal(cfStale.body.code, 'stale_draft');
+const cfStaleView = await call('/lite-memory/overview', { sessionId: 'session-conflict-panel' });
+assert.equal(cfStaleView.body.selected.conflicts[0].revision, 2, '草稿换了版本要涨');
+assert.equal(cfStaleView.body.selected.conflicts[0].draft.body, '周六发版。');
+
+const cfKeep = await call('/lite-memory/conflict', {
+  sessionId: 'session-conflict-panel', scopeKey: cfScopeKey, conflictId: cfRow.id, expectedRevision: 2, op: 'keep',
+});
 assert.equal(cfKeep.status, 200);
 assert.equal(cfKeep.body.ok, true);
 const cfAfter = await call('/lite-memory/overview', { sessionId: 'session-conflict-panel' });
 assert.equal(cfAfter.body.selected.conflicts.length, 0);
-assert.ok(cfAfter.body.selected.records.some((row) => row.title === '发布窗口' && row.summary === '本项目周五发版'));
-const cfAgain = await call('/lite-memory/conflict', { sessionId: 'session-conflict-panel', scopeKey: cfBefore.body.selected.key, title: '发布窗口', op: 'keep' });
+assert.ok(cfAfter.body.selected.records.some((row) => row.title === '发布窗口' && row.summary === '本项目改成周六发版'));
+const cfAgain = await call('/lite-memory/conflict', {
+  sessionId: 'session-conflict-panel', scopeKey: cfScopeKey, conflictId: cfRow.id, expectedRevision: 2, op: 'keep',
+});
 assert.equal(cfAgain.status, 409, '队列没了就明确说，不重复落库');
+
+// 项目记忆关闭时，选全局待裁决也不能借这个入口落盘
+const cfgCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-conflict-global-'));
+sessionCwds.set('session-conflict-global', cfgCwd);
+const cfgAgent = { id: 'session-conflict-global', cwd: cfgCwd, session: { id: 'session-conflict-global', header: { cwd: cfgCwd } } };
+await defs.get('memory_save').execute({ title: '命名规则', summary: '项目里用短横线', body: '短横线。' }, { agent: cfgAgent });
+const cfgSave = await defs.get('memory_save').execute({ title: '命名规则', summary: '所有项目用下划线', body: '下划线。', scope: 'global' }, { agent: cfgAgent });
+assert.equal(cfgSave.needsResolution, true);
+const cfgView = await call('/lite-memory/overview', { sessionId: 'session-conflict-global', scopeKey: 'global' });
+assert.equal(cfgView.body.selected.conflicts.length, 1, '全局层也要有这条待裁决');
+const cfgRow = cfgView.body.selected.conflicts[0];
+await call('/lite-memory/control', { sessionId: 'session-conflict-global', enabled: false, operationId: 'op_cfg_close' });
+const cfgClosed = await call('/lite-memory/conflict', {
+  sessionId: 'session-conflict-global', scopeKey: 'global', conflictId: cfgRow.id, expectedRevision: cfgRow.revision, op: 'keep',
+});
+assert.equal(cfgClosed.status, 409);
+assert.equal(cfgClosed.body.code, 'memory_disabled');
+assert.equal(store.conflictsOf(store.globalScope()).length, 1, '关闭状态不批准全局草稿');
+await call('/lite-memory/control', { sessionId: 'session-conflict-global', enabled: true, operationId: 'op_cfg_reopen' });
+const cfgKeep = await call('/lite-memory/conflict', {
+  sessionId: 'session-conflict-global', scopeKey: 'global', conflictId: cfgRow.id, expectedRevision: cfgRow.revision, op: 'keep',
+});
+assert.equal(cfgKeep.status, 200);
+assert.equal(store.conflictsOf(store.globalScope()).length, 0);
 
 console.log('contract.test.mjs: all passed');

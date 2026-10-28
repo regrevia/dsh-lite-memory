@@ -2761,20 +2761,32 @@ function queueConflictLocked(scope, draft, candidates) {
   if (hit) {
     hit.candidates = view;
     hit.draft = replay;
+    /** 草稿被后来的反馈替换过：版本必须涨，旧面板不能拿旧版直接批准。 */
+    hit.revision = (Number(hit.revision) || 1) + 1;
     hit.updatedAt = now;
   } else {
-    rows.push({ id: `cf_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`, title, scope: scopeKey, candidates: view, draft: replay, createdAt: now, updatedAt: now });
+    rows.push({ id: `cf_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`, title, scope: scopeKey, candidates: view, draft: replay, revision: 1, createdAt: now, updatedAt: now });
   }
   index.conflicts = rows.slice(-CONFLICT_LIMIT);
   saveIndex(scope, index);
   return index.conflicts.length;
 }
 
-function clearConflictLocked(scope, title) {
+/** 按稳定 id 找；旧调用还传标题，只为兼容已有数据与测试。 */
+function conflictRowLocked(scope, ref) {
+  const rows = Array.isArray(loadIndex(scope).conflicts) ? loadIndex(scope).conflicts : [];
+  const layer = scope.key === 'global' ? 'global' : 'project';
+  if (ref && typeof ref === 'object' && ref.id) return rows.find((row) => row.id === ref.id && row.scope === layer) || null;
+  const norm = normalizeText(typeof ref === 'string' ? ref : '', 120);
+  return rows.find((row) => row.title === norm && row.scope === layer) || null;
+}
+
+function clearConflictLocked(scope, ref) {
   const index = loadIndex(scope);
   const rows = Array.isArray(index.conflicts) ? index.conflicts : [];
-  const norm = normalizeText(title, 120);
-  const next = rows.filter((row) => !(row.title === norm && row.scope === (scope.key === 'global' ? 'global' : 'project')));
+  const id = ref && typeof ref === 'object' && ref.id ? ref.id : '';
+  const norm = id ? '' : normalizeText(typeof ref === 'string' ? ref : '', 120);
+  const next = rows.filter((row) => (id ? row.id !== id : !(row.title === norm && row.scope === (scope.key === 'global' ? 'global' : 'project'))));
   if (next.length === rows.length) return rows.length;
   index.conflicts = next;
   saveIndex(scope, index);
@@ -2787,28 +2799,38 @@ export function conflictsOf(scope) {
   return Array.isArray(rows) ? JSON.parse(JSON.stringify(rows)) : [];
 }
 
-/** 确认另存：用队列里的草稿按 distinct 重放一次，成功后出队。 */
-export function resolveConflict(scope, title, options = {}) {
-  const rows = Array.isArray(loadIndex(scope).conflicts) ? loadIndex(scope).conflicts : [];
-  const norm = normalizeText(title, 120);
-  const row = rows.find((item) => item.title === norm && item.scope === (scope.key === 'global' ? 'global' : 'project'));
+/** 版本对不上就拒绝：用户看到的草稿和现在这条不是同一版。 */
+function staleDraft(row, ref) {
+  if (!ref || typeof ref !== 'object' || ref.expectedRevision === undefined) return false;
+  return Number(ref.expectedRevision) !== (Number(row.revision) || 1);
+}
+
+/** 确认另存：用队列里的草稿按 distinct 重放一次，成功后按 id 出队。 */
+export function resolveConflict(scope, ref, options = {}) {
+  const row = conflictRowLocked(scope, ref);
   if (!row) return { ok: false, reason: '这条待裁决已经不在了，刷新面板看看' };
+  if (staleDraft(row, ref)) return { ok: false, reasonCode: 'stale_draft', reason: '这条待裁决又更新了，刷新后再处理' };
   const draft = { ...(row.draft || {}), resolution: 'distinct', writeMode: options.writeMode === 'append' ? 'append' : 'patch' };
   if (scope.key === 'global') draft.scope = 'global';
   else draft.scope = 'project';
   if (!draft.title) draft.title = row.title;
   const result = saveEntry(scope, draft);
-  if (result.needsResolution) return { ok: false, reason: '还是相近：换一个标题或等确认', result };
-  if (result.needsScope) return { ok: false, reason: '这条记忆的适用范围还没定，先说明当前环境', result };
-  clearConflictLocked(scope, row.title);
-  return { ok: true, result };
+  if (result && result.needsResolution) return { ok: false, reason: '还是相近：换一个标题或等确认', result };
+  if (result && result.needsScope) {
+    const reason = result.reasonCode === 'memory_disabled' ? '这层记忆已关闭' : '这条记忆的适用范围还没定，先说明当前环境';
+    return { ok: false, reason, result };
+  }
+  clearConflictLocked(scope, { id: row.id });
+  return { ok: true, result, record: result && result.record };
 }
 
 /** 删掉待裁决：用户决定不再另存。 */
-export function dropConflict(scope, title) {
-  const before = pendingConflictsOf(scope);
-  clearConflictLocked(scope, title);
-  return pendingConflictsOf(scope) < before;
+export function dropConflict(scope, ref) {
+  const row = conflictRowLocked(scope, ref);
+  if (!row) return { ok: false, reason: '这条待裁决已经不在了，刷新面板看看' };
+  if (staleDraft(row, ref)) return { ok: false, reasonCode: 'stale_draft', reason: '这条待裁决又更新了，刷新后再处理' };
+  clearConflictLocked(scope, { id: row.id });
+  return { ok: true };
 }
 
 /** 当前层还有几条没处理的冲突。 */

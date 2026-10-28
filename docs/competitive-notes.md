@@ -180,7 +180,7 @@
 | # | 结论 | 判定 | 理由 | 优先级 | 落点 |
 | --- | --- | --- | --- | --- | --- |
 | 4.1 | **在「自进化」页签加「结构体检」**：重复标题、全局条目 > 200、无 `when` 的 global、从未被读过的条目（0.18.0 已完成；全局两项需要 `/lite-memory/overview` 返回全局条目数，面板拿不到时按「—」显示） | 改造后采纳 | Letta `/doctor` 证明「体检」是真实需求；我们已有全部数据（`suppressionOf`、`prunedReceipts`、`lastUsed`、`needsResolution`），只差一个视图 | P1 | `client.js` `MemoryPanel` 的 `switchBar`/tabs；数据侧复用 `store.js` 的 `forgottenFingerprints`、`pruneSuggestions`、`usedStale` |
-| 4.2 | **冲突队列**：把未解决的 `needsResolution` 列成待办（0.18.0 写入侧；0.18.29 面板列出待办，可「另存」或「忽略」，草稿随队列保留；自动合并仍未做） | 改造后采纳 | 冲突现在是同步阻塞在写入调用里，用户离开那一轮就丢了上下文。队列化后可在面板里处理 | P1 | `store.js` `conflictsOf` / `resolveConflict` / `dropConflict`；`index.js` `/lite-memory/conflict`；`client.js` 待裁决条 |
+| 4.2 | **冲突队列**：把未解决的 `needsResolution` 列成待办（0.18.0 写入侧；0.18.30 面板列出待办，可展开看草稿/范围、另存或忽略；入口核验项目身份/总开关/草稿 id+版本，跨项目与关闭态只读；自动合并仍未做） | 改造后采纳 | 冲突现在是同步阻塞在写入调用里，用户离开那一轮就丢了上下文。队列化后可在面板里处理 | P1 | `store.js` `conflictsOf` / `resolveConflict` / `dropConflict`；`index.js` `/lite-memory/conflict`；`client.js` 待裁决条 |
 | 4.3 | **图谱节点点击 = 过滤列表**（保持单一归属不变式），节点详情显示有效期/最后使用/取代链 | 改造后采纳 | 我们图谱是确定性布局、只画真实数据，这已经比力导向图克制；补「点节点过滤列表」让图成为导航而不是装饰 | P2 | `client.js` `MemoryGraph`、`graphViewOf`、`filterRecords`、`projectionOf` |
 | 4.4 | **时间线视图只在有「冲突/过期/取代」时出现** | 改造后采纳 | Hermes 的 journey 是全局时间线，但我们没有那么多事件；按需出现避免空视图 | P2 | `client.js` `MemoryPalace` 的分层逻辑（`palaceRoomsOf`/`palaceRoomPageOf`）可复用为时间分页 |
 | 4.5 | **不扩宫殿为 3D / 不做自由布局图** | 拒绝 | DESIGN.md 已规定确定性布局、真实数据；3D 与力导向都无法保证可复现快照，测试也失去 seam | — | — |

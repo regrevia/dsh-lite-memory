@@ -2157,6 +2157,7 @@ window.__ModuleLoader__.load({
       const [display, setDisplay] = React.useState({ ...DISPLAY_DEFAULTS });
       const [hubFilter, setHubFilter] = React.useState(null);
       const [checkup, setCheckup] = React.useState(false);
+      const [expandedConflict, setExpandedConflict] = React.useState('');
       const alive = React.useRef(true);
       const generation = React.useRef(0);
       const scopeRef = React.useRef('');
@@ -2205,10 +2206,13 @@ window.__ModuleLoader__.load({
         if (!row || busy) return;
         setBusy(true);
         setNote('');
-        post('/lite-memory/conflict', { sessionId, scopeKey: selectedKey, title: row.title, op }).then((result) => {
+        post('/lite-memory/conflict', {
+          sessionId, scopeKey: selectedKey, conflictId: row.id, expectedRevision: row.revision, op,
+        }).then((result) => {
           if (!alive.current) return;
           setBusy(false);
           if (result.ok && result.body && result.body.ok) {
+            setExpandedConflict('');
             if (op === 'drop') setNote('已忽略这条待裁决');
             load(selectedKey);
           } else setNote(failure(result, '待裁决没处理成'));
@@ -2220,6 +2224,7 @@ window.__ModuleLoader__.load({
         setDisplay(readDisplaySettings(selectedKey));
         setShowSettings(false);
         setHubFilter(null);
+        setExpandedConflict('');
       }, [selectedKey]);
       React.useEffect(() => {
         setMemoryView((value) => viewModeOf(display, value));
@@ -2726,18 +2731,41 @@ window.__ModuleLoader__.load({
       const memoryViewActive = viewModeOf(display, memoryView);
       const evolutionViewActive = graphViewOf(display.graph, evolutionView);
 
+      const conflictReadOnly = !memoryOn || (!globalView && selectedKey !== currentKey);
+      const draftScope = (row) => (row.scope === 'global' ? '总记忆' : '本项目');
       const conflictBar = queued.length === 0 ? null : h('div', {
         style: { display: 'flex', flexDirection: 'column', gap: '3px', padding: '7px 9px 8px', borderBottom: '1px solid var(--dsw-alias-border-l1)', flex: '0 0 auto' },
       },
-      h('div', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, `${queued.length} 条保存没确认`),
-      queued.slice(0, 2).map((row) => h('div', {
-        key: row.id || row.title,
-        style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 },
-      },
-      h('span', { style: { flex: 1, minWidth: 0, fontSize: '12px', lineHeight: '20px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, row.title),
-      h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'keep') }, '另存'),
-      h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'drop') }, '忽略'),
-      )));
+      h('div', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, `${queued.length} 条保存没确认${conflictReadOnly ? ' · 只读' : ''}`),
+      queued.slice(0, 2).map((row) => {
+        const open = expandedConflict === row.id;
+        const draft = row.draft || {};
+        return h('div', {
+          key: row.id || row.title,
+          style: { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 },
+        },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
+          h('button', {
+            type: 'button',
+            'aria-expanded': open,
+            onClick: () => setExpandedConflict(open ? '' : row.id),
+            style: {
+              flex: 1, minWidth: 0, padding: 0, border: 0, background: 'transparent', color: 'inherit',
+              textAlign: 'left', font: 'inherit', fontSize: '12px', lineHeight: '20px',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer',
+            },
+          }, row.title),
+          conflictReadOnly ? null : h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'keep') }, '另存'),
+          conflictReadOnly ? null : h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'drop') }, '忽略'),
+        ),
+        open ? h('div', {
+          style: { ...PANEL_MUTED, padding: '2px 0 4px', lineHeight: '18px', overflowWrap: 'anywhere' },
+        },
+        h('div', null, `范围：${draftScope(row)}`),
+        draft.when ? h('div', null, `适用：${draft.when}`) : null,
+        h('div', null, String(draft.body || draft.summary || '（没有正文）').slice(0, 400)),
+        ) : null);
+      }));
       const memoryListPane = h('div', {
         style: {
           ...PANEL_CARD, padding: '2px 4px', minHeight: 0, overflowY: 'auto',
