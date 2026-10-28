@@ -2516,6 +2516,45 @@ window.__ModuleLoader__.load({
         });
       };
 
+      /** 跨层搬移是人的决定：模型只能提案，面板这一下才真的换层。 */
+      const moveMemory = (record) => {
+        if (busy || !record || !record.id) return;
+        const target = selectedKey === 'global' ? 'project' : 'global';
+        setBusy(true);
+        setNote('');
+        const operationId = newOperationId();
+        let attempts = 0;
+        const step = (resume) => {
+          attempts += 1;
+          const payload = resume ? { sessionId, operationId } : { sessionId, id: record.id, target, operationId };
+          post(resume ? '/lite-memory/resume-move' : '/lite-memory/move', payload).then((result) => {
+            if (!alive.current) return;
+            if (result.status === 202) {
+              if (attempts < 3) {
+                step(true);
+                return;
+              }
+              setBusy(false);
+              setNote('搬移还没收尾，再点一次继续');
+              load(selectedKey);
+              return;
+            }
+            if (!alive.current || (selectedKey && scopeRef.current !== selectedKey)) return;
+            setBusy(false);
+            if (succeeded(result)) {
+              setSelectedMemory('');
+              setDetail(null);
+              setEditingMemory(false);
+              setNote(target === 'global' ? '已移到全局，各项目都能用' : '已移回当前项目');
+              load(selectedKey);
+              return;
+            }
+            setNote(failure(result, '没有移动'));
+          });
+        };
+        step(false);
+      };
+
       const setControlMode = (mode) => {
         if (busy || !canToggle || mode === memoryMode) return;
         setBusy(true);
@@ -2627,7 +2666,7 @@ window.__ModuleLoader__.load({
         style: { display: 'flex', flexDirection: 'column', gap: '3px', padding: '7px 18px 8px', borderBottom: '1px solid var(--dsw-alias-border-l1)', flex: '0 0 auto' },
       },
       globalView
-        ? h('div', { style: { ...PANEL_MUTED, lineHeight: '20px' } }, '全局记忆只读')
+        ? h('div', { style: { ...PANEL_MUTED, lineHeight: '20px' } }, '全局记忆只读，可移回项目')
         : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '4px 18px' } },
           modeChoices(),
           switchItem('自进化', evolutionOn ? '实验功能，会增加 token 消耗' : '从反馈里整理经验', evolutionOn, busy || !evolution || !canToggle || !memoryOn, toggleEvolution), // ui-copy-ignore 用户指定文案
@@ -2732,6 +2771,9 @@ window.__ModuleLoader__.load({
                     },
                   }, '修改'),
                 )
+                : null,
+              !editingMemory && detailRecord && memoryOn && (globalView || canManage)
+                ? h(Action, { disabled: busy, onClick: () => moveMemory(detailRecord) }, selectedKey === 'global' ? '移回项目' : '移到全局')
                 : null,
             )
             : h('div', { style: PANEL_MUTED }, detailNote || '读取中…'),

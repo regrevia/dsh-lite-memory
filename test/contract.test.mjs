@@ -1299,4 +1299,29 @@ const cfgKeep = await call('/lite-memory/conflict', {
 assert.equal(cfgKeep.status, 200);
 assert.equal(store.conflictsOf(store.globalScope()).length, 0);
 
+// ── 面板搬移：只带会话就能换层，身份按 id 换但正文与条件跟着走 ─────────────
+const moveCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-move-'));
+sessionCwds.set('session-move', moveCwd);
+store.saveEntry(store.scopeOf(moveCwd), {
+  title: '搬移探针', summary: '只在项目层', body: '搬移正文。', tags: ['搬移'], writeMode: 'patch',
+});
+const movedOut = await call('/lite-memory/move', {
+  sessionId: 'session-move', target: 'global',
+  id: store.loadIndex(store.scopeOf(moveCwd)).entries.find((row) => row.title === '搬移探针').id,
+});
+assert.equal(movedOut.status, 200);
+assert.equal(movedOut.body.ok, true);
+assert.equal(movedOut.body.status, 'moved');
+assert.equal(movedOut.body.to, 'global');
+assert.ok(movedOut.body.id && movedOut.body.id !== movedOut.body.previousId, '换层后身份换新 id');
+assert.equal(store.loadIndex(store.scopeOf(moveCwd)).entries.some((row) => row.title === '搬移探针'), false, '项目层不再有这条');
+assert.equal(store.loadIndex(store.globalScope()).entries.some((row) => row.id === movedOut.body.id), true, '全局层拿到这条');
+const movedBack = await call('/lite-memory/move', {
+  sessionId: 'session-move', target: 'project', id: movedOut.body.id,
+});
+assert.equal(movedBack.status, 200);
+assert.equal(movedBack.body.to, 'project');
+assert.equal(store.loadIndex(store.scopeOf(moveCwd)).entries.some((row) => row.id === movedBack.body.id), true, '搬回当前项目');
+assert.equal(store.loadIndex(store.globalScope()).entries.some((row) => row.id === movedOut.body.id), false, '全局层不再有这条');
+
 console.log('contract.test.mjs: all passed');

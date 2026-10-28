@@ -739,7 +739,10 @@ function keepHandler(webServer, cwdForSession) {
       return sendJson(res, 200, { ok: true, ...listCitations(sessionId) });
     }
 
-    const cwd = typeof body.cwd === 'string' ? body.cwd : '';
+    /** 面板只带会话：工作目录由会话身份查，客户端不用抄路径。 */
+    const cwd = typeof body.cwd === 'string' && body.cwd
+      ? body.cwd
+      : (typeof body.sessionId === 'string' ? cwdForSession(body.sessionId) || '' : '');
     if (cwd.length === 0) return sendJson(res, 400, { ok: false, reason: '请求不完整' });
     const scope = scopeOf(cwd);
     const id = typeof body.id === 'string' ? body.id : '';
