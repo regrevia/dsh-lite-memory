@@ -317,5 +317,56 @@ test('对象级绑定仍然算相关：同系列/同产物的规则排前面', (
   assert.deepEqual(view.objectBindingsOf(broadRule), []);
 });
 
+test('预算内选组合：件数优先，跳过单条过大的候选换更小的一条', () => {
+  const items = [{ id: 'a', n: 50 }, { id: 'b', n: 50 }, { id: 'c', n: 10 }, { id: 'd', n: 10 }];
+  const sizeOf = (item) => item.n;
+  const picked = view.selectContextBundle(items, { maxItems: 3, maxBytes: 100, sizeOf });
+  assert.deepEqual(picked.items.map((item) => item.id), ['a', 'c', 'd']);
+  assert.equal(picked.bytes, 70);
+  assert.deepEqual(picked.omitted, [1]);
+});
+
+test('预算内选组合：单条就超预算时交空，不塞弱相关候选', () => {
+  const huge = [{ id: 'big', n: 500 }];
+  const none = view.selectContextBundle(huge, { maxItems: 3, maxBytes: 100, sizeOf: (item) => item.n });
+  assert.deepEqual(none.items, []);
+  assert.equal(none.bytes, 0);
+  const empty = view.selectContextBundle([], {});
+  assert.deepEqual(empty.items, []);
+  assert.deepEqual(empty.omitted, []);
+});
+
+test('预算内选组合：没预算也不硬凑件数，最多只看到 12 条', () => {
+  const many = Array.from({ length: 20 }, (_, i) => ({ id: `m${i}`, n: 5 }));
+  const picked = view.selectContextBundle(many, { maxItems: 3, maxBytes: 12, sizeOf: (item) => item.n });
+  assert.equal(picked.items.length, 2);
+  assert.deepEqual(picked.items.map((item) => item.id), ['m0', 'm1']);
+  assert.equal(picked.omitted.length, 10);
+});
+
+test('融合倒数排名：同一路里并列同分不被 id 顺序拆开', () => {
+  const rows = view.fuseRoutes([[{ id: 'a', rank: 1 }, { id: 'b', rank: 1 }], ['a', 'c']], { k: 60 });
+  const byId = new Map(rows.map((row) => [row.id, row.score]));
+  assert.ok(Math.abs(byId.get('a') - 2 / 61) < 1e-12);
+  assert.ok(Math.abs(byId.get('b') - 1 / 61) < 1e-12);
+  assert.ok(byId.get('b') > byId.get('c'));
+  assert.ok(byId.get('a') > byId.get('c'));
+});
+
+test('融合倒数排名：被第二条独立路径命中的条目反超只靠字面命中的条目', () => {
+  const base = { tags: [], triggers: [], when: '', applicability: 'conditional', selection: null, conditions: [] };
+  const strong = { ...base, scope: 'project', id: 'mem_000000000051', title: '样式统一用变量', summary: '样式统一用变量，别写死颜色', lastUsed: '2026-01-01T00:00:00.000Z', links: [{ id: 'mem_000000000052' }] };
+  const linked = { ...base, scope: 'global', id: 'mem_000000000052', title: '颜色改一次全站生效', summary: '样式统一用变量的收益', lastUsed: '2026-01-01T00:00:00.000Z' };
+  const plain = { ...base, scope: 'project', id: 'mem_000000000053', title: '按钮圆角', summary: '样式统一用变量的例外', lastUsed: '2026-03-01T00:00:00.000Z' };
+  const rows = view.rank([strong, linked, plain], '样式统一用变量', { limit: 3, context: ctxOf(null, {}) });
+  const ids = rows.map((row) => row.record.id);
+  assert.equal(ids[0], strong.id);
+  const linkedRow = rows.find((row) => row.record.id === linked.id);
+  const plainRow = rows.find((row) => row.record.id === plain.id);
+  assert.ok(linkedRow && plainRow);
+  assert.equal(linkedRow.raw, plainRow.raw);
+  assert.ok(ids.indexOf(linked.id) < ids.indexOf(plain.id));
+});
+
 for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
 console.log(`view.test.mjs: ${passed} passed`);

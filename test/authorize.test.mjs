@@ -89,6 +89,15 @@ await test('tool_only 也保留本轮授权', async () => {
   assert.ok(titlesIn(global).has('发布统一走 dsh-npm'));
 });
 
+await test('adaptive 下真人在本轮说过的授权不会因为走了自动召回而丢失', async () => {
+  const runtime = boot('adaptive');
+  const { agent } = agentFor('adaptauth');
+  await runtime.preStep({ agent, signal: new AbortController().signal, turn: 't1' }, enter(human('以后所有项目都用 dsh-npm 发布')));
+  const out = await runtime.exec("memory_save", saveArgs("镜像源统一走内网仓库"), agent);
+  assert.equal(out.scope, 'global');
+  assert.ok(titlesIn(global).has('镜像源统一走内网仓库'));
+});
+
 await test('没有本轮原话时模型的 scope 提案不生效', async () => {
   const runtime = boot('adaptive');
   const { agent, dir } = agentFor('noauth');

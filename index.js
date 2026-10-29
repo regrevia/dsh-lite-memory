@@ -2844,6 +2844,14 @@ export function apply(ctx, config) {
       if (fresh.length > 0 && previous) flushUsage(previous);
       const sameSession = Boolean(previous && previous.sessionId === sessionId);
       const sessionTask = recallTasks.get(sessionId) || null;
+      /**
+       * 授权与召回模式无关：这句话先记下来，写工具在哪条分支被调用都能核对。
+       * 必须在任何模式分支返回之前记，否则 adaptive 下的真实原话会在下一步丢失。
+       */
+      const saidThisStep = view.newestUserQuery(fresh).slice(0, RECALL_QUERY_CHARS);
+      const heldAuth = requestAuth.get(agent);
+      if (saidThisStep) requestAuth.set(agent, { said: saidThisStep, turn, sessionId });
+      else if (!(heldAuth && heldAuth.turn === turn && heldAuth.sessionId === sessionId)) requestAuth.delete(agent);
 
       if (fresh.length === 0) {
         /** 工具续步：内容冻结，只把快照绑到本步的 signal；盘上版本变了才重投影。 */
@@ -2932,14 +2940,7 @@ export function apply(ctx, config) {
         autoBudget: win.autoBudget ? JSON.parse(JSON.stringify(win.autoBudget)) : null,
       } : null;
       /** 工具模式也要记下本轮真人原话：只用于核对绑定，不自动注入。 */
-      const said = view.newestUserQuery(fresh).slice(0, RECALL_QUERY_CHARS);
-      /**
-       * 授权与召回模式无关：这句话先记下来，写工具在哪条分支被调用都能核对。
-       * 续步没有新的真人原话时保留本 turn 已记的那句，不拿空串覆盖。
-       */
-      const heldAuth = requestAuth.get(agent);
-      if (said) requestAuth.set(agent, { said, turn, sessionId });
-      else if (!(heldAuth && heldAuth.turn === turn && heldAuth.sessionId === sessionId)) requestAuth.delete(agent);
+      const said = saidThisStep;
       const continuationHint = view.isContinuationQuery(said) || view.isEllipticalContinuation(said);
       /** 「继续」这类续说没有检索词：带上同会话上一轮原话，否则这一轮必然召回为空。 */
       const carried = continuationHint

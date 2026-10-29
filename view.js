@@ -569,12 +569,75 @@ export function rank(records, query, options = {}) {
       if (condition.key === 'artifactKey') return task.artifactKey && sameText(condition.value, task.artifactKey);
       return false;
     });
-    rows.push({ record, score: matched.score + (sameTask ? 1.5 : 0), hints: matched.hints, status });
+    rows.push({ record, score: matched.score + (sameTask ? 1.5 : 0), hints: matched.hints, status, sameTask, raw: matched.score });
   }
-  rows.sort((a, b) => b.score - a.score
+  /**
+   * 多路召回后融合：同一条记忆在被越多条独立路径命中，越该排在前面。
+   * 字面命中、标题/别名整词、当前任务对象、已命中条目的一跳链接各算一路，
+   * 每路先按自己的顺序排好再融合；只走融合、不改单条原始分数与阈值。
+   */
+  const byId = new Map(rows.map((row) => [String(row.record.id), row]));
+  /**
+   * 同一路里分数相同的条目并列同一名次：并列不能被 id 顺序拆开，
+   * 否则融合分凭空偏向字母序靠前的条目，把「最近用过」这类并列规则挤掉。
+   */
+  const orderBy = (pick) => {
+    const sorted = rows
+      .filter((row) => pick(row))
+      .sort((a, b) => b.score - a.score || String(a.record.id).localeCompare(String(b.record.id)));
+    const out = [];
+    let lastScore = null;
+    let lastRank = 0;
+    sorted.forEach((row, index) => {
+      const rank = row.score === lastScore ? lastRank : index + 1;
+      lastScore = row.score;
+      lastRank = rank;
+      out.push({ id: String(row.record.id), rank });
+    });
+    return out;
+  };
+  const lexical = orderBy(() => true);
+  const exactTitle = orderBy((row) => row.hints.includes('title'));
+  const objectCue = orderBy((row) => row.sameTask);
+  const linkedFromHits = [];
+  for (const id of rows.slice(0, 3).map((row) => String(row.record.id))) {
+    const source = byId.get(id);
+    if (!source) continue;
+    for (const link of linksOf(source.record)) {
+      const target = byId.get(String(link && link.id));
+      if (!target || target.record.id === source.record.id) continue;
+      const targetGlobal = target.record.storeScope === 'global' || target.record.scope === 'global';
+      if (!target.sameTask && !targetGlobal) continue;
+      linkedFromHits.push(String(target.record.id));
+    }
+  }
+  const fused = new Map(fuseRoutes([lexical, exactTitle, objectCue, [...new Set(linkedFromHits)]]).map((row) => [row.id, row.score]));
+  for (const row of rows) row.rrf = fused.get(String(row.record.id)) || 0;
+  /** 先比融合分，再比单条命中的原始强弱：强命中不会被弱命中的多路凑数盖过去。 */
+  rows.sort((a, b) => b.rrf - a.rrf || b.raw - a.raw
     || String(b.record.lastUsed || '').localeCompare(String(a.record.lastUsed || ''))
     || String(a.record.id).localeCompare(String(b.record.id)));
   return rows.slice(0, limit);
+}
+
+/** 融合倒数排名：每路一条有序 id 序列，k 越大越平缓；同一路里重复出现只算一次。 */
+export const RRF_K = 60;
+export function fuseRoutes(lists, options = {}) {
+  const k = Number.isInteger(options.k) && options.k > 0 ? options.k : RRF_K;
+  const totals = new Map();
+  for (const list of lists || []) {
+    const seen = new Set();
+    (Array.isArray(list) ? list : []).forEach((entry, index) => {
+      const key = String((entry && typeof entry === 'object' ? entry.id : entry) ?? '');
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      const rank = entry && typeof entry === 'object' && Number.isInteger(entry.rank) && entry.rank > 0 ? entry.rank : index + 1;
+      totals.set(key, (totals.get(key) || 0) + 1 / (k + rank));
+    });
+  }
+  return [...totals.entries()]
+    .map(([id, score]) => ({ id, score }))
+    .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
 }
 
 /** 卡片：只放够判断要不要读的那几行，必要前提完整在场，不截断。 */
@@ -602,29 +665,57 @@ export function bytesOf(value) {
   return Buffer.byteLength(JSON.stringify(value));
 }
 
+/**
+ * 预算内选组合：候选按相关度先排好，最多看 12 条，枚举 0–3 件的全部组合，按真实占用字节挑。
+ * 排序只有一条：件数多的优先；件数相同取占用小的；仍相同取顺序靠前的组合。
+ * 不为了凑件数塞进弱相关候选，也不截短任何一条；没有任何组合装得下时允许交空。
+ */
+export function selectContextBundle(candidates, options = {}) {
+  const list = Array.isArray(candidates) ? candidates.filter(Boolean).slice(0, 12) : [];
+  const maxItems = Number.isInteger(options.maxItems) ? Math.min(options.maxItems, 3) : 3;
+  const maxBytes = Number.isInteger(options.maxBytes) ? options.maxBytes : CARD.bytes;
+  const allowEmpty = options.allowEmpty !== false;
+  const sizeOf = typeof options.sizeOf === 'function' ? options.sizeOf : (item) => bytesOf(item);
+  const sizes = list.map((item) => { try { return sizeOf(item); } catch { return Number.POSITIVE_INFINITY; } });
+  const combinations = [];
+  const walk = (start, picked, used) => {
+    combinations.push({ indexes: picked.slice(), bytes: used });
+    if (picked.length >= maxItems) return;
+    for (let i = start; i < list.length; i += 1) {
+      const next = used + sizes[i];
+      if (next > maxBytes) continue;
+      picked.push(i);
+      walk(i + 1, picked, next);
+      picked.pop();
+    }
+  };
+  walk(0, [], 0);
+  combinations.sort((a, b) => (b.indexes.length - a.indexes.length) || (a.bytes - b.bytes) || (a.indexes[0] ?? -1) - (b.indexes[0] ?? -1));
+  const best = combinations[0];
+  if (!best || (best.indexes.length === 0 && !allowEmpty)) return { items: [], omitted: list.map((item, i) => i), bytes: 0 };
+  const chosen = new Set(best.indexes);
+  return {
+    items: best.indexes.map((i) => list[i]),
+    omitted: list.map((item, i) => i).filter((i) => !chosen.has(i)),
+    bytes: best.bytes,
+  };
+}
+
 /** 整卡装预算：单卡超预算就省略，装不下就停，不为了凑满 3 张截短任何一张。 */
 export function selectCards(records, options = {}) {
   const max = Number.isInteger(options.max) ? options.max : CARD.max;
   const bytes = Number.isInteger(options.bytes) ? options.bytes : CARD.bytes;
   const scopeOf = typeof options.scopeOf === 'function' ? options.scopeOf : () => '';
-  const cards = [];
-  const omitted = [];
-  let used = 0;
-  for (const record of records) {
-    if (cards.length >= max) {
-      omitted.push(record.id);
-      continue;
-    }
-    const card = cardOf(record, scopeOf(record));
-    const size = bytesOf(card);
-    if (used + size > bytes) {
-      omitted.push(record.id);
-      continue;
-    }
-    used += size;
-    cards.push(card);
-  }
-  return { cards, omitted, bytes: used };
+  const entries = (Array.isArray(records) ? records : []).map((record) => ({ record, card: cardOf(record, scopeOf(record)) }));
+  const bundle = selectContextBundle(entries, {
+    maxItems: max, maxBytes: bytes, allowEmpty: true, sizeOf: (entry) => bytesOf(entry.card),
+  });
+  const picked = new Set(bundle.items);
+  return {
+    cards: bundle.items.map((entry) => entry.card),
+    omitted: entries.filter((entry) => !picked.has(entry)).map((entry) => entry.record.id),
+    bytes: bundle.bytes,
+  };
 }
 
 function pick(record, keys) {
