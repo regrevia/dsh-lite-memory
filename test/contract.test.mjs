@@ -88,7 +88,7 @@ function call(pathname, payload, options = {}) {
 const json = (body) => JSON.parse(body);
 
 // ── tool contract ────────────────────────────────────────────────────────────
-const names = ['memory_save', 'memory_suggest', 'memory_search', 'memory_read', 'memory_forget'];
+const names = ['memory_save', 'memory_suggest', 'memory_search', 'memory_read', 'memory_forget', 'memory_persona'];
 assert.deepEqual([...defs.keys()].sort(), [...names].sort());
 const TITLE_ADDRESSED = ['memory_read', 'memory_forget'];
 for (const name of names) {

@@ -60,6 +60,8 @@ import * as view from './view.js';
 import * as state from './state.js';
 import * as anchor from './anchor.js';
 import * as learning from './learning.js';
+import * as persona from './persona.js';
+import * as personaStore from './persona-store.js';
 
 /** 开关路由在 apply 外，也要能中止在途整理。 */
 const learningAborts = new Map();
@@ -2007,6 +2009,42 @@ export function apply(ctx, config) {
     }
   }
 
+  /**
+   * 「记住我」投影：只在本轮交付形式确实相关时放一两句表达偏好。
+   * 与召回完全分开：它不取记忆正文、不碰项目层，也不改任何技术结论。
+   * 关闭开关或项目记忆关闭时一律不输出。
+   */
+  function personaText(holder) {
+    try {
+      const agent = holder?.agent ?? getService('agents')?.currentInitiator?.();
+      if (!agent) return '';
+      if (holder?.signal?.aborted) return '';
+      const scope = scopeOf(cwdOf({ agent }));
+      if (!memoryEnabled(scope)) return '';
+      const read = personaStore.readPersona();
+      if (read.corrupt || !read.persona || read.persona.control.enabled !== true) return '';
+      /** 本轮用户原话是最高优先级；没有本轮请求就不投影，避免拿上一轮的偏好套这次。 */
+      const said = authorizedSaidOf(agent);
+      if (!said) return '';
+      const formed = {};
+      const preferences = read.persona.preferences || {};
+      for (const dimension of persona.DIMENSION_NAMES) {
+        const row = preferences[dimension];
+        if (row && row.state === 'formed' && row.value) formed[dimension] = row;
+      }
+      if (!Object.keys(formed).length) return '';
+      const picked = persona.selectPreferenceProjection({
+        currentRequest: said.slice(0, 400),
+        outputMode: 'chat',
+        explicitRequirements: '',
+        formed,
+      });
+      return picked && picked.block ? picked.block : '';
+    } catch {
+      return '';
+    }
+  }
+
 
   ctx.effect(() => tools.register({
     name: 'memory_save',
@@ -2674,6 +2712,96 @@ export function apply(ctx, config) {
     },
   }), 'lite-memory: memory_forget');
 
+  /**
+   * 「记住我」的用户接口：开关、看已形成/观察中、手动修改、否掉某维、清空。
+   * 面板没接上之前，这是唯一入口；参数与返回都保持封闭集，不接受自由文本人设。
+   */
+  const PERSONA_PARAMS = {
+    type: 'object',
+    properties: {
+      action: {
+        type: 'string',
+        enum: ['status', 'enable', 'disable', 'edit', 'reject', 'clear', 'forget_evidence'],
+        description: 'status 看现状；enable/disable 开关；edit 手动改一维；reject 否掉一维并停止使用；clear 清空全部；forget_evidence 删一条证据',
+      },
+      dimension: { type: 'string', description: '维度名，见 status 返回的 dimension 字段' },
+      value: { type: 'string', description: '该维度的取值；必须是该维度允许的取值' },
+      eventId: { type: 'string', description: 'forget_evidence 用：要删的证据编号' },
+    },
+    required: ['action'],
+    additionalProperties: false,
+  };
+  const personaSummary = (action, persona_, extra = {}) => {
+    const panel = personaStore.describePersona();
+    return {
+      action,
+      ok: extra.ok !== false,
+      ...(extra.reason ? { reason: extra.reason } : {}),
+      enabled: persona_ ? persona_.control.enabled === true : panel.enabled,
+      corrupt: panel.corrupt === true,
+      formed: panel.formed.map((row) => `${row.dimension}=${row.value}`),
+      observing: panel.observing.map((row) => `${row.dimension} · ${row.text}`),
+    };
+  };
+
+  ctx.effect(() => tools.register({
+    name: 'memory_persona',
+    description: `用户的长期表达偏好（「记住我」），默认关闭。只记沟通方式，不记技术结论、项目事实或任何指令。status 看现状；改完立刻生效。用户说「记住我喜欢先看结论」这类长期偏好时，先 status，确认它确实是长期且跨项目，再 edit。`,
+    parameters: PERSONA_PARAMS,
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          action: { type: 'string' },
+          ok: { type: 'boolean' },
+          reason: { type: 'string' },
+          enabled: { type: 'boolean' },
+          corrupt: { type: 'boolean' },
+          formed: { type: 'array', items: { type: 'string' } },
+          observing: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['action', 'ok', 'enabled', 'formed', 'observing'],
+        additionalProperties: false,
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.corrupt
+          ? 'memory · 记住我：画像文件读不了，已保留原文件不动'
+          : `memory · 记住我 ${value.enabled ? '已开启' : '已关闭'}${value.formed.length ? ` · 已形成 ${value.formed.length} 项` : ''}${value.observing.length ? ` · 观察中 ${value.observing.length} 项` : ''}${value.reason ? `\n${value.reason}` : ''}`,
+      }],
+    },
+    execute: async (args) => {
+      const action = String(args.action || 'status');
+      const fail = (reason) => ({ action, ok: false, reason, enabled: false, corrupt: false, formed: [], observing: [] });
+      const dim = String(args.dimension || '').trim();
+      const value = String(args.value || '').trim();
+      if (action === 'enable' || action === 'disable') {
+        const next = personaStore.setPersonaEnabled({ enabled: action === 'enable' });
+        return personaSummary(action, next.persona, { ok: next.ok });
+      }
+      if (action === 'status') return personaSummary(action, null);
+      if (action === 'clear') {
+        const next = personaStore.clearPersona();
+        return personaSummary(action, next.persona, { ok: next.ok });
+      }
+      if (action === 'edit') {
+        if (!dim || !value) return fail('edit 需要 dimension 和 value');
+        const next = personaStore.editPersonaPreference({ dimension: dim, value });
+        return personaSummary(action, next.persona, { ok: next.ok, reason: next.ok ? '' : next.reason });
+      }
+      if (action === 'reject') {
+        if (!dim) return fail('reject 需要 dimension');
+        const next = personaStore.rejectPersonaPreference({ dimension: dim });
+        return personaSummary(action, next.persona, { ok: next.ok, reason: next.ok ? '' : next.reason });
+      }
+      if (action === 'forget_evidence') {
+        const next = personaStore.retractPersonaEvidence({ eventId: args.eventId, dimension: dim });
+        return personaSummary(action, next.persona, { ok: next.ok, reason: next.ok ? '' : next.reason });
+      }
+      return fail(`不认识的 action：${action}`);
+    },
+  }), 'lite-memory: memory_persona');
+
   /** 「保留」「✕」按钮与统计都挂在 WebServer 上；没有该服务时工具照常可用。 */
   const mountRoute = (holder) => {
     const webServer = holder.webServer ?? holder;
@@ -2706,6 +2834,16 @@ export function apply(ctx, config) {
       required: false,
       text: (holder) => recallText(holder),
     }), 'lite-memory: recall context');
+  }
+
+  if (prompt && typeof prompt.context === 'function') {
+    ctx.effect(() => prompt.context({
+      name: 'lite-memory:persona',
+      order: 61,
+      interpolate: false,
+      required: false,
+      text: (holder) => personaText(holder),
+    }), 'lite-memory: persona context');
   }
 
   /** 引号/反引号里的是「被引用的字」：按钮文案、别人说的话都不构成授权。 */
