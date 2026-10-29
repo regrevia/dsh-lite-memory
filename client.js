@@ -1433,6 +1433,7 @@ window.__ModuleLoader__.load({
       const [pan, setPan] = React.useState({ x: 0, y: 0 });
       const [dragging, setDragging] = React.useState(false);
       const [hoveredId, setHoveredId] = React.useState('');
+      const [hoverAt, setHoverAt] = React.useState(null);
       const svgRef = React.useRef(null);
       const dragRef = React.useRef(null);
       const labelSet = graph.people <= 40;
@@ -1521,8 +1522,9 @@ window.__ModuleLoader__.load({
           minY = Math.min(minY, node.y - 16);
           maxY = Math.max(maxY, node.y + (node.kind === primaryKind ? (wide ? 30 : 28) : 26));
         }
-        const width = Math.max(380, maxX - minX + 36);
-        const height = Math.max(250, maxY - minY + 36);
+        /** 画布 640×472 是布局坐标，子图不放大。 */
+        const width = Math.max(640, maxX - minX + 36);
+        const height = Math.max(472, maxY - minY + 36);
         return { x: (minX + maxX) / 2 - width / 2, y: (minY + maxY) / 2 - height / 2, width, height };
       }, [graph, primaryKind, selectedId]);
       if (!props.records || props.records.length === 0) {
@@ -1585,7 +1587,30 @@ window.__ModuleLoader__.load({
         }
         return placed;
       }, [graph, primaryKind, selectedId, hoveredId, labelSet, nearIds]);
-      return h('div', { style: { position: 'relative', flex: 1, minHeight: 0, display: 'flex' } },
+      const hoveredNode = hoveredId ? graph.nodes.find((node) => node.id === hoveredId) : null;
+      const hoverText = hoveredNode ? String(hoveredNode.title || hoveredNode.label || '') : '';
+      const hoverBubble = hoveredNode && hoverAt && hoverText
+        ? h('div', {
+          key: 'hover-bubble',
+          style: {
+            position: 'absolute', left: `${hoverAt.x + 12}px`, top: `${hoverAt.y + 14}px`, zIndex: 3,
+            maxWidth: '300px', padding: '6px 8px', borderRadius: '8px',
+            border: '1px solid var(--dsw-alias-border-l1)', background: 'var(--dsw-alias-bg-layer-1)',
+            color: 'var(--dsw-alias-label-primary)', fontSize: '12px', lineHeight: '17px',
+            whiteSpace: 'normal', overflowWrap: 'anywhere', pointerEvents: 'none',
+            boxShadow: '0 6px 20px rgba(0, 0, 0, 0.18)',
+          },
+        }, hoverText) : null;
+      return h('div', {
+        style: { position: 'relative', flex: 1, minHeight: 0, display: 'flex' },
+        onMouseMove: (event) => {
+          const rect = event.currentTarget.getBoundingClientRect();
+          const x = event.clientX - rect.left;
+          const y = event.clientY - rect.top;
+          setHoverAt((value) => (value && Math.abs(value.x - x) < 3 && Math.abs(value.y - y) < 3 ? value : { x, y }));
+        },
+        onMouseLeave: () => { setHoverAt(null); setHoveredId(''); },
+      },
         h('div', {
           style: {
             position: 'absolute', top: '8px', right: '8px', zIndex: 2,
@@ -1605,6 +1630,7 @@ window.__ModuleLoader__.load({
             fontSize: '11px', lineHeight: '28px', fontVariantNumeric: 'tabular-nums', cursor: 'pointer',
           },
         }, `${Math.round(zoom * 100)}%`)),
+        hoverBubble,
         h('svg', {
           ref: svgRef,
           viewBox: `${frame.x + frame.width / 2 - viewWidth / 2 + pan.x} ${frame.y + frame.height / 2 - viewHeight / 2 + pan.y} ${viewWidth} ${viewHeight}`,
@@ -2425,7 +2451,6 @@ window.__ModuleLoader__.load({
         setQuery('');
         setSelectedMemory('');
         setSelectedRule('');
-        setMemoryView('list');
       };
       const onPickRuleNode = (node) => {
         if (node.kind !== 'rule') return;
@@ -2877,8 +2902,19 @@ window.__ModuleLoader__.load({
       });
       const memoryTab = h('div', { role: 'tabpanel', 'aria-label': '记忆', style: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: '9px' } },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flex: '0 0 auto' } },
+          hubFilter ? h('button', {
+            type: 'button',
+            onClick: () => setHubFilter(null),
+            'aria-label': `取消只看 ${hubFilter.display}`,
+            style: {
+              flex: '0 0 auto', display: 'inline-flex', alignItems: 'center', gap: '4px',
+              height: '28px', padding: '0 8px', border: '1px solid var(--dsw-alias-border-l1)',
+              borderRadius: '999px', background: 'var(--dsw-alias-bg-layer-1)',
+              color: 'var(--dsw-alias-label-primary)', font: 'inherit', fontSize: '12px', cursor: 'pointer',
+            },
+          }, hubFilter.display, h('span', { 'aria-hidden': 'true', style: { opacity: 0.6 } }, '✕')) : null,
           h('input', {
-            value: hubFilter ? hubFilter.display : query,
+            value: query,
             onChange: (event) => { setHubFilter(null); setQuery(event.target.value); },
             placeholder: '搜索标题或标签', 'aria-label': '搜索记忆',
             style: { ...PANEL_INPUT, width: 'auto', flex: '1 1 0', minWidth: 0 },
