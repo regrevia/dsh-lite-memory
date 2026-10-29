@@ -232,7 +232,8 @@ export const LIMITS = {
   suggestionTtlMs: 48 * 60 * 60 * 1000,
   pending: 20,
   pendingBytes: 64 * 1024,
-  receipts: 256,
+  /** 回执只用于同一操作的重放保护，重试都发生在当下；256 条会白占几十 KB。 */
+  receipts: 64,
   receiptTtlMs: 7 * 24 * 60 * 60 * 1000,
   suppressions: 64,
   suppressionTtlMs: 7 * 24 * 60 * 60 * 1000,
