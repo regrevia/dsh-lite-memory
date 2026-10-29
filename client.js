@@ -959,6 +959,12 @@ window.__ModuleLoader__.load({
       }
     };
     /** 回执可能是上一轮甚至更早的：带上时间，别让旧提醒看起来像刚发生。 */
+    /** 三个按钮压成两个开关：亮着的即当前状态。 */
+    const modeSwitchesOf = (mode) => [
+      { key: 'remind', label: '自动提醒', hint: mode === 'adaptive' ? '相关时自动放进这一轮' : '关掉后只在你搜索时出现', on: mode === 'adaptive' },
+      { key: 'enabled', label: '启用记忆', hint: mode === 'off' ? '已关闭' : '关掉后不参与回答', on: mode !== 'off' },
+    ];
+
     const recallLineOf = (receipt) => {
       const text = recallTextOf(receipt);
       const when = receipt && typeof receipt === 'object' ? shortAgo(receipt.at) : '';
@@ -2637,25 +2643,13 @@ window.__ModuleLoader__.load({
         } : undefined,
       );
 
+      /** 三个按钮改成两个开关：亮着的即当前状态。 */
+      const reminderOn = memoryMode === 'adaptive';
       const modeChoices = () => h('div', {
-        style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 },
+        style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '4px 18px' },
       },
-      h('span', { style: { fontSize: '12px', lineHeight: '20px', fontWeight: 600, whiteSpace: 'nowrap' } }, '记忆'),
-      h('div', {
-        role: 'radiogroup', 'aria-label': '记忆触发方式',
-        style: { display: 'flex', gap: '2px', padding: '2px', borderRadius: '8px', background: 'var(--dsw-alias-bg-layer-2)', border: '1px solid var(--dsw-alias-border-l1)' },
-      },
-      [['adaptive', '自动提醒'], ['tool_only', '仅搜索'], ['off', '关闭']].map(([key, text]) => h('button', {
-        key, type: 'button', role: 'radio', 'aria-checked': memoryMode === key, disabled: busy || !canToggle,
-        onClick: canToggle && !busy ? () => setControlMode(key) : undefined,
-        style: {
-          padding: '2px 7px', minHeight: '22px', border: 'none', borderRadius: '6px',
-          background: memoryMode === key ? 'var(--dsw-alias-bg-layer-1)' : 'transparent',
-          color: 'inherit', fontSize: '11px', lineHeight: '18px', fontWeight: memoryMode === key ? 600 : 400,
-          cursor: canToggle && !busy ? 'pointer' : 'default', whiteSpace: 'nowrap',
-          opacity: memoryMode === key || canToggle ? 1 : 0.55,
-        },
-      }, text))));
+      modeSwitchesOf(memoryMode).map((item) => switchItem(item.label, item.hint, item.on, item.key === 'remind' ? busy || !canToggle || !memoryOn : busy || !canToggle,
+        () => setControlMode(item.key === 'remind' ? (reminderOn ? 'tool_only' : 'adaptive') : (memoryOn ? 'off' : 'adaptive')))));
       const switchItem = (label, hint, on, disabled, onClick) => h('div', {
         style: { display: 'flex', flexDirection: 'column', gap: '1px', minWidth: 0, opacity: disabled && !on ? 0.55 : 1 },
       },
@@ -2671,7 +2665,7 @@ window.__ModuleLoader__.load({
       },
       globalView
         ? h('div', { style: { ...PANEL_MUTED, lineHeight: '20px' } }, '全局记忆只读，可移回项目')
-        : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '4px 18px' } },
+        : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
           modeChoices(),
           switchItem('自进化', evolutionOn ? '实验功能，会增加 token 消耗' : '从反馈里整理经验', evolutionOn, busy || !evolution || !canToggle || !memoryOn, toggleEvolution), // ui-copy-ignore 用户指定文案
           showSettings ? displayToggle('启用图谱', 'graph') : null,
@@ -2818,9 +2812,10 @@ window.__ModuleLoader__.load({
         style: { display: 'flex', flexDirection: 'column', gap: '3px', padding: '7px 9px 8px', borderBottom: '1px solid var(--dsw-alias-border-l1)', flex: '0 0 auto' },
       },
       h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
-        h('span', { style: { ...PANEL_MUTED, lineHeight: '18px', flex: 1, minWidth: 0 } }, `${queued.length} 条保存没确认${conflictReadOnly ? ' · 只读' : ''}`),
+        h('span', { style: { ...PANEL_MUTED, lineHeight: '18px', flex: 1, minWidth: 0 } }, `${queued.length} 条保存有冲突${conflictReadOnly ? ' · 只读' : ''}`),
         queued.length > 2 ? h(Action, { disabled: busy, onClick: () => setConflictAll((value) => !value) }, conflictAll ? '收起' : `查看全部 ${queued.length} 条`) : null,
       ),
+      h('span', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, '和已有记忆对不上，不处理就先不写进去'),
       visibleConflicts.map((row) => {
         const open = expandedConflict === row.id;
         const facts = conflictFactsOf(row);
@@ -2839,8 +2834,8 @@ window.__ModuleLoader__.load({
               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer',
             },
           }, row.title),
-          conflictReadOnly ? null : h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'keep') }, '另存'),
-          conflictReadOnly ? null : h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'drop') }, '忽略'),
+          conflictReadOnly ? null : h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'keep') }, '存新的'),
+          conflictReadOnly ? null : h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'drop') }, '丢掉'),
         ),
         open ? h('div', {
           style: { ...PANEL_MUTED, padding: '2px 0 4px', lineHeight: '18px', overflowWrap: 'anywhere', maxHeight: '180px', overflowY: 'auto' },
@@ -3102,7 +3097,7 @@ window.__ModuleLoader__.load({
 
     // 测试缝：Node 里验引用投影，浏览器里没有任何副作用。
     if (typeof globalThis.__LITE_MEMORY_TEST__ === 'function') {
-      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row, conflictVisibleRows, conflictFactsOf });
+      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row, conflictVisibleRows, conflictFactsOf });
     }
 
     return {

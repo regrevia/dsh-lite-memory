@@ -28,7 +28,7 @@ assert.equal(panel.name, 'shell.overlay');
 assert.equal(panel.order, 30);
 
 const EMPTY_CHILDREN = [];
-const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, conflictVisibleRows, conflictFactsOf } = seen;
+const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, conflictVisibleRows, conflictFactsOf } = seen;
 
 // 图谱只按真实数据画：共享标签成枢纽，显式关联成边，位置由 id 决定。
 const graph = graphOf([
@@ -362,6 +362,13 @@ assert.deepEqual(rowKeepFlags([rowKeyOf('memory_search', blockedBlock(blockedTex
 assert.deepEqual(rowKeepFlags([rowKeyOf('memory_read', blockedBlock('memory · stopped'))]), [true]);
 // 面板要能回答「为什么这次没提醒我」：只给结论和条数，不露原因码。
 assert.equal(recallLineOf(null), '');
+assert.deepEqual(modeSwitchesOf('adaptive').map((item) => item.on), [true, true]);
+assert.deepEqual(modeSwitchesOf('tool_only'), [
+  { key: 'remind', label: '自动提醒', hint: '关掉后只在你搜索时出现', on: false },
+  { key: 'enabled', label: '启用记忆', hint: '关掉后不参与回答', on: true },
+]);
+assert.deepEqual(modeSwitchesOf('off').map((item) => item.on), [false, false]);
+assert.equal(modeSwitchesOf('off')[1].hint, '已关闭');
 assert.equal(recallLineOf({ reason: 'hit', cards: 1, matched: 1 }), '上次自动提醒 1 条');
 assert.equal(recallLineOf({ reason: 'hit', cards: 1, matched: 1, at: new Date(Date.now() - 120000).toISOString() }), '上次自动提醒 1 条 · 2 分钟前');
 assert.equal(recallLineOf({ reason: 'no_overlap', at: new Date().toISOString() }), '上次没提醒，没有匹配的记忆 · 刚刚');
