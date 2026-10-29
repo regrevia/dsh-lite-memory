@@ -287,6 +287,15 @@ assertSchema('memory_save', twinUpdate);
 assert.equal(store.readEntry(twinScope, twinAId).body, '正文甲', '按 id 读不能被同名条目串走');
 assert.equal(store.readEntry(twinScope, twinBId).body, '正文乙');
 
+/** 上下文里常只剩缩短的标题：精确匹配失败时要把完整标题就地报出来，不让模型再猜一轮。 */
+store.saveEntry(twinScope, { title: '生效验证顺序（含：桌面端没有 Cmd+R）', summary: '缩短标题的探针', body: '正文', writeMode: 'patch' });
+await assert.rejects(
+  () => exec('memory_read', { title: '生效验证顺序' }),
+  /相近的里有：「生效验证顺序（含：桌面端没有 Cmd\+R）」/,
+);
+const hintedRead = await exec('memory_read', { title: '生效验证顺序（含：桌面端没有 Cmd+R）' });
+assert.equal(hintedRead.body, '正文');
+
 /** 重命名后仍按原 id 定位到同一条；归档后重建同名条目也不能冒领旧 id。 */
 const renameSaved = store.saveEntry(twinScope, { title: '改名前的探针', summary: '旧身份', body: '旧正文', writeMode: 'patch' });
 const renameSeedId = renameSaved.record?.id ?? renameSaved.id;

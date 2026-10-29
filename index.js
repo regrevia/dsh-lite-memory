@@ -1006,6 +1006,28 @@ function ambiguousTitleError(title, hits, label) {
 }
 
 /**
+ * 标题解析失败时给几条相近的完整标题：上下文里常只剩缩短的标题，
+ * 精确匹配失败就地列出候选，比让模型再猜一次省一轮。
+ */
+function nearTitleHints(targets, title) {
+  const out = [];
+  const seen = new Set();
+  for (const target of targets) {
+    let index;
+    try { index = loadIndex(target); } catch { continue; }
+    for (const entry of [...(index.entries || []), ...(index.archived || [])]) {
+      const current = String(entry && entry.title || '').trim();
+      if (!current || current === title || seen.has(current)) continue;
+      if (!current.includes(title) && !title.includes(current)) continue;
+      seen.add(current);
+      out.push(current);
+      if (out.length >= 3) return out;
+    }
+  }
+  return out;
+}
+
+/**
  * 返回 { id } 或抛出：显式层只查那一层；默认先项目后全局（别的项目不参与解析）。
  * 同一层出现多条同名一律报歧义，绝不取第一条。
  */
@@ -1029,6 +1051,10 @@ function refIdOf(scope, args, label = '记忆') {
     const hits = titleHitsIn(target, title, { includeArchived: true });
     if (hits.length > 1) throw new Error(ambiguousTitleError(title, hits, label));
     if (hits.length === 1) return hits[0].id;
+  }
+  const near = nearTitleHints(sources, title);
+  if (near.length) {
+    throw new Error(`没有「${title}」这条${label}。相近的里有：${near.map((item) => `「${item}」`).join('、')}；用完整标题或 id 再试`);
   }
   throw new Error(`没有「${title}」这条${label}；先用 memory_search 对一下标题`);
 }
