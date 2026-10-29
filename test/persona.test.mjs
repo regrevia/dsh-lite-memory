@@ -140,4 +140,27 @@ test('观察中不猜人格：只说次数与还差什么', () => {
   assert.equal(persona.describeObserving({}).text, '还没有足够观察');
 });
 
+test('验收：维度再多，投影体积也不涨，且只给一两维', () => {
+  const formed = {};
+  for (const dimension of persona.DIMENSION_NAMES) {
+    formed[dimension] = { state: 'formed', value: persona.PREFERENCE_DIMENSIONS[dimension][0] };
+  }
+  const wide = persona.selectPreferenceProjection({ currentRequest: '对比几个方案、解释一下、给例子、写文案、说进度', outputMode: 'chat', explicitRequirements: '', formed });
+  assert.ok(wide.dimensions.length <= persona.PROJECTION_MAX_DIMENSIONS);
+  assert.ok(Buffer.byteLength(wide.block) <= persona.PROJECTION_LIMIT_BYTES);
+  const narrow = persona.selectPreferenceProjection({ currentRequest: '写文案', outputMode: 'chat', explicitRequirements: '', formed });
+  assert.ok(Buffer.byteLength(narrow.block) <= Buffer.byteLength(wide.block));
+});
+
+test('验收：装不下两条就退一条，不整段丢弃', () => {
+  const formed = {
+    tone: { state: 'formed', value: 'plain' },
+    answer_order: { state: 'formed', value: 'conclusion_first' },
+  };
+  const picked = persona.selectPreferenceProjection({ currentRequest: '解释并写文案', outputMode: 'chat', explicitRequirements: '', formed });
+  assert.ok(picked.block);
+  assert.ok(Buffer.byteLength(picked.block) <= persona.PROJECTION_LIMIT_BYTES);
+});
+
 console.log(`persona.test.mjs: ${passed} passed`);
+

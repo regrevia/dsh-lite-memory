@@ -1396,6 +1396,20 @@ turnEnd({ id: 'session-recall', header: { cwd } }, { type: 'turn/end', data: { r
 await new Promise((resolve) => setTimeout(resolve, 150));
 const learningAfter = personaStoreMod.readPersona().persona.learning || {};
 assert.equal(learningAfter.lastPassAt || '', learningBefore.lastPassAt || '', '没有模型就不占这次窗口');
+// 验收：画像只影响表达，跟着「记住我」开关和项目记忆开关一起收放
+const personaCtx = promptContexts.find((entry) => entry.name === 'lite-memory:persona');
+assert.ok(personaCtx && typeof personaCtx.text === 'function');
+assert.equal(personaCtx.order, 61);
+const personaSignal = new AbortController().signal;
+await preStep({ agent: recallAgent, signal: personaSignal, turn: '51' }, pass('帮我写个文案，语气自然点', 'p51'));
+assert.equal(personaCtx.text({ agent: recallAgent, signal: personaSignal }), '表达偏好：平实说。');
+// 项目记忆关掉后画像也不参与（用户级开关仍开着）
+const personaMemoryOff = await call('/lite-memory/control', { sessionId: 'session-recall', enabled: false, operationId: 'op_persona_mem_off' });
+assert.equal(personaMemoryOff.status, 200);
+assert.equal(personaCtx.text({ agent: recallAgent, signal: personaSignal }), '');
+const personaMemoryOn = await call('/lite-memory/control', { sessionId: 'session-recall', enabled: true, operationId: 'op_persona_mem_on' });
+assert.equal(personaMemoryOn.status, 200);
+assert.equal(personaCtx.text({ agent: recallAgent, signal: personaSignal }), '表达偏好：平实说。');
 const cleared = await call('/lite-memory/persona', { op: 'clear' });
 assert.equal(cleared.status, 200);
 assert.equal(cleared.body.formed.length, 0);
