@@ -1006,6 +1006,8 @@ window.__ModuleLoader__.load({
       });
       return counts;
     };
+    /** 真被用过才算读过：`lastUsed` 有创建时间回退值。 */
+    const usedOf = (record) => (record && record.used !== undefined ? record.used === true : Boolean(record && record.lastUsed));
     /** 标签/话题按精确值筛选；只有自由搜索才用包含匹配。 */
     const filterRecords = (records, query, hub) => {
       const rows = Array.isArray(records) ? records : EMPTY;
@@ -1020,7 +1022,7 @@ window.__ModuleLoader__.load({
       if (kind === 'duplicate' || kind === 'unread' || kind === 'noWhen') {
         const counts = titleCountsOf(rows);
         return rows.filter((record) => {
-          if (kind === 'unread') return !record.lastUsed;
+          if (kind === 'unread') return !usedOf(record);
           if (kind === 'noWhen') return !record.when;
           const title = typeof record.title === 'string' ? record.title.trim() : '';
           return Boolean(title) && counts.get(title) > 1;
@@ -1043,7 +1045,7 @@ window.__ModuleLoader__.load({
       const globalRow = (Array.isArray(scopes) ? scopes : EMPTY).find((scope) => scope && scope.kind === 'global');
       return {
         duplicate,
-        unread: rows.filter((record) => !record.lastUsed).length,
+        unread: rows.filter((record) => !usedOf(record)).length,
         globalEntries: globalRow && Number.isInteger(globalRow.entries) ? globalRow.entries : null,
         globalMissingWhen: globalSelected ? rows.filter((record) => !record.when).length : null,
       };

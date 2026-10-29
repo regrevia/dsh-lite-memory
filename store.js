@@ -115,6 +115,9 @@ function toFlat(entry) {
     supersededBy: typeof entry.supersededBy === 'string' ? entry.supersededBy : '',
     supersedeReason: typeof entry.supersedeReason === 'string' ? entry.supersedeReason : '',
     lastUsed: maintenance.lastUsed || entry.updatedAt || entry.createdAt || '',
+    /** 是否真被用过（送达模型并记账过）；`lastUsed` 有创建/更新时间回退值，不能拿它判断「从未读过」。 */
+    used: maintenance.everUsed === true
+      || Boolean(maintenance.lastUsed && maintenance.lastUsed !== entry.createdAt && maintenance.lastUsed !== entry.updatedAt),
     revision: Number(entry.revision) || 1,
     status: entry.status === 'archived' ? 'archived' : 'active',
     origin: ORIGINS.includes(entry.origin) ? entry.origin : 'user_explicit',
@@ -172,6 +175,7 @@ function fromFlat(record, status) {
       learning: cloneJson(record.learning) || cloneJson(record.maintenance?.learning) || undefined,
       hits: Number(record.hits) || 0,
       merges: Number(record.merges) || 0,
+      everUsed: record.everUsed === true || (record.maintenance && record.maintenance.everUsed === true),
       lastUsed: record.lastUsed || at,
     },
   };
@@ -1519,7 +1523,13 @@ function touchUsed(scope, ids) {
       const stamp = new Date(now).toISOString();
       let changed = false;
       for (const record of index.entries) {
-        if (!wanted.has(record.id) || !usedStale(record, now)) continue;
+        if (!wanted.has(record.id)) continue;
+        if (record.everUsed !== true) {
+          /** 第一次被真用到必须记下来，哪怕刚创建、还没过 lastUsed 的防抖门槛。 */
+          record.everUsed = true;
+          changed = true;
+        }
+        if (!usedStale(record, now)) continue;
         record.lastUsed = stamp;
         changed = true;
       }

@@ -1016,6 +1016,8 @@ console.log('recall.test.mjs: ok');
   const scope = store.scopeOf(cwd);
   const probe = save(scope, { title: '量子纠缠咖啡机', tags: ['记账'], summary: '只有送达才记 lastUsed' });
   const lastUsedOf = () => store.locateByTitle(scope, '量子纠缠咖啡机').record.lastUsed;
+  const usedOf = () => store.locateByTitle(scope, '量子纠缠咖啡机').record.used;
+  assert.equal(usedOf(), false, '新建但没被用过的条目不能算读过');
   const baseline = lastUsedOf();
   const runtime = boot();
   const agent = makeAgent('agent-usage', cwd);
@@ -1027,6 +1029,6 @@ console.log('recall.test.mjs: ok');
   assert.match(runtime.provider.text({ agent, signal: hitSignal }), /量子纠缠咖啡机/);
   assert.equal(lastUsedOf(), baseline, '送达也不在 provider 路径上写盘');
   runtime.handlers.get('agent/turn-stopping').at(-1)({ signal: hitSignal });
-  assert.ok(lastUsedOf(), '回合收尾时把真正送达的条目记账');
+  assert.equal(usedOf(), true, '送达并记账后「读过」标记跟着成立');
   assert.equal(store.locateByTitle(scope, '量子纠缠咖啡机').record.id, probe.id);
 }

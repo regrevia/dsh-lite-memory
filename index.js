@@ -476,6 +476,7 @@ function keepHandler(webServer, cwdForSession) {
         origin: originOut(record.origin),
         updated: record.updated || '',
         lastUsed: record.lastUsed || '',
+        used: record.used === true,
         bytes: Number(record.bytes) || 0,
         experimental: isExperimentalRecord(record),
         learning: record.learning ? {

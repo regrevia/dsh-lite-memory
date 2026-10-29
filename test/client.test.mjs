@@ -339,6 +339,8 @@ assert.deepEqual(checkupOf(checkupRows, checkupScopes, false), { duplicate: 1, u
 assert.deepEqual(checkupOf(checkupRows, checkupScopes, true), { duplicate: 1, unread: 1, globalEntries: 213, globalMissingWhen: 1 });
 assert.deepEqual(filterRecords(checkupRows, '', { kind: 'duplicate' }).map((row) => row.id), ['mem_c0000001', 'mem_c0000002']);
 assert.deepEqual(filterRecords(checkupRows, '', { kind: 'unread' }).map((row) => row.id), ['mem_c0000001']);
+assert.deepEqual(filterRecords([{ id: 'mem_u1', title: '新写的', lastUsed: '2026-01-01T00:00:00.000Z', used: false }], '', { kind: 'unread' }).map((row) => row.id), ['mem_u1'], '有创建时间回退值但没真用过，仍算从未读过');
+assert.equal(checkupOf([{ id: 'mem_u2', title: '用过的', lastUsed: '2026-01-01T00:00:00.000Z', used: true }], [], false).unread, 0);
 assert.deepEqual(filterRecords(checkupRows, '', { kind: 'noWhen' }).map((row) => row.id), ['mem_c0000001']);
 assert.deepEqual([...titleCountsOf(checkupRows).values()], [2, 1]);
 assert.equal(checkupOf([], [], false).globalEntries, null);
