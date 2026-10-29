@@ -115,6 +115,11 @@ Off by default, per project only. When enabled it distills a few project rules f
 - Turning it off stops learning, reads and late writes; results stay viewable. While project memory is off, self-evolution is necessarily off and cannot be switched on by itself.
 - Switching columns, a new episode and one-off exceptions do not leak into each other; a repository subdirectory, symlink or worktree is the same project, separate clones are not.
 
+## 发布候选 / Release candidate
+
+- 全链路审计结论与轻量化数字：[`docs/RC-0.18.46.md`](docs/RC-0.18.46.md)
+- 基准复现：`npm run bench`、`npm run bench:evolution`，基线见 [`docs/BENCH.md`](docs/BENCH.md)
+
 ## 安装 / Install
 
 Plugin Manager 里搜 `dsh-lite-memory` 直接装；或 `npm pack` 后用 Plugin Manager 安装生成的 `.tgz`。
