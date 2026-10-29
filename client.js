@@ -1074,6 +1074,8 @@ window.__ModuleLoader__.load({
         return { id: room.id, name: room.name, items, total: items.length, pages: Math.max(1, Math.ceil(items.length / PALACE_PAGE_SIZE)) };
       });
     };
+    /** 房间预览按内容铺：1 条就 1 个槽，不拿虚位占地方。 */
+    const palaceSlotCountOf = (total) => Math.min(PALACE_PREVIEW, Math.max(1, Number.isFinite(total) ? Math.floor(total) : 0));
     const palaceRoomPageOf = (records, roomId, page) => {
       const room = palaceRoomsOf(records).find((row) => row.id === roomId);
       if (!room) return { items: EMPTY, total: 0, pages: 0, page: 1 };
@@ -2026,8 +2028,8 @@ window.__ModuleLoader__.load({
     const PalaceRoomCard = (props) => {
       const room = props.room;
       const empty = room.total === 0;
-      const preview = room.items.slice(0, PALACE_PREVIEW);
-      const slots = Array.from({ length: PALACE_PREVIEW }, (_, index) => preview[index] || null);
+      const preview = room.items.slice(0, palaceSlotCountOf(room.total));
+      const slots = Array.from({ length: palaceSlotCountOf(room.total) }, (_, index) => preview[index] || null);
       return h('div', {
         role: 'listitem',
         style: { ...PANEL_CARD, padding: 0, position: 'relative', overflow: 'hidden', display: 'flex', width: '100%', flexDirection: 'column' },
@@ -3100,7 +3102,7 @@ window.__ModuleLoader__.load({
 
     // 测试缝：Node 里验引用投影，浏览器里没有任何副作用。
     if (typeof globalThis.__LITE_MEMORY_TEST__ === 'function') {
-      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row, conflictVisibleRows, conflictFactsOf });
+      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row, conflictVisibleRows, conflictFactsOf });
     }
 
     return {

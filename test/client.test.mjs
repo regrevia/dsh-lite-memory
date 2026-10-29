@@ -28,7 +28,7 @@ assert.equal(panel.name, 'shell.overlay');
 assert.equal(panel.order, 30);
 
 const EMPTY_CHILDREN = [];
-const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, conflictVisibleRows, conflictFactsOf } = seen;
+const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, conflictVisibleRows, conflictFactsOf } = seen;
 
 // 图谱只按真实数据画：共享标签成枢纽，显式关联成边，位置由 id 决定。
 const graph = graphOf([
@@ -245,6 +245,12 @@ assert.equal(palaceRoomsOf([]).length, 4);
 // 每页 24 条；页码夹在有效范围内。
 const palaceMany = Array.from({ length: 25 }, (_, index) => palaceRecord(`mem_${index}`, 'preference', `P${index}`));
 assert.equal(palaceRoomsOf(palaceMany)[0].pages, 2);
+// 房间预览按内容铺槽位：没有记录时不用空槽，满 4 条封顶。
+assert.equal(palaceSlotCountOf(1), 1);
+assert.equal(palaceSlotCountOf(3), 3);
+assert.equal(palaceSlotCountOf(4), 4);
+assert.equal(palaceSlotCountOf(40), 4);
+assert.equal(palaceSlotCountOf(0), 1);
 assert.equal(palaceRoomPageOf(palaceMany, 'habits', 1).items.length, 24);
 assert.equal(palaceRoomPageOf(palaceMany, 'habits', 2).items.length, 1);
 assert.equal(palaceRoomPageOf(palaceMany, 'habits', 99).page, 2);
