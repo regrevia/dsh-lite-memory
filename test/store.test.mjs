@@ -521,6 +521,26 @@ test('过期回执在任意写入时清掉，不靠接受候选', () => {
   assert.deepEqual(kept, ['op_new']);
 });
 
+test('回执再多也只留最近的一批，写入时顺手压回上限', () => {
+  const scope = fresh('receipt-cap');
+  const now = Date.now();
+  const total = LIMITS.receipts + 50;
+  state.transact(scope, { expectCreate: true }, (draft) => {
+    draft.receipts = Array.from({ length: total }, (_, index) => ({
+      operationId: `op_${String(index).padStart(3, '0')}`,
+      at: new Date(now - (total - index) * 1000).toISOString(),
+      changed: 1,
+    }));
+    return { changed: true };
+  });
+  const saved = upsert(scope, { title: '再写一条', summary: '触发一次事务', body: '正文' });
+  assert.ok(saved.record.id);
+  const kept = stateOf(scope).receipts.map((row) => row.operationId);
+  assert.equal(kept.length, LIMITS.receipts, '上限就是上限，不随写入次数涨');
+  assert.equal(kept.at(-1), `op_${String(total - 1).padStart(3, '0')}`, '保最近的一条');
+  assert.equal(kept.includes('op_000'), false, '最旧的先走');
+});
+
 test('the global layer reports both lines', () => {
   const global = globalScope();
   assert.equal(LIMITS.globalEntries, 200);
