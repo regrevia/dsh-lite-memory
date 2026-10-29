@@ -2408,7 +2408,9 @@ window.__ModuleLoader__.load({
         else if (rules.length === 0) activityText = countsUnknown ? '等待可学习的反馈' : '还没有整理出经验';
         else activityText = '暂无整理记录';
       }
-      const filtered = React.useMemo(() => filterRecords(records, query, hubFilter), [records, query, hubFilter]);
+      const filtered = React.useMemo(() => filterRecords(records, query, null), [records, query]);
+      /** 图谱的标签筛选是图谱自己的，不串到列表和宫殿。 */
+      const graphFiltered = React.useMemo(() => (hubFilter ? filterRecords(records, query, hubFilter) : filtered), [records, query, hubFilter, filtered]);
       const filteredRules = React.useMemo(() => {
         if (stage === 'all') return rules;
         return rules.filter((rule) => rule.state === stage);
@@ -2726,7 +2728,7 @@ window.__ModuleLoader__.load({
         globalView ? null : tabButton('evolution', '自进化'),
       );
 
-      const filteredNow = Boolean(query || hubFilter);
+      const filteredNow = Boolean(query);
       const memoryList = loading
         ? h('div', { style: { ...PANEL_MUTED, padding: '14px 9px' } }, '读取中…')
         : filtered.length === 0
@@ -2889,7 +2891,7 @@ window.__ModuleLoader__.load({
         style: { ...PANEL_CARD, padding: 0, minHeight: 0, overflow: 'hidden', display: 'flex' },
       },
       h(MemoryGraph, {
-        records: filtered, total: hubFilter ? filtered.length : total,
+        records: graphFiltered, total: hubFilter ? graphFiltered.length : total,
         selectedId: selectedMemory, onPick: onPickNode,
         onPickHub,
         emptyText: query || hubFilter ? '没有匹配的记忆' : '还没有记忆', ariaLabel: '记忆关系图',
@@ -2898,7 +2900,7 @@ window.__ModuleLoader__.load({
       const memoryPalacePane = h(MemoryPalace, {
         key: selectedKey, records: filtered, selectedId: selectedMemory,
         onPick: (id) => { setSelectedMemory(id); setSelectedRule(''); },
-        emptyText: query || hubFilter ? '没有匹配的记忆' : '这个项目还没有记忆',
+        emptyText: query ? '没有匹配的记忆' : '这个项目还没有记忆',
       });
       const memoryTab = h('div', { role: 'tabpanel', 'aria-label': '记忆', style: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: '9px' } },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flex: '0 0 auto' } },
@@ -2927,7 +2929,10 @@ window.__ModuleLoader__.load({
             gridTemplateColumns: selectedMemory ? 'minmax(0, 1fr) minmax(280px, 340px)' : 'minmax(0, 1fr)',
           },
         },
-        memoryViewActive === 'graph' ? memoryGraphPane : memoryViewActive === 'palace' ? memoryPalacePane : memoryListPane,
+        h('div', { style: { position: 'relative', minWidth: 0, minHeight: 0, display: 'flex' } },
+          h('div', { style: { display: memoryViewActive === 'graph' ? 'flex' : 'none', minWidth: 0, minHeight: 0, width: '100%' } }, memoryGraphPane),
+          h('div', { style: { display: memoryViewActive === 'palace' ? 'flex' : 'none', minWidth: 0, minHeight: 0, width: '100%' } }, memoryPalacePane),
+          h('div', { style: { display: memoryViewActive === 'list' ? 'flex' : 'none', minWidth: 0, minHeight: 0, width: '100%', flexDirection: 'column' } }, memoryListPane)),
         memoryDetail),
       );
 
