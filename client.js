@@ -1527,11 +1527,6 @@ window.__ModuleLoader__.load({
         const height = Math.max(472, maxY - minY + 36);
         return { x: (minX + maxX) / 2 - width / 2, y: (minY + maxY) / 2 - height / 2, width, height };
       }, [graph, primaryKind, selectedId]);
-      if (!props.records || props.records.length === 0) {
-        return h('div', {
-          style: { flex: 1, minHeight: '220px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' },
-        }, props.emptyText || '还没有记忆');
-      }
       const viewWidth = frame.width / zoom;
       const viewHeight = frame.height / zoom;
       const zoomButton = (label, delta, icon) => h(ZoomButton, {
@@ -1587,6 +1582,12 @@ window.__ModuleLoader__.load({
         }
         return placed;
       }, [graph, primaryKind, selectedId, hoveredId, labelSet, nearIds]);
+      /** 空图提前返回必须放在全部 hook 之后：任何一次渲染的 hook 数量与顺序都要一致。 */
+      if (!props.records || props.records.length === 0) {
+        return h('div', {
+          style: { flex: 1, minHeight: '220px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' },
+        }, props.emptyText || '还没有记忆');
+      }
       const hoveredNode = hoveredId ? graph.nodes.find((node) => node.id === hoveredId) : null;
       const hoverText = hoveredNode ? String(hoveredNode.title || hoveredNode.label || '') : '';
       const hoverBubble = hoveredNode && hoverAt && hoverText
@@ -2904,7 +2905,7 @@ window.__ModuleLoader__.load({
       });
       const memoryTab = h('div', { role: 'tabpanel', 'aria-label': '记忆', style: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: '9px' } },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flex: '0 0 auto' } },
-          hubFilter ? h('button', {
+          hubFilter && memoryViewActive === 'graph' ? h('button', {
             type: 'button',
             onClick: () => setHubFilter(null),
             'aria-label': `取消只看 ${hubFilter.display}`,

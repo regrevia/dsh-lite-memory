@@ -133,6 +133,16 @@ test('P00 初始任务与致谢不算反馈', () => {
   assert.equal(learning.classifyFeedback('帮我做一期口播，开头要抓人').worth, false);
   assert.equal(learning.classifyFeedback('谢谢').worth, false);
   assert.equal(learning.classifyFeedback('').worth, false);
+
+  /** 问句与「别记这句」都不能变成生效规则：先挡掉再分类。 */
+  assert.equal(learning.classifyFeedback('这个边框是不是太粗了？').worth, false);
+  assert.equal(learning.classifyFeedback('以后都用圆角吗？').worth, false);
+  const refused = learning.classifyFeedback('这条不要记住，也别写进规则');
+  assert.equal(refused.worth, false);
+  assert.equal(refused.negative, true);
+  assert.equal(learning.classifyFeedback('不要存全局').worth, false, '否定记忆本身不是反向规范');
+  /** 真正的规范变更仍然认得出来。 */
+  assert.equal(learning.classifyFeedback('以后发布都用 dsh-npm，别再用原生 npm').worth, true);
 });
 
 test('P00 明确长期要求分类为规范变化', () => {

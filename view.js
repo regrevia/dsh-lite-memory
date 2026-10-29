@@ -12,6 +12,24 @@ export const CONDITION_KEYS = ['targetOs', 'shell', 'runtime', 'machine', 'proje
 /** 真正把规则绑到「这一集任务」上的条件；其余条件只描述环境，不构成相关性。 */
 export const TASK_CONDITION_KEYS = ['taskKind', 'seriesId', 'phase'];
 
+/**
+ * 粗分类取值（taskKind=code 这类）只说明「对某一大类任务可能适用」，不说明「这次就在说同一件事」：
+ * code 对任何编码任务都成立，把它当相关度会把「前端页面细边框」带进数据库连接池那次请求。
+ * 这种取值只参与适用性判断，相关性一律留给对象级证据（词面、artifactKey、同话题、同系列）。
+ */
+export const BROAD_CONDITION_VALUES = { taskKind: ['code', 'content', 'video', 'deploy'] };
+export function isBroadCondition(condition) {
+  if (!condition || !condition.key) return false;
+  const values = BROAD_CONDITION_VALUES[condition.key];
+  if (!Array.isArray(values)) return false;
+  return values.includes(String(condition.value || '').trim().toLowerCase());
+}
+/** 对象级绑定：条件把规则钉在具体的系列/产物/路径上，才算这次该想起它。 */
+export function objectBindingsOf(record) {
+  const conditions = Array.isArray(record && record.conditions) ? record.conditions : [];
+  return conditions.filter((condition) => condition && condition.key && !isBroadCondition(condition));
+}
+
 /** 卡片与单次请求的硬上限：整张卡要么进来，要么省略，不截半句前提。 */
 export const CARD = { max: 3, bytes: 1200 };
 export const TOOL_BYTES = 6144;
@@ -543,9 +561,9 @@ export function rank(records, query, options = {}) {
     }
     const matched = matchScore(record, query, corpus);
     if (matched.score < MATCH_FLOOR) continue;
-    /** 当前任务明确的话题/工作类型优先，但不覆盖查询本身的字面命中。 */
+    /** 当前任务明确的对象级绑定优先，但不覆盖查询本身的字面命中；粗分类取值不加分。 */
     const task = options.task || {};
-    const sameTask = (record.conditions || []).some((condition) => {
+    const sameTask = objectBindingsOf(record).some((condition) => {
       if (condition.key === 'taskKind') return task.kind && sameText(condition.value, task.kind);
       if (condition.key === 'seriesId') return task.seriesId && sameText(condition.value, task.seriesId);
       if (condition.key === 'artifactKey') return task.artifactKey && sameText(condition.value, task.artifactKey);

@@ -260,5 +260,62 @@ test('没指定归档还是彻底忘掉时不动盘（D05）', () => {
   assert.match(suggestedAgain.reason, /忘掉/);
 });
 
+const broadRule = {
+  id: 'mem_000000000031',
+  title: '前端页面默认采用细边框',
+  summary: '页面卡片、按钮的边缘用细边框，不要大阴影',
+  tags: [],
+  triggers: [],
+  when: '',
+  applicability: 'conditional',
+  conditions: [{ key: 'taskKind', value: 'code' }],
+  selection: null,
+  lastUsed: '2026-03-01T00:00:00.000Z',
+};
+
+test('粗分类条件只决定能不能用：编码类规则不因 taskKind=code 进无关任务', () => {
+  const task = { kind: 'code' };
+  const context = view.contextWithTask(ctxOf(null, {}), task);
+  const hits = view.rank([broadRule], '编写 PostgreSQL 数据库连接池代码', { limit: 4, requireApplicable: true, context, task });
+  assert.deepEqual(hits.map((item) => item.record.id), []);
+  /** 任务绑定只看对象级条件：粗分类取值不算「这次就在说同一件事」。 */
+  const bound = broadRule.conditions.some((row) => view.TASK_CONDITION_KEYS.includes(row.key) && !view.isBroadCondition(row));
+  assert.equal(bound, false);
+  assert.equal(view.isBroadCondition({ key: 'taskKind', value: 'code' }), true);
+  assert.equal(view.isBroadCondition({ key: 'seriesId', value: '口播' }), false);
+  /** 加分也不能来自粗分类：同一句话有字面命中时，score 不因 taskKind 匹配变高。 */
+  const boosted = view.rank([broadRule], '前端页面的边框是不是太粗了', { limit: 4, context, task })[0];
+  const plain = view.rank([broadRule], '前端页面的边框是不是太粗了', { limit: 4, context, task: {} })[0];
+  assert.equal(boosted.score, plain.score);
+  /** 适用性判断照旧：条件对不上照样不通过。 */
+  assert.equal(view.eligibility(broadRule, { context: {}, task: { kind: 'video' } }, 'auto', Date.now()).status, 'not_applicable');
+  assert.equal(view.eligibility(broadRule, { context: {}, task: { kind: 'code' } }, 'auto', Date.now()).status, 'ok');
+});
+
+test('请求点到规则说的对象时，同样的规则照样召回', () => {
+  const task = { kind: 'code' };
+  const context = view.contextWithTask(ctxOf(null, {}), task);
+  const hits = view.rank([broadRule], '前端页面的边框是不是太粗了', { limit: 4, requireApplicable: true, context, task });
+  assert.deepEqual(hits.map((item) => item.record.id), [broadRule.id]);
+  /** 只说「代码」不带对象时不算命中：粗分类词不能把规则捞上来。 */
+  const vague = view.rank([broadRule], '把这段代码收个尾', { limit: 4, requireApplicable: true, context, task });
+  assert.deepEqual(vague.map((item) => item.record.id), []);
+});
+
+test('对象级绑定仍然算相关：同系列/同产物的规则排前面', () => {
+  const base = { tags: [], triggers: [], when: '', applicability: 'conditional', selection: null };
+  const bound = { ...base, id: 'mem_000000000041', title: '口播这期开头先给结论', summary: '开头三句内给结论', conditions: [{ key: 'seriesId', value: '口播' }], lastUsed: '2026-01-01T00:00:00.000Z' };
+  const loose = { ...base, id: 'mem_000000000042', title: '口播这期开头先给结论', summary: '开头三句内给结论', conditions: [], lastUsed: '2026-02-01T00:00:00.000Z' };
+  const query = '口播这期开头先给结论';
+  const cold = view.rank([bound, loose], query, { limit: 2, context: ctxOf(null, {}) });
+  assert.equal(cold[0].record.id, loose.id);
+  const task = { seriesId: '口播' };
+  const warm = view.rank([bound, loose], query, { limit: 2, context: view.contextWithTask(ctxOf(null, {}), task), task });
+  assert.equal(warm[0].record.id, bound.id);
+  const artifact = { ...base, id: 'mem_000000000043', title: '连接池大小', summary: '按并发调', conditions: [{ key: 'artifactKey', value: 'src/api/pool.js' }] };
+  assert.deepEqual(view.objectBindingsOf(artifact).map((row) => row.key), ['artifactKey']);
+  assert.deepEqual(view.objectBindingsOf(broadRule), []);
+});
+
 for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
 console.log(`view.test.mjs: ${passed} passed`);

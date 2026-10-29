@@ -47,6 +47,14 @@ const UNCLEAR = /不太对|再想想|感觉不对|说不上|有点怪|不对劲/
 const PROJECT_WIDE = /(这个项目|本项目|所有项目|全项目|整个项目|全库|每个项目)/;
 /** 「所有口播」「一律」限定的是对象，不是整个项目：没有可信范围时只算待确认。 */
 
+/** 问句问的是现状，不是要改的规范：「边框是不是太粗了？」不能立成规则。 */
+const QUESTION = /[？?]\s*$|(?:吗|呢|么)\s*[？?]?\s*$/u;
+/** 明说别记/删掉这句是撤回，不是新要求——否定词落在「记忆」上，不能当成反向规范。 */
+const WRITE_REFUSED = /(?:不要|不用|别|不准|不需要|禁止|先别).{0,6}(?:记忆|记住|记下|记到|存到|存入|写进记忆|保存到记忆|存成规则|写进规则|记成规则|记成规矩)|(?:这条|这条记忆|这个).{0,4}(?:别记|不要记|不用记|删掉|忘了)/u;
+
+/** 只说了「存哪层」不构成规范内容：层级由权限判断处理，别把这句话记成规则。 */
+const SCOPE_ONLY = /^(?:这条|这个|这|以后|都|也|请|帮我)?\s*(?:不要|别|不用|不准|禁止)?\s*(?:再)?\s*(?:存|记|记到|写|放|保存)\s*(?:到|进|成)?\s*(?:全局|所有项目|跨项目|全库|项目层|本项目|项目里)\s*[。.!！]?\s*$/u;
+
 const has = (pattern, text) => pattern.test(text);
 
 /** 从反馈里取一个可命名的验收维度；没有就记为作品整体。 */
@@ -60,6 +68,11 @@ export function dimensionOf(input) {
 export function classifyFeedback(input) {
   const text = String(input || '').trim();
   if (!text) return { worth: false, type: 'unclear', longTerm: false, explicitLongTerm: false, exception: false, negative: false, dimension: '' };
+  /** 问句与「别记这句」都不该变成生效规则：先挡掉，再谈它像哪类反馈。 */
+  const refused = has(WRITE_REFUSED, text);
+  if (refused || has(QUESTION, text) || has(SCOPE_ONLY, text.trim())) {
+    return { worth: false, type: 'unclear', longTerm: false, explicitLongTerm: false, exception: false, negative: refused, dimension: '' };
+  }
   const longTerm = has(LONG_TERM, text);
   const exception = has(EXCEPTION, text);
   const negative = has(NEGATIVE, text);

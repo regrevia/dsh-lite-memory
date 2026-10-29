@@ -2764,7 +2764,7 @@ function bindSameTopic(projectScope, ref) {
 const CONFLICT_LIMIT = 20;
 
 /** 待办里留一份可重放的草稿：面板能直接另存，不用用户回忆刚才想记什么。 */
-const CONFLICT_DRAFT_KEYS = ['title', 'summary', 'body', 'when', 'kind', 'tags', 'conditions', 'applicability', 'selection', 'triggers', 'links', 'topicKey', 'source', 'origin'];
+const CONFLICT_DRAFT_KEYS = ['title', 'summary', 'body', 'when', 'kind', 'tags', 'conditions', 'applicability', 'selection', 'triggers', 'links', 'topicKey', 'source', 'origin', 'supersedes', 'updateTitle'];
 function conflictDraftOf(draft) {
   const out = {};
   if (!draft || typeof draft !== 'object') return out;
@@ -2786,6 +2786,9 @@ function conflictDraftOf(draft) {
     else if (key === 'links') out.links = Array.isArray(value) ? value.slice(0, 3).map((item) => (item && typeof item === 'object' ? { ...item } : null)).filter(Boolean) : [];
     else if (key === 'source') out.source = value;
     else if (key === 'origin') out.origin = value;
+    /** 被取代的那条与要改的标题必须整份重放：批准后也是「替换旧规范」，不是另加一条。 */
+    else if (key === 'supersedes') { const ref = typeof value === 'string' ? value.trim() : ''; if (ref) out.supersedes = ref.slice(0, 160); }
+    else if (key === 'updateTitle') { const title = normalizeText(value, 120); if (title) out.updateTitle = title; }
   }
   return out;
 }
@@ -3485,6 +3488,24 @@ export function commitLearning(scope, batch = {}) {
         }
         if (episode && batch.episodeUpdatedAt && episode.updatedAt !== batch.episodeUpdatedAt) throw new Error('用户又改过这期，这次整理作废');
         const prepared = new Map((Array.isArray(batch.preparedTargets) ? batch.preparedTargets : []).map((row) => [row.id, row]));
+        /** 本批已经校验并并过的目标：同一批里再并一次不用重新对整理前的版本。 */
+        const mergedInBatch = new Set();
+        /** 并进已有条目等于改它：整理前没固定版本、版本或摘要对不上的，和显式目标一样整批作废。 */
+        const assertPreparedTarget = (entry) => {
+          if (mergedInBatch.has(entry.id)) return;
+          const expected = prepared.get(entry.id);
+          /**
+           * 整批没带整理前快照的调用（模型新建规则那条老路）不做版本比对，否则合并会整批失败；
+           * 带了快照却查不到这一条，说明它在整理前不在场，按没固定版本处理。
+           */
+          if (!expected) {
+            if (prepared.size > 0) throw new Error('目标规则没有在整理前固定版本');
+            return;
+          }
+          if (Number(entry.revision) !== Number(expected.revision)) throw new Error('目标规则刚被改过，这次整理作废');
+          if (expected.specDigest && learning.specDigestOf(toFlat(entry)) !== expected.specDigest) throw new Error('目标规则已经变过，这次整理作废');
+          mergedInBatch.add(entry.id);
+        };
         let touched = 0;
         const currentRules = draft.entries.filter((entry) => entry.status === 'active' && isExperimentalRecord(toFlat(entry)));
         for (const change of changes) {
@@ -3582,6 +3603,7 @@ export function commitLearning(scope, batch = {}) {
               })
               : null;
             if (duplicate) {
+              assertPreparedTarget(duplicate);
               const flat = toFlat(duplicate);
               const rem = learning.mergeChange(flat, change, { now });
               rem.learning = {

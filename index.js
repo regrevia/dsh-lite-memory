@@ -759,10 +759,17 @@ function keepHandler(webServer, cwdForSession) {
 
     if (action === 'move' || action === 'resume-move') {
       const operationId = typeof body.operationId === 'string' ? body.operationId : '';
+      /**
+       * 搬移只认会话身份推出的项目：请求参数里的 cwd 能让 A 会话把 B 项目的记忆搬走，
+       * 这里不再回落到 body.cwd；推不出来就直接拒绝。
+       */
+      const ownCwd = typeof body.sessionId === 'string' ? cwdForSession(body.sessionId) || '' : '';
+      if (!ownCwd) return sendJson(res, 400, { ok: false, reason: '请求不完整', code: 'missing_session' });
+      const moveScope = scopeOf(ownCwd);
       try {
         const done = action === 'resume-move'
-          ? resumeMove(scope, { operationId })
-          : move(scope, id, { target: body.target === 'global' ? 'global' : 'project', operationId });
+          ? resumeMove(moveScope, { operationId })
+          : move(moveScope, id, { target: body.target === 'global' ? 'global' : 'project', operationId });
         return sendJson(res, done.status === 'move_pending' ? 202 : 200, { ok: true, ...done });
       } catch (error) {
         const pending = (() => { try { return movePending(); } catch { return null; } })();
@@ -1185,6 +1192,12 @@ export function apply(ctx, config) {
   };
   /** 已准备好的快照只挂在 Agent 上，弱引用随手回收，不跨会话串。 */
   const prepared = new WeakMap();
+  /**
+   * 写入授权单独记，不跟 prepared 走：召回为空、工具模式、面板上一步都可能清掉快照，
+   * 但「这句话是不是用户亲口说的」不能跟着丢，否则否定句会被当成跨项目授权。
+   * 只认同一 turn 的真人原话，换一轮自动作废。
+   */
+  const requestAuth = new WeakMap();
   /** 最近一次请求的任务身份：本轮没注入任何内容时 prepared 会清掉，补查仍需要知道上一轮任务。 */
   const lastTask = new Map();
   /** 任务本身也要独立于 prepared：轮次收尾只清投影，不把「刚才在做什么」一起清掉。 */
@@ -1230,6 +1243,19 @@ export function apply(ctx, config) {
   };
 
   const windowOf = (agent) => windows.get(agentKey(agent)) || null;
+
+  /** 取本轮真人原话：上一轮的授权不能给这一轮的写作用。 */
+  const authorizedSaidOf = (agent) => {
+    try {
+      const held = agent ? requestAuth.get(agent) : null;
+      if (!held || typeof held.said !== 'string' || !held.said) return '';
+      const win = windowOf(agent);
+      if (win && held.turn && win.turn !== held.turn) return '';
+      return held.said;
+    } catch {
+      return '';
+    }
+  };
 
   /** 自动注入账本：普通段与实验段共用 3 条 / 1200 字节，量的是拼接后的完整文本。 */
   const emptyAutoBudget = () => ({
@@ -2072,7 +2098,9 @@ export function apply(ctx, config) {
        * 或面板直接确认过，才允许落到全局层。工具写入的正文由模型写，不能冒充用户原话。
        */
       const preparedState = prepared.get(execution && execution.agent);
-      const humanSaid = String(preparedState && preparedState.saidOnly || '');
+      /** 先看本轮原话，再退到召回快照：快照会被清掉，授权不能因此消失。 */
+      const humanSaid = authorizedSaidOf(execution && execution.agent)
+        || String(preparedState && preparedState.saidOnly || '');
       const humanGlobal = humanAskedGlobal(humanSaid);
       const draft = {
         ...args,
@@ -2680,21 +2708,38 @@ export function apply(ctx, config) {
     }), 'lite-memory: recall context');
   }
 
+  /** 引号/反引号里的是「被引用的字」：按钮文案、别人说的话都不构成授权。 */
+  const QUOTED_SPAN = /`[^`]*`|「[^」]*」|『[^』]*』|“[^”]*”|"[^"\n]*"/gu;
+  const GLOBAL_OBJECT = '(?:全局|所有项目|跨项目|全库)';
+  /** 否定句是相反的指令：「不要存全局」「全局的别记」都必须留在项目层。 */
+  const GLOBAL_NEGATED = new RegExp(
+    `(?:不要|不用|别|不准|不需要|禁止|勿).{0,8}(?:存|记|写|放|加|保存|放到|记到|写进|进).{0,12}${GLOBAL_OBJECT}`
+    + `|${GLOBAL_OBJECT}.{0,8}(?:不要|不用|别|不准|不需要|禁止|勿|不存|不记|不写)`,
+    'u',
+  );
+
   /**
    * 只有人在这句话里明确要求「存到全局/所有项目」才算跨项目授权。
-   * 不能因为句子里同时出现「全局」和「保存」就放行：那可能只是在说全局变量。
+   * 句子里同时出现「全局」和「保存」不够：那可能是在说全局变量，或只是在念按钮文字。
    */
   const humanAskedGlobal = (said) => {
-    const text = String(said || '');
-    return /(?:存|记|写|放|加|保存|放到|记到|写进).{0,10}(?:全局|所有项目|跨项目)/u.test(text)
-      || /(?:全局|所有项目|跨项目).{0,10}(?:都|一律|通用|适用|记住)/u.test(text)
-      || /(?:以后|今后).{0,16}(?:所有项目|每个项目|全局|跨项目)/u.test(text);
+    const text = String(said || '').replace(QUOTED_SPAN, ' ').replace(/\s+/g, ' ').trim();
+    if (!text) return false;
+    if (GLOBAL_NEGATED.test(text)) return false;
+    /** 「保存全局变量/配置/状态」说的是代码里的对象，不是记忆归属。 */
+    const action = new RegExp(
+      `(?:存|记|写|放|加|保存|放到|记到|写进).{0,10}${GLOBAL_OBJECT}(?!变[量数]|配置|状态|作用域|对象|数组)`,
+      'u',
+    );
+    const universal = new RegExp(`${GLOBAL_OBJECT}.{0,10}(?:都|一律|通用|适用|记住)`, 'u');
+    const future = /(?:以后|今后).{0,16}(?:所有项目|每个项目|全局|跨项目)/u;
+    return action.test(text) || universal.test(text) || future.test(text);
   };
 
   /**
-   * npm 原生命令最容易把「没登录」误判成「没凭据」：whoami 报 ENEEDAUTH 之后，
-   * 会话常会反复试 login/token，真正该走的 dsh-npm 反而没人提。
-   * 这里只在动作发生前拦一次，把已有记忆正文直接交给模型；同一轮不重复，不产生循环。
+   * 动作前提示：只把「当前项目/任务下确实适用、且和这条命令真的相关」的记忆交给模型。
+   * 判断与排序复用自动召回那一套（按项目层、全局层取候选，同一份 eligibility/rank），
+   * 不另写关键字命中，也不在这里补业务结论——正文写什么就交什么。
    */
   const npmProbeHint = (agent, execution) => {
     try {
@@ -2702,37 +2747,46 @@ export function apply(ctx, config) {
       if (!/^(bash|run_command|shell|terminal|exec)$/.test(name)) return undefined;
       const command = String(execution?.arguments?.command || execution?.arguments?.cmd || execution?.arguments?.input || '');
       if (!command || command.length > 4000 || !/\bnpm\b/.test(command)) return undefined;
+      /** 已经在用 dsh-npm 的调用不拦：要提示的是原生 npm 的探测/发布。 */
       if (/dsh-npm/.test(command)) return undefined;
-      if (!/(^|[;&|]\s*)(?:sudo\s+)?npm\s+(?:whoami|publish|login|adduser|add-user|token|config\s+get)\b/.test(command)) return undefined;
+      const probe = /(^|[;&|]\s*)(?:sudo\s+)?npm\s+(?:whoami|publish|login|adduser|add-user|token|config\s+get)\b/.test(command);
+      if (!probe) return undefined;
       const held = prepared.get(agent);
       if (!held || held.npmHinted) return undefined;
       if (!memoryOnForAgent(agent)) return undefined;
-      /** 本机流程按规矩留在项目层；全局层是兜底，先看当前项目再看全局。 */
-      const scopes = [];
-      try {
-        const project = scopeOf(cwdOf({ agent }));
-        if (project && project.confirmed !== false && project.key !== 'global') scopes.push(project);
-      } catch { /* 项目根还没确认时只看全局 */ }
-      scopes.push(globalScope());
-      const row = scopes.flatMap((scope) => {
-        try { return loadIndex(scope).entries || []; } catch { return []; }
-      }).find((entry) => {
-        if (!entry || entry.archived || entry.origin === 'project_evolution') return false;
-        /** 过期/被取代的规则不能再在动作前拦人。 */
-        if (view.lifecycleStatusOf(entry)) return false;
-        if (held.deliveredIds instanceof Set && held.deliveredIds.has(entry.id)) return false;
-        const head = `${entry.title || ''} ${entry.summary || ''} ${(entry.tags || []).join(' ')}`;
-        const body = String(entry.body || '').slice(0, 800);
-        return /npm|dsh-npm/i.test(head)
-          && /(凭据|登录|token|whoami|发布|publish|ENEEDAUTH|Keychain)/i.test(`${head} ${body}`);
-      });
+      const win = windowOf(agent);
+      /** 没有请求账本就不额外交付：提示也是给模型的内容，必须能记账。 */
+      if (!win || !win.autoBudget) return undefined;
+      const runtime = held.runtimeHeld || win.runtime || null;
+      const context = runtime && runtime.context ? runtime.context : view.trustedContext(held.scope, {});
+      const task = runtime && runtime.task ? runtime.task : null;
+      /** 当前项目的规则先于全局规则：本项目怎么发布，比通用说明更该先看。 */
+      let row = null;
+      for (const source of [held.scope, globalScope()]) {
+        let index;
+        try { index = loadIndex(source); } catch { continue; }
+        const records = [];
+        for (const entry of index.entries || []) {
+          if (!entry || entry.archived || entry.origin === 'project_evolution') continue;
+          if (held.deliveredIds instanceof Set && held.deliveredIds.has(entry.id)) continue;
+          records.push(entry);
+        }
+        if (!records.length) continue;
+        const ranked = view.rank(records, command, { limit: 1, requireApplicable: true, context, runtime, task });
+        row = ranked[0] && ranked[0].record ? ranked[0].record : null;
+        if (row) break;
+      }
       if (!row) return undefined;
+      const body = String(row.body || row.summary || '').trim();
+      if (!body) return undefined;
+      const hint = `[lite-memory] 这条 npm 命令先别执行，先看记忆「${row.title}」：\n${body}`;
+      if (!affordableTool(win, Buffer.byteLength(hint))) return undefined;
+      win.toolBytes = Number(win.toolBytes || 0) + Buffer.byteLength(hint);
       held.npmHinted = true;
       /** 这条正文真的交给模型了，按交付记使用。 */
       if (!(held.deliveredIds instanceof Set)) held.deliveredIds = new Set();
       if (row.id) held.deliveredIds.add(row.id);
-      const body = String(row.body || row.summary || '').trim().slice(0, 600);
-      return `[lite-memory] 这条 npm 命令先别执行：它容易被登录态误导。已有记忆「${row.title}」：${body}\n按记忆改用 dsh-npm；这条提示同一轮只出现一次，直接继续，不要重复探测凭据。`;
+      return hint;
     } catch {
       return undefined;
     }
@@ -2879,6 +2933,13 @@ export function apply(ctx, config) {
       } : null;
       /** 工具模式也要记下本轮真人原话：只用于核对绑定，不自动注入。 */
       const said = view.newestUserQuery(fresh).slice(0, RECALL_QUERY_CHARS);
+      /**
+       * 授权与召回模式无关：这句话先记下来，写工具在哪条分支被调用都能核对。
+       * 续步没有新的真人原话时保留本 turn 已记的那句，不拿空串覆盖。
+       */
+      const heldAuth = requestAuth.get(agent);
+      if (said) requestAuth.set(agent, { said, turn, sessionId });
+      else if (!(heldAuth && heldAuth.turn === turn && heldAuth.sessionId === sessionId)) requestAuth.delete(agent);
       const continuationHint = view.isContinuationQuery(said) || view.isEllipticalContinuation(said);
       /** 「继续」这类续说没有检索词：带上同会话上一轮原话，否则这一轮必然召回为空。 */
       const carried = continuationHint
@@ -3206,12 +3267,11 @@ export function apply(ctx, config) {
       }
       const parsed = learning.parseOutput(text, { finish, refs: input.refs, rules: input.rules, ranges, expectedTarget: candidate.expectedTarget });
       if (!parsed.ok) throw new Error(parsed.reason);
-      /** 用户已经把要求说成长期规则，模型仍返回空时至少留一条规则，不让这条反馈无声消失。 */
-      const changes = parsed.changes.length
-        ? parsed.changes
-        : (candidate.cue?.explicitLongTerm && candidate.cue?.type === 'spec_change'
-          ? [learning.pendingChangeFrom(candidate)].filter(Boolean)
-          : []);
+      /**
+       * 模型判定这轮不需要改（changes: []）就是真的不改：这里不替用户补一条。
+       * 上一版用「用户说过长期」兜底，把一句问句写成了生效规则，正是不该有的特例。
+       */
+      const changes = parsed.changes;
       const commit = commitLearning(scope, {
         operationId,
         epoch: begin.epoch,
