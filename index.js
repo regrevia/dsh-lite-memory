@@ -2094,7 +2094,13 @@ export function apply(ctx, config) {
         }
         const layer = args.scope === 'global' ? 'global' : args.scope === 'project' ? 'project' : '';
         const picked = layer ? candidates.find((row) => row.scope === layer) : candidates[0];
-        if (!picked) return saveFailure(`没有「${updateTitle}」这条记忆；要新增就不用 updateTitle`, args);
+        if (!picked) {
+          const near = nearTitleHints(runtimeLayers(projectScope), updateTitle);
+          if (near.length) {
+            return saveFailure(`没有「${updateTitle}」这条记忆。相近的里有：${near.map((item) => `「${item}」`).join('、')}；要新增就不用 updateTitle`, args);
+          }
+          return saveFailure(`没有「${updateTitle}」这条记忆；要新增就不用 updateTitle`, args);
+        }
         draft.id = picked.id;
       }
       /** 关联目标同样按标题解析成内部 id 再落盘。 */

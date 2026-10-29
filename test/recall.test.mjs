@@ -1009,3 +1009,24 @@ console.log('recall.test.mjs: ok');
     assert.equal(asked(text), false, text);
   }
 }
+
+// A32：只有真递到模型眼里的条目才记使用时间；空召回/未命中的回合不能顺手记账。
+{
+  const cwd = mkdir('usage');
+  const scope = store.scopeOf(cwd);
+  const probe = save(scope, { title: '量子纠缠咖啡机', tags: ['记账'], summary: '只有送达才记 lastUsed' });
+  const lastUsedOf = () => store.locateByTitle(scope, '量子纠缠咖啡机').record.lastUsed;
+  const baseline = lastUsedOf();
+  const runtime = boot();
+  const agent = makeAgent('agent-usage', cwd);
+  const missSignal = await prepare(runtime, agent, '完全无关的一串词');
+  assert.doesNotMatch(runtime.provider.text({ agent, signal: missSignal }), /量子纠缠咖啡机/);
+  runtime.handlers.get('agent/turn-stopping').at(-1)({ signal: missSignal });
+  assert.equal(lastUsedOf(), baseline, '没送达的条目不能被记账');
+  const hitSignal = await prepare(runtime, agent, '量子纠缠咖啡机', 't2');
+  assert.match(runtime.provider.text({ agent, signal: hitSignal }), /量子纠缠咖啡机/);
+  assert.equal(lastUsedOf(), baseline, '送达也不在 provider 路径上写盘');
+  runtime.handlers.get('agent/turn-stopping').at(-1)({ signal: hitSignal });
+  assert.ok(lastUsedOf(), '回合收尾时把真正送达的条目记账');
+  assert.equal(store.locateByTitle(scope, '量子纠缠咖啡机').record.id, probe.id);
+}

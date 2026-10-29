@@ -295,6 +295,11 @@ await assert.rejects(
 );
 const hintedRead = await exec('memory_read', { title: '生效验证顺序（含：桌面端没有 Cmd+R）' });
 assert.equal(hintedRead.body, '正文');
+const hintedUpdate = await exec('memory_save', { title: '缩短标题的探针', summary: '改正文', body: '新正文', updateTitle: '生效验证顺序' });
+assert.ok(hintedUpdate.error);
+assert.match(hintedUpdate.error, /相近的里有：「生效验证顺序（含：桌面端没有 Cmd\+R）」/);
+assert.doesNotMatch(hintedUpdate.error, /undefined/);
+
 
 /** 重命名后仍按原 id 定位到同一条；归档后重建同名条目也不能冒领旧 id。 */
 const renameSaved = store.saveEntry(twinScope, { title: '改名前的探针', summary: '旧身份', body: '旧正文', writeMode: 'patch' });
