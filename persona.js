@@ -125,17 +125,16 @@ export function validateObservation(observation, options = {}) {
 }
 
 /**
- * 证据去重键：用户 × 会话/任务 × 日期 × 维度 × 取值/极性。
- * 同一任务里反复催同一句属于同一份反馈，只算一次；情绪再强也不加票。
- * 事件编号不参与去重，否则同一件事换一个编号就能刷票。
+ * 证据去重键：用户 × 会话/任务 × 维度 × 取值/极性。
+ * 同一任务里反复催同一句属于同一份反馈，只算一次；跨任务、跨天才是新的一次。
+ * 日期与事件编号都不参与去重：前者让同一件事拖几天就刷票，后者换编号就能刷票。
  */
 export function evidenceKeyOf(row) {
   const user = String((row && row.userId) || 'local');
   const context = String((row && (row.taskId || row.sessionId)) || 'none');
-  const date = String((row && row.date) || '');
   const dimension = String((row && row.dimension) || '');
   const shape = [String((row && row.polarity) || 'support'), String((row && row.value) || '')].join('/');
-  return [user, context, date, dimension, shape].join('|');
+  return [user, context, dimension, shape].join('|');
 }
 
 export function deduplicateEvidence(rows) {
