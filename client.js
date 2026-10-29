@@ -834,6 +834,7 @@ window.__ModuleLoader__.load({
       }
       const triggers = Array.isArray(draft.triggers) ? draft.triggers.filter(Boolean).join('、') : '';
       const near = Array.isArray(row && row.candidates) ? row.candidates.map((item) => item && item.title).filter(Boolean) : [];
+      const body = String(draft.body || draft.summary || '');
       return {
         scope: row && row.scope === 'global' ? '总记忆' : '本项目',
         when: typeof draft.when === 'string' ? draft.when : '',
@@ -841,7 +842,9 @@ window.__ModuleLoader__.load({
         selection: selectionText,
         triggers,
         near: near.join('、'),
-        body: String(draft.body || draft.summary || '（没有正文）'),
+        /** 旧队列的草稿正文没落下：只能丢掉。 */
+        draftMissing: body.trim() === '',
+        body,
       };
     };
 
@@ -2834,7 +2837,7 @@ window.__ModuleLoader__.load({
               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer',
             },
           }, row.title),
-          conflictReadOnly ? null : h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'keep') }, '存新的'),
+          conflictReadOnly || facts.draftMissing ? null : h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'keep') }, '存新的'),
           conflictReadOnly ? null : h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'drop') }, '丢掉'),
         ),
         open ? h('div', {
@@ -2846,7 +2849,9 @@ window.__ModuleLoader__.load({
         facts.selection ? h('div', null, `适用范围：${facts.selection}`) : null,
         facts.triggers ? h('div', null, `触发词：${facts.triggers}`) : null,
         facts.near ? h('div', null, `相近：${facts.near}`) : null,
-        h('div', { style: { whiteSpace: 'pre-wrap', color: 'var(--dsw-alias-label-primary)' } }, facts.body),
+        facts.draftMissing
+          ? h('div', null, '旧版本排队的草稿没正文，只能丢掉')
+          : h('div', { style: { whiteSpace: 'pre-wrap', color: 'var(--dsw-alias-label-primary)' } }, facts.body),
         ) : null);
       }));
       const memoryListPane = h('div', {

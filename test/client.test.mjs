@@ -410,4 +410,7 @@ assert.equal(facts.triggers, '发版、发布');
 assert.equal(facts.near, '旧结论、另一条');
 assert.equal(facts.body, '周四晚上再发版。');
 assert.equal(conflictFactsOf({ scope: 'project', draft: { selection: { mode: 'examples', items: ['a.md', 'b.md'] } } }).selection, '举例：a.md、b.md');
-assert.equal(conflictFactsOf({ draft: { body: '' } }).body, '（没有正文）');
+assert.equal(conflictFactsOf({ draft: { body: '' } }).body, '');
+assert.equal(conflictFactsOf({ draft: { body: '' } }).draftMissing, true);
+assert.equal(conflictFactsOf({ title: '只有标题' }).draftMissing, true);
+assert.equal(facts.draftMissing, false);
