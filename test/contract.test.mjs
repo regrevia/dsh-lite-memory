@@ -1339,4 +1339,68 @@ assert.equal(movedBack.body.to, 'project');
 assert.equal(store.loadIndex(store.scopeOf(moveCwd)).entries.some((row) => row.id === movedBack.body.id), true, '搬回当前项目');
 assert.equal(store.loadIndex(store.globalScope()).entries.some((row) => row.id === movedOut.body.id), false, '全局层不再有这条');
 
+// ── 「记住我」路由：只有枚举值，动作失败必须带原因 ────────────────────────────
+const personaFresh = await call('/lite-memory/persona', {});
+assert.equal(personaFresh.status, 200);
+assert.equal(personaFresh.body.ok, true);
+assert.equal(personaFresh.body.enabled, false, '默认关闭');
+assert.equal(personaFresh.body.catalog.length, 8, '八个维度都要能选');
+assert.ok(personaFresh.body.formed.length === 0 && personaFresh.body.observing.length === 0);
+
+assert.equal((await call('/lite-memory/persona', { op: '乱来' })).status, 400);
+assert.equal((await call('/lite-memory/persona', { op: 'edit', dimension: 'tone' })).status, 400);
+assert.equal((await call('/lite-memory/persona', { op: 'reject' })).status, 400);
+const unknownDimension = await call('/lite-memory/persona', { op: 'reject', dimension: '根本不存在的维度' });
+assert.equal(unknownDimension.status, 409);
+assert.equal(unknownDimension.body.ok, false);
+assert.equal(unknownDimension.body.reason, '没有这个维度');
+
+const enabled = await call('/lite-memory/persona', { op: 'enable' });
+assert.equal(enabled.body.enabled, true);
+assert.equal(enabled.body.changed, true);
+const shaped = await call('/lite-memory/persona', { op: 'edit', dimension: 'tone', value: 'direct' });
+assert.equal(shaped.status, 200);
+assert.equal(shaped.body.formed.length, 1, '人工确认立即形成');
+assert.equal(shaped.body.formed[0].dimension, 'tone');
+assert.equal(shaped.body.formed[0].valueLabel, '直接');
+assert.equal(shaped.body.formed[0].lockedByUser, true);
+const badValue = await call('/lite-memory/persona', { op: 'edit', dimension: 'tone', value: '不存在的取值' });
+assert.equal(badValue.status, 409);
+assert.equal(badValue.body.reason, '这个取值不在该维度里');
+const paused = await call('/lite-memory/persona', { op: 'reject', dimension: 'tone' });
+assert.equal(paused.status, 200);
+assert.equal(paused.body.formed.length, 0, '「不用这个」立即停用，不再出现在已形成里');
+const reformed = await call('/lite-memory/persona', { op: 'edit', dimension: 'tone', value: 'plain' });
+assert.equal(reformed.body.formed.length, 1, '人手改回来就重新形成');
+assert.equal(reformed.body.formed[0].value, 'plain');
+// 「记住我」第一段：本回合先本地筛，只有明确偏好信号才进待确认队列；不用模型
+const personaStoreMod = await import('../persona-store.js');
+const queuedBefore = (personaStoreMod.readPersona().persona.pending || []).length;
+const personaSig = new AbortController().signal;
+await preStep({ agent: recallAgent, signal: personaSig, turn: '41' }, pass('以后都先给结论，别铺垫', 'p1'));
+const queued = personaStoreMod.readPersona().persona.pending || [];
+assert.equal(queued.length, queuedBefore + 1, '明确偏好信号要进待确认队列');
+assert.equal(queued.at(-1).dimension, 'answer_order');
+assert.equal(queued.at(-1).value, 'conclusion_first');
+await preStep({ agent: recallAgent, signal: personaSig, turn: '42' }, pass('今天看了个电影', 'p2'));
+assert.equal((personaStoreMod.readPersona().persona.pending || []).length, queuedBefore + 1, '没有偏好信号就不写文件');
+// 「记住我」第二段：模型通道缺席时直接放过，不烧掉 24 小时窗口
+for (let i = 0; i < 5; i += 1) {
+  personaStoreMod.queuePersonaPending({ snippet: { text: '以后都先给结论，别铺垫', sessionId: 'session-recall', taskId: '' } });
+}
+const learningBefore = personaStoreMod.readPersona().persona.learning || {};
+llmImpl = null;
+const turnEnd = subscriptions.get('session/event');
+assert.equal(typeof turnEnd, 'function');
+turnEnd({ id: 'session-recall', header: { cwd } }, { type: 'turn/end', data: { reason: { kind: 'completed' } } });
+await new Promise((resolve) => setTimeout(resolve, 150));
+const learningAfter = personaStoreMod.readPersona().persona.learning || {};
+assert.equal(learningAfter.lastPassAt || '', learningBefore.lastPassAt || '', '没有模型就不占这次窗口');
+const cleared = await call('/lite-memory/persona', { op: 'clear' });
+assert.equal(cleared.status, 200);
+assert.equal(cleared.body.formed.length, 0);
+assert.equal(cleared.body.observing.length, 0);
+const turnedOff = await call('/lite-memory/persona', { op: 'disable' });
+assert.equal(turnedOff.body.enabled, false);
+
 console.log('contract.test.mjs: all passed');

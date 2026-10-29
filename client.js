@@ -2203,6 +2203,134 @@ window.__ModuleLoader__.load({
       );
     };
 
+    /**
+     * 「记住我」：用户级的表达偏好，独立于项目记忆。
+     * 展开才读；读不到整块不出现，动作失败只在这里说一句。
+     */
+    const PersonaSection = (props) => {
+      const sessionId = props.sessionId;
+      const [open, setOpen] = React.useState(false);
+      const [panel, setPanel] = React.useState(null);
+      const [busy, setBusy] = React.useState(false);
+      const [note, setNote] = React.useState('');
+      const [confirmClear, setConfirmClear] = React.useState(false);
+      const [gone, setGone] = React.useState(false);
+      const alive = React.useRef(true);
+      const loaded = React.useRef(false);
+      React.useEffect(() => {
+        alive.current = true;
+        return () => { alive.current = false; };
+      }, []);
+      const send = (body) => {
+        if (busy) return;
+        setBusy(true);
+        setNote('');
+        setConfirmClear(false);
+        post('/lite-memory/persona', { sessionId, ...body }).then((result) => {
+          if (!alive.current) return;
+          setBusy(false);
+          const next = result && result.body && Array.isArray(result.body.catalog) ? result.body : null;
+          if (succeeded(result) && next) {
+            setPanel(next);
+            setNote(typeof next.reason === 'string' ? next.reason : '');
+            return;
+          }
+          if (next) setNote(failure(result, '这次没有改动'));
+          else setGone(true);
+        });
+      };
+      React.useEffect(() => {
+        if (!open || loaded.current) return;
+        loaded.current = true;
+        send({ op: 'status' });
+      }, [open]);
+      if (gone) return null;
+
+      const catalog = panel && Array.isArray(panel.catalog) ? panel.catalog : EMPTY;
+      if (panel && catalog.length === 0) return null;
+      const enabled = panel ? panel.enabled === true : false;
+      const formed = panel && Array.isArray(panel.formed) ? panel.formed : EMPTY;
+      const observing = panel && Array.isArray(panel.observing) ? panel.observing : EMPTY;
+      const changes = panel && Array.isArray(panel.recentChanges) ? panel.recentChanges.slice(-5) : EMPTY;
+      const valueLabelOf = (dimension, value) => {
+        const row = catalog.find((item) => item.dimension === dimension);
+        const hit = row && Array.isArray(row.values) ? row.values.find((item) => item.value === value) : null;
+        return hit ? hit.label : value;
+      };
+      const heading = (text, count) => h('div', { style: { ...PANEL_LABEL, display: 'flex', alignItems: 'center', gap: '5px' } },
+        h('span', null, text),
+        count > 0 ? h('span', { style: { opacity: 0.7, fontVariantNumeric: 'tabular-nums' } }, String(count)) : null);
+      const section = (label, count, rows) => (rows.length > 0
+        ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '1px', minWidth: 0 } }, heading(label, count), rows)
+        : null);
+      const formedRows = formed.map((row) => h('div', { key: `formed:${row.dimension}`, style: { ...ROW, gap: '8px' } },
+        h('span', { style: { ...LABEL, flex: 1 } }, `${row.label} · ${row.valueLabel || row.value}`),
+        row.lockedByUser === true
+          ? h('span', { style: { ...PANEL_MUTED, flex: '0 0 auto' } }, '已确认')
+          : h('span', { style: { display: 'flex', alignItems: 'center', gap: '8px', flex: '0 0 auto' } },
+            h(Action, { disabled: busy, onClick: () => send({ op: 'edit', dimension: row.dimension, value: row.value }) }, '确认'),
+            h(Action, { disabled: busy, onClick: () => send({ op: 'reject', dimension: row.dimension }) }, '不用这个'))));
+      const observingRows = observing.map((row) => h('div', { key: `observing:${row.dimension}`, style: ROW },
+        h('span', { style: LABEL }, `${row.label} · ${row.text || ''}`)));
+      const changeRows = changes.map((row) => {
+        const ago = agoLabel(row.at);
+        const from = row.from ? valueLabelOf(row.dimension, row.from) : '未定';
+        const to = row.to ? valueLabelOf(row.dimension, row.to) : '';
+        return h('div', { key: `change:${row.at}:${row.dimension}:${row.to}`, style: { ...ROW, gap: '8px' } },
+          h('span', { style: { ...LABEL, flex: 1 } }, `${row.label} · ${from}${to ? ` → ${to}` : ''}`),
+          ago ? h('span', { style: { ...PANEL_MUTED, flex: '0 0 auto' } }, ago) : null);
+      });
+      const empty = panel && formed.length === 0 && observing.length === 0 && changes.length === 0;
+      const clearLine = panel
+        ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', paddingTop: '1px' } },
+          h(Action, {
+            disabled: busy, danger: confirmClear,
+            onClick: () => { if (confirmClear) send({ op: 'clear' }); else setConfirmClear(true); },
+          }, confirmClear ? '确认清空' : '清空画像'),
+          confirmClear ? h(Action, { disabled: busy, onClick: () => setConfirmClear(false) }, '取消') : null)
+        : null;
+      const statusText = panel
+        ? (formed.length > 0 ? `已记住 ${formed.length} 条` : (enabled ? '还没有形成的偏好' : '已关闭'))
+        : (busy ? '读取中' : '');
+      const header = h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
+        h('button', {
+          type: 'button', 'aria-expanded': open, 'aria-label': open ? '收起记住我' : '展开记住我',
+          onClick: () => { setOpen(!open); setConfirmClear(false); },
+          style: { ...PANEL_LINK, display: 'flex', alignItems: 'center', gap: '6px', flex: 1, minWidth: 0, height: '20px', textAlign: 'left' },
+        },
+        h(RefChevron, { open }),
+        h('span', { style: { flex: '0 0 auto', fontSize: '12px', fontWeight: 600 } }, '记住我'),
+        h('span', { style: { ...PANEL_MUTED, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, statusText)),
+        panel
+          ? h(Action, {
+            disabled: busy, 'aria-pressed': enabled,
+            onClick: () => send({ op: enabled ? 'disable' : 'enable' }),
+          }, enabled ? '已开启' : '已关闭')
+          : null);
+      const body = panel
+        ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '7px', minWidth: 0 } },
+          h('div', {
+            style: {
+              display: 'flex', flexDirection: 'column', gap: '7px', minWidth: 0,
+              opacity: enabled ? 1 : 0.45, pointerEvents: enabled ? 'auto' : 'none',
+            },
+          },
+          section('已形成', formed.length, formedRows),
+          section('观察中', observing.length, observingRows),
+          section('最近变化', changes.length, changeRows),
+          empty ? h('div', { style: PANEL_MUTED }, '还没有值得记下的偏好') : null),
+          note ? h('div', { style: { ...PANEL_MUTED, wordBreak: 'break-word' } }, note) : null,
+          clearLine)
+        : h('div', { style: PANEL_MUTED }, busy ? '读取中' : '');
+      return h('section', {
+        'aria-label': '记住我',
+        style: {
+          ...PANEL_CARD, flex: '0 0 auto', display: 'flex', flexDirection: 'column', gap: '7px',
+          padding: '9px 11px', minHeight: 0, maxHeight: open ? '40%' : 'none', overflowY: open ? 'auto' : 'visible',
+        },
+      }, header, open ? body : null);
+    };
+
     const MemoryPanel = (props) => {
       const sessionId = props.sessionId;
       const [data, setData] = React.useState(null);
@@ -2934,6 +3062,7 @@ window.__ModuleLoader__.load({
           h('div', { style: { display: memoryViewActive === 'graph' ? 'flex' : 'none', minWidth: 0, minHeight: 0, width: '100%' } }, memoryGraphPane),
           h('div', { style: { display: memoryViewActive === 'palace' ? 'flex' : 'none', minWidth: 0, minHeight: 0, width: '100%' } }, memoryPalacePane),
           h('div', { style: { display: memoryViewActive === 'list' ? 'flex' : 'none', minWidth: 0, minHeight: 0, width: '100%', flexDirection: 'column' } }, memoryListPane)),
+        h(PersonaSection, { key: 'persona', sessionId }),
         memoryDetail),
       );
 
@@ -3144,7 +3273,7 @@ window.__ModuleLoader__.load({
 
     // 测试缝：Node 里验引用投影，浏览器里没有任何副作用。
     if (typeof globalThis.__LITE_MEMORY_TEST__ === 'function') {
-      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row, conflictVisibleRows, conflictFactsOf });
+      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, PersonaSection, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row, conflictVisibleRows, conflictFactsOf });
     }
 
     return {

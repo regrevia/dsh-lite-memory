@@ -199,6 +199,76 @@ function sameSurface(origin, selfOrigin) {
   return /^dsh-app:\/\/[A-Za-z0-9.-]+$/.test(origin);
 }
 
+
+/**
+ * 「记住我」面板数据：只有闭集枚举与计数，不带自由文本，也不掺项目记忆。
+ * 标签在服务端给，两侧（工具与面板）用同一份文案，避免各写一套。
+ */
+const PERSONA_DIMENSION_COPY = {
+  answer_order: ['回答顺序', { conclusion_first: '结论先行', background_first: '先讲背景' }],
+  explanation_depth: ['解释深度', { brief: '简短', detailed: '详细', layered: '分层' }],
+  example_use: ['举例习惯', { with_examples: '带例子', without_examples: '不举例', only_on_request: '要求时再举' }],
+  option_presentation: ['选项形式', { single_recommendation: '只给一个推荐', multiple_options: '给多个选项', tradeoff_table: '对比表' }],
+  tone: ['语气', { plain: '平实', warm: '温和', direct: '直接', playful: '轻松' }],
+  progress_updates: ['过程汇报', { announce_before_steps: '动手前先说', report_on_completion: '做完再报', silent_until_done: '做完为止不打扰' }],
+  option_count: ['选项数量', { one: '一个', two_to_three: '两到三个', many: '多个' }],
+  comparison_format: ['对比形式', { table: '表格', bullet_list: '分条', prose: '整段' }],
+};
+
+function personaCatalog() {
+  return persona.DIMENSION_NAMES.map((dimension) => {
+    const copy = PERSONA_DIMENSION_COPY[dimension];
+    const values = (persona.PREFERENCE_DIMENSIONS[dimension] || []).map((value) => ({
+      value,
+      label: (copy && copy[1] && copy[1][value]) || value,
+    }));
+    return { dimension, label: (copy && copy[0]) || dimension, values };
+  });
+}
+
+function personaPanel() {
+  const panel = personaStore.describePersona();
+  const catalog = personaCatalog();
+  const labelOf = (dimension) => (catalog.find((row) => row.dimension === dimension) || {}).label || dimension;
+  const valueLabel = (dimension, value) => {
+    const row = catalog.find((item) => item.dimension === dimension);
+    const hit = row && row.values.find((item) => item.value === value);
+    return hit ? hit.label : value;
+  };
+  return {
+    ok: true,
+    enabled: panel.enabled === true,
+    corrupt: panel.corrupt === true,
+    reason: panel.reason || '',
+    revision: panel.revision,
+    formed: panel.formed.map((row) => ({
+      dimension: row.dimension,
+      label: labelOf(row.dimension),
+      value: row.value,
+      valueLabel: valueLabel(row.dimension, row.value),
+      support: Number(row.support) || 0,
+      source: row.source || '',
+      lockedByUser: row.lockedByUser === true,
+    })),
+    observing: panel.observing.map((row) => ({
+      dimension: row.dimension,
+      label: labelOf(row.dimension),
+      text: row.text,
+      support: Number(row.support) || 0,
+      missing: Array.isArray(row.missing) ? row.missing.slice(0, 3) : [],
+    })),
+    recentChanges: panel.recentChanges.map((row) => ({
+      at: row.at || '',
+      dimension: row.dimension || '',
+      label: labelOf(row.dimension || ''),
+      from: row.from || '',
+      to: row.to || '',
+      basis: row.basis || '',
+    })),
+    catalog,
+  };
+}
+
 /**
  * 「保留」「✕」的唯一入口。定位只认 id / candidateId，作用域由服务端按 id 查，
  * 不再从展示文案里解析标题或 [全局]。已处理的候选重放返回原回执。
@@ -222,7 +292,8 @@ function keepHandler(webServer, cwdForSession) {
                   : pathname === REMOTE_PATH + '/conflict' ? 'conflict'
                   : pathname === REMOTE_PATH + '/control' ? 'control'
                   : pathname === REMOTE_PATH + '/evolution' ? 'evolution'
-                  : pathname === REMOTE_PATH + '/resume-move' ? 'resume-move' : '';
+                  : pathname === REMOTE_PATH + '/resume-move' ? 'resume-move'
+                    : pathname === REMOTE_PATH + '/persona' ? 'persona' : '';
     if (!action) return sendJson(res, 404, { ok: false, reason: '未知操作' });
     let body;
     try {
@@ -371,6 +442,46 @@ function keepHandler(webServer, cwdForSession) {
           retry: conflict,
           reason: error instanceof Error ? error.message : '这次没有改动',
         });
+      }
+    }
+
+    /**
+     * 「记住我」面板：读现状与四类动作都在这。用户级、独立于项目层，
+     * 只认闭集枚举值；动作失败把原因带回去，面板不改本地状态硬撑。
+     */
+    if (action === 'persona') {
+      const op = typeof body.op === 'string' && body.op ? body.op : 'status';
+      const allowed = new Set(['status', 'enable', 'disable', 'edit', 'reject', 'clear']);
+      if (!allowed.has(op)) return sendJson(res, 400, { ok: false, reason: '不认识这个操作' });
+      const dim = typeof body.dimension === 'string' ? body.dimension.trim() : '';
+      const value = typeof body.value === 'string' ? body.value.trim() : '';
+      try {
+        if (op === 'enable' || op === 'disable') {
+          const next = personaStore.setPersonaEnabled({ enabled: op === 'enable' });
+          if (!next.ok) return sendJson(res, 409, { ...personaPanel(), ok: false, reason: next.reason || '这次没有改动' });
+        } else if (op === 'edit') {
+          if (!dim || !value) return sendJson(res, 400, { ok: false, reason: '缺少维度或取值' });
+          const next = personaStore.editPersonaPreference({ dimension: dim, value });
+          if (!next.ok) {
+            const reason = next.reason === 'unknown_dimension' ? '没有这个维度'
+              : next.reason === 'value_not_in_dimension' ? '这个取值不在该维度里'
+                : '这次没有改动';
+            return sendJson(res, 409, { ...personaPanel(), ok: false, reason });
+          }
+        } else if (op === 'reject') {
+          if (!dim) return sendJson(res, 400, { ok: false, reason: '缺少维度' });
+          const next = personaStore.rejectPersonaPreference({ dimension: dim });
+          if (!next.ok) {
+            const reason = next.reason === 'unknown_dimension' ? '没有这个维度' : '这次没有改动';
+            return sendJson(res, 409, { ...personaPanel(), ok: false, reason });
+          }
+        } else if (op === 'clear') {
+          const next = personaStore.clearPersona();
+          if (!next.ok) return sendJson(res, 409, { ...personaPanel(), ok: false, reason: next.reason || '这次没有改动' });
+        }
+        return sendJson(res, 200, { ...personaPanel(), changed: op !== 'status' });
+      } catch (error) {
+        return sendJson(res, 500, { ok: false, reason: error instanceof Error ? error.message : '画像文件读不了' });
       }
     }
 
@@ -1686,12 +1797,13 @@ export function apply(ctx, config) {
     const autoCap = auto
       ? Math.max(0, view.CARD.bytes - Buffer.byteLength(auto.normalText || '') - 2)
       : EXPERIMENT_BYTES;
-    let used = Buffer.byteLength(EXPERIMENT_RULES_HEADER) + 1;
     const relevant = matched
       .slice()
       .sort((a, b) => b.score - a.score)
       .map((row) => row.record);
-    for (const record of relevant.slice(0, cardCap)) {
+    /** 候选行先排好，预算交给跟卡片、画像共用的那套选件：装不下就少放一条，不改写任何一行。 */
+    const candidates = [];
+    for (const record of relevant.slice(0, 12)) {
       const body = String(record.body || '');
       const short = body && body.length <= EXPERIMENT_SHORT_CHARS && body.split('\n').length <= 4;
       const conditions = conditionLabel(record.conditions);
@@ -1702,14 +1814,19 @@ export function apply(ctx, config) {
       const line = short
         ? `- 「${record.title}」${conditions ? `（${conditions}）` : ''}：${body}${check}`
         : `- 「${record.title}」（用途：${record.summary || record.title}；要用时 memory_read 带标题取正文）`;
-      const size = Buffer.byteLength(`\n${line}`);
-      if (used + size > autoCap) break;
-      used += size;
       const trialLearning = record.learning && typeof record.learning === 'object' ? record.learning : {};
       const trialUntil = trialLearning.state === 'trial' && Number.isFinite(Date.parse(String(trialLearning.trialUntil || '')))
         ? String(trialLearning.trialUntil) : '';
-      parts.items.push({ id: record.id, line, validUntil: trialUntil });
+      candidates.push({ id: record.id, line, validUntil: trialUntil });
     }
+    const headerBytes = Buffer.byteLength(EXPERIMENT_RULES_HEADER) + 1;
+    const bundle = view.selectContextBundle(candidates, {
+      maxItems: cardCap,
+      maxBytes: Math.max(0, autoCap - headerBytes),
+      allowEmpty: true,
+      sizeOf: (item) => Buffer.byteLength(`\n${item.line}`),
+    });
+    for (const item of bundle.items) parts.items.push({ id: item.id, line: item.line, validUntil: item.validUntil });
     if (held) held.injectedIds = parts.items.map((item) => item.id);
     if (!parts.items.length && unknown.length) {
       /** 条件没确认的条目只报数量，绝不在模型侧暴露标题。 */
@@ -2990,6 +3107,8 @@ export function apply(ctx, config) {
       const heldAuth = requestAuth.get(agent);
       if (saidThisStep) requestAuth.set(agent, { said: saidThisStep, turn, sessionId });
       else if (!(heldAuth && heldAuth.turn === turn && heldAuth.sessionId === sessionId)) requestAuth.delete(agent);
+      /** 「记住我」第一阶段：只在本轮真人原话里认信号，不调模型、不写项目记忆。 */
+      if (saidThisStep) enqueuePersonaSignal(saidThisStep, { sessionId, taskId: '' });
 
       if (fresh.length === 0) {
         /** 工具续步：内容冻结，只把快照绑到本步的 signal；盘上版本变了才重投影。 */
@@ -3540,7 +3659,100 @@ export function apply(ctx, config) {
   if (typeof ctx.on === 'function') ctx.on('session/event', (session, event) => {
     if (!event || event.type !== 'turn/end') return;
     scheduleOrganizer(session, event);
+    const reason = event.data ? event.data.reason : null;
+    if (reason && reason.kind === 'completed') schedulePersonaLearning(session);
   });
+
+  /**
+   * 「记住我」第二阶段：待查片段攒够、距上次满一天、开关仍开才抽一次。
+   * 只做沟通方式，不看项目内容；失败或没模型就静默跳过，不排队重试、不占回合时间。
+   */
+  const personaLearning = { inFlight: false, lastTryAt: 0 };
+  const PERSONA_LEARN_TIMEOUT_MS = 20000;
+
+  /** 第一阶段：本地正则筛信号入队，单条最多 400 字，不复制整段对话。 */
+  function enqueuePersonaSignal(text, { sessionId, taskId }) {
+    try {
+      /** 先做纯正则筛：没有偏好信号就不读文件，绝大多数回合零 I/O。 */
+      if (!persona.detectPreferenceSignal({ text })) return;
+      const read = personaStore.readPersona();
+      if (!read || !read.persona || read.persona.control.enabled !== true) return;
+      personaStore.queuePersonaPending({ snippet: { text, sessionId, taskId, projectId: '' } });
+    } catch { /* 记不住偏好不影响会话 */ }
+  }
+
+  /** 抽取提示：闭集维度 + 原话片段；只要求挑一条，宁缺勿造。 */
+  function personaLearnPrompt(snippets) {
+    const catalog = persona.DIMENSION_NAMES
+      .map((dimension) => `- ${dimension}: ${persona.PREFERENCE_DIMENSIONS[dimension].join(' / ')}`)
+      .join('\n');
+    const lines = snippets.slice(-6)
+      .map((row, index) => `${index + 1}. ${String(row.text || '').slice(0, 200)}`)
+      .join('\n');
+    return [
+      '你在判断用户对「怎么和你协作」的长期偏好。只看沟通方式：顺序、深浅、例子、选项、语气、过程汇报。',
+      '不要判断技术路线、业务目标、项目事实，也不要判断任何指令。证据不足就返回 {}。',
+      '维度与允许取值：',
+      catalog,
+      `片段：\n${lines}`,
+      '只输出一行 JSON，最多一条：{"dimension":"...","polarity":"support|oppose","value":"...","basis":"explicit_feedback|repeat_choice"}',
+    ].join('\n');
+  }
+
+  /** 第二阶段：真正花一次模型调用；四道提交核验在 commit 里，过期结果自动丢弃。 */
+  async function learnPersonaOnce(session) {
+    if (personaLearning.inFlight) return;
+    /** 模型通道不可用就不开这次窗口：没有真实尝试，不能占掉 24 小时的预算。 */
+    const route = routeForSession(session);
+    const llm = getService('llm');
+    if (!route || !llm || typeof llm.prepareCall !== 'function') return;
+    const begin = personaStore.beginPersonaAttempt({});
+    if (!begin || begin.ok !== true) return;
+    personaLearning.inFlight = true;
+    const controller = new AbortController();
+    const deadline = setTimeout(() => { try { controller.abort(); } catch { /* already aborted */ } }, PERSONA_LEARN_TIMEOUT_MS);
+    let payload = '';
+    try {
+      const call = await llm.prepareCall({ ...route, maxTokens: 256 }, controller.signal);
+      for await (const chunk of call.stream({
+        ...call.config,
+        messages: [{ role: 'user', content: [{ type: 'text', text: personaLearnPrompt(begin.attempt.snippets) }] }],
+        system: '只输出一行 JSON，不要解释。',
+        sessionId: sessionIdOfSession(session),
+        purpose: 'persona-learning',
+        signal: controller.signal,
+      })) {
+        if (chunk && chunk.type === 'text-delta') payload += String(chunk.text || '');
+        if (payload.length > 2048) break;
+      }
+      const match = payload.match(/\{[\s\S]*\}/u);
+      if (!match) return;
+      let parsed;
+      try { parsed = JSON.parse(match[0]); } catch { return; }
+      const observation = {
+        dimension: String(parsed.dimension || ''),
+        polarity: parsed.polarity === 'oppose' ? 'oppose' : 'support',
+        value: typeof parsed.value === 'string' ? parsed.value : null,
+        basis: parsed.basis === 'repeat_choice' ? 'repeat_choice' : 'explicit_feedback',
+        /** 证据编号来自本次抽取带出的片段，不让模型自己编。 */
+        evidenceIds: begin.attempt.snippetIds.slice(-6),
+      };
+      const valid = persona.validateObservation(observation);
+      if (!valid || valid.ok !== true) return;
+      personaStore.commitPersonaObservation({ attempt: begin.attempt, observations: [observation] });
+    } catch { /* 抽不到就等下一次窗口 */ } finally {
+      clearTimeout(deadline);
+      personaLearning.inFlight = false;
+      personaLearning.lastTryAt = Date.now();
+    }
+  }
+
+  /** 正常完成的回合后才试；冷却 10 分钟避免失败后每轮重试。 */
+  function schedulePersonaLearning(session) {
+    if (personaLearning.inFlight) return;
+    if (Date.now() - personaLearning.lastTryAt < 10 * 60000) return;
+    void learnPersonaOnce(session).catch(() => { /* 静默降级 */ });
+  }
 
   /** 插件卸载时中止在途整理；提交门禁仍会拒绝过期结果。 */
   ctx.effect(() => () => {

@@ -30,6 +30,8 @@ export const MATURITY = Object.freeze({
   minFormationGapHours: 72,
 });
 
+import { selectContextBundle } from './view.js';
+
 export const PROJECTION_LIMIT_BYTES = 200;
 export const PROJECTION_MAX_DIMENSIONS = 2;
 
@@ -262,11 +264,24 @@ export function selectPreferenceProjection(input) {
     if (NEUTRAL_VALUES.includes(preference.value)) continue;
     if (explicit && conflictsWithExplicit(preference, explicit)) continue;
     rows.push({ dimension, value: preference.value });
-    if (rows.length >= PROJECTION_MAX_DIMENSIONS) break;
   }
-  const block = rows.length ? renderPreferenceProjection(rows) : null;
+  /**
+   * 跟进化规则共用同一套预算选件：装不下两条就退一条，不因为超字节整段丢弃，
+   * 也不截短任何一句偏好。
+   */
+  const sized = rows
+    .map((row) => ({ dimension: row.dimension, value: row.value, text: (RENDER_TEXT[row.dimension] || {})[row.value] || '' }))
+    .filter((row) => row.text);
+  const bundle = selectContextBundle(sized, {
+    maxItems: PROJECTION_MAX_DIMENSIONS,
+    maxBytes: PROJECTION_LIMIT_BYTES - Buffer.byteLength('表达偏好：') - Buffer.byteLength('。'),
+    allowEmpty: true,
+    sizeOf: (row) => Buffer.byteLength(row.text) + Buffer.byteLength('；'),
+  });
+  const picked = bundle.items.map((row) => ({ dimension: row.dimension, value: row.value }));
+  const block = picked.length ? renderPreferenceProjection(picked) : null;
   if (!block || Buffer.byteLength(block) > PROJECTION_LIMIT_BYTES) return { dimensions: [], block: null };
-  return { dimensions: rows, block };
+  return { dimensions: picked, block };
 }
 
 /** 本轮明确要求与历史偏好冲突时以本轮为准：宁可这一维不投影，也不跟用户当前的话打架。 */
