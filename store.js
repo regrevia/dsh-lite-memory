@@ -246,7 +246,8 @@ function applyFlat(scope, draft, index) {
   for (const record of index.archived || []) next.push(fromFlat(coldStored(scope, record), 'archived'));
   draft.entries = next;
   draft.candidates = Array.isArray(index.suggestions) ? JSON.parse(JSON.stringify(index.suggestions)) : [];
-  draft.receipts = Array.isArray(index.receipts) ? JSON.parse(JSON.stringify(index.receipts)) : [];
+  /** 每次写入顺手清过期回执：只有接受候选才清的话，不产候选的层会一直留着过期的。 */
+  draft.receipts = pruneReceiptList(Array.isArray(index.receipts) ? JSON.parse(JSON.stringify(index.receipts)) : []);
   draft.suppressions = Array.isArray(index.suppressions) ? JSON.parse(JSON.stringify(index.suppressions)) : [];
   draft.conflicts = Array.isArray(index.conflicts) ? JSON.parse(JSON.stringify(index.conflicts)) : [];
   draft.lastSuggestedAt = typeof index.lastSuggestedAt === 'string' ? index.lastSuggestedAt : draft.lastSuggestedAt || '';
@@ -1513,7 +1514,7 @@ function usedStale(record, now) {
  * 真正被搜到/读过才算用过：只回写 lastUsed，不动 hits，也不改正文。
  * 抢不到锁或并发冲突都吞掉——这个是提示字段，不该让检索/阅读失败。
  */
-function touchUsed(scope, ids) {
+function touchUsed(scope, ids, countHit = false) {
   const wanted = new Set((ids || []).filter((id) => typeof id === 'string' && id));
   if (wanted.size === 0) return;
   try {
@@ -1524,8 +1525,13 @@ function touchUsed(scope, ids) {
       let changed = false;
       for (const record of index.entries) {
         if (!wanted.has(record.id)) continue;
+        /** 检索/阅读只补 lastUsed，不记 hits：只有真正交付给模型的记账才算一次使用。 */
+        if (countHit) {
+          record.hits = (Number(record.hits) || 0) + 1;
+          changed = true;
+        }
+        /** 第一次被真用到必须记下来，哪怕刚创建、还没过 lastUsed 的防抖门槛。 */
         if (record.everUsed !== true) {
-          /** 第一次被真用到必须记下来，哪怕刚创建、还没过 lastUsed 的防抖门槛。 */
           record.everUsed = true;
           changed = true;
         }
@@ -1611,7 +1617,7 @@ export function markUsed(scope, ids) {
   const wanted = (Array.isArray(ids) ? ids : []).filter((id) => typeof id === 'string' && id);
   if (!wanted.length) return;
   for (const source of [scope, globalScope()]) {
-    try { touchUsed(source, wanted); } catch { /* lastUsed 只是提示 */ }
+    try { touchUsed(source, wanted, true); } catch { /* lastUsed 只是提示 */ }
   }
 }
 
@@ -2062,12 +2068,15 @@ function suppressionOf(index, fingerprint) {
   return '';
 }
 
-function pruneReceipts(index) {
-  const now = Date.now();
-  index.receipts = (index.receipts || []).filter((item) => {
-    const at = Date.parse(item.at || '');
+function pruneReceiptList(rows, now = Date.now()) {
+  return (Array.isArray(rows) ? rows : []).filter((item) => {
+    const at = Date.parse(item && item.at ? item.at : '');
     return Number.isFinite(at) && now - at < LIMITS.receiptTtlMs;
   }).slice(-LIMITS.receipts);
+}
+
+function pruneReceipts(index) {
+  index.receipts = pruneReceiptList(index.receipts);
   return index.receipts;
 }
 

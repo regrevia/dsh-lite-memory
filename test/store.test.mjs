@@ -506,6 +506,21 @@ test('到硬上限时归档最久没读的一条，不拒绝新记忆', () => {
   assert.equal(archived.current.body.length, chunk);
 });
 
+test('过期回执在任意写入时清掉，不靠接受候选', () => {
+  const scope = fresh('receipt-ttl');
+  const now = Date.now();
+  const stale = new Date(now - LIMITS.receiptTtlMs - 60 * 1000).toISOString();
+  const freshAt = new Date(now - 60 * 1000).toISOString();
+  state.transact(scope, { expectCreate: true }, (draft) => {
+    draft.receipts = [{ operationId: 'op_old', at: stale, changed: 1 }, { operationId: 'op_new', at: freshAt, changed: 2 }];
+    return { changed: true };
+  });
+  const saved = upsert(scope, { title: '顺手写一条', summary: '触发一次事务', body: '正文' });
+  assert.ok(saved.record.id);
+  const kept = stateOf(scope).receipts.map((row) => row.operationId);
+  assert.deepEqual(kept, ['op_new']);
+});
+
 test('the global layer reports both lines', () => {
   const global = globalScope();
   assert.equal(LIMITS.globalEntries, 200);

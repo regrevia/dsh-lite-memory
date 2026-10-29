@@ -542,6 +542,7 @@ const sig1 = new AbortController().signal;
 const hitsBefore = store.loadIndex(store.scopeOf(cwd)).entries.find((item) => item.id === hintedRow.id).hits;
 await preStep({ agent: recallAgent, signal: sig1, turn: '2' }, pass('又弹钥匙串窗口了，怎么弄', 'h1'));
 const hintText = recall.text({ agent: recallAgent, signal: sig1 });
+assert.equal(store.loadIndex(store.scopeOf(cwd)).entries.find((item) => item.id === hintedRow.id).hits, hitsBefore, '注入正文本身是纯读，不写 hits');
 assert.doesNotMatch(hintText, /mem_[a-z0-9]{6,}/, '召回卡只给标题，不给内部编号');
 assert.match(hintText, /需要细节用 memory_read/);
 sessionCwds.set('session-recall', cwd);
@@ -559,7 +560,7 @@ const missReceipt = await call('/lite-memory/overview', { sessionId: 'session-re
 assert.ok(['no_overlap', 'needs_context'].includes(missReceipt.body.current.recall.reason), '没提醒时也说明依据');
 assert.equal(missReceipt.body.current.recall.cards, 0);
 const hitsAfter = store.loadIndex(store.scopeOf(cwd)).entries.find((item) => item.id === hintedRow.id).hits;
-assert.equal(hitsAfter, hitsBefore);
+assert.equal(hitsAfter, hitsBefore + 1, '交付过的卡片在下一轮开头记一次使用');
 
 const sig2 = new AbortController().signal;
 await preStep({ agent: recallAgent, signal: sig2, turn: '3' }, pass('周四晚上发版要注意什么', 'h2'));

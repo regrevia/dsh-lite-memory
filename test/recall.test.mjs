@@ -1017,6 +1017,7 @@ console.log('recall.test.mjs: ok');
   const probe = save(scope, { title: '量子纠缠咖啡机', tags: ['记账'], summary: '只有送达才记 lastUsed' });
   const lastUsedOf = () => store.locateByTitle(scope, '量子纠缠咖啡机').record.lastUsed;
   const usedOf = () => store.locateByTitle(scope, '量子纠缠咖啡机').record.used;
+  const hitsOf = () => store.locateByTitle(scope, '量子纠缠咖啡机').record.hits;
   assert.equal(usedOf(), false, '新建但没被用过的条目不能算读过');
   const baseline = lastUsedOf();
   const runtime = boot();
@@ -1030,5 +1031,9 @@ console.log('recall.test.mjs: ok');
   assert.equal(lastUsedOf(), baseline, '送达也不在 provider 路径上写盘');
   runtime.handlers.get('agent/turn-stopping').at(-1)({ signal: hitSignal });
   assert.equal(usedOf(), true, '送达并记账后「读过」标记跟着成立');
+  assert.equal(hitsOf(), 1, '送达一次记一次使用次数');
+  const id = store.locateByTitle(scope, '量子纠缠咖啡机').record.id;
+  store.markUsed(scope, [id]);
+  assert.equal(hitsOf(), 2, '再次记账继续累加，不受 lastUsed 防抖影响');
   assert.equal(store.locateByTitle(scope, '量子纠缠咖啡机').record.id, probe.id);
 }
