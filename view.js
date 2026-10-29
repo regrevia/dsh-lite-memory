@@ -613,8 +613,8 @@ export function rank(records, query, options = {}) {
   }
   const fused = new Map(fuseRoutes([lexical, exactTitle, objectCue, [...new Set(linkedFromHits)]]).map((row) => [row.id, row.score]));
   for (const row of rows) row.rrf = fused.get(String(row.record.id)) || 0;
-  /** 先比融合分，再比单条命中的原始强弱：强命中不会被弱命中的多路凑数盖过去。 */
-  rows.sort((a, b) => b.rrf - a.rrf || b.raw - a.raw
+  /** 先比单条命中的原始强弱，再比融合分：强命中不会被弱命中的多路凑数盖过去，融合只分同分。 */
+  rows.sort((a, b) => (b.raw || 0) - (a.raw || 0) || (b.rrf || 0) - (a.rrf || 0)
     || String(b.record.lastUsed || '').localeCompare(String(a.record.lastUsed || ''))
     || String(a.record.id).localeCompare(String(b.record.id)));
   return rows.slice(0, limit);
