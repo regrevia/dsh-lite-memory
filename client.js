@@ -2253,6 +2253,7 @@ window.__ModuleLoader__.load({
       const formed = panel && Array.isArray(panel.formed) ? panel.formed : EMPTY;
       const observing = panel && Array.isArray(panel.observing) ? panel.observing : EMPTY;
       const evidence = panel && Array.isArray(panel.evidence) ? panel.evidence : EMPTY;
+      const pending = panel && Number.isFinite(panel.pending) ? panel.pending : 0;
       const changes = panel && Array.isArray(panel.recentChanges) ? panel.recentChanges.slice(-5) : EMPTY;
       const valueLabelOf = (dimension, value) => {
         const row = catalog.find((item) => item.dimension === dimension);
@@ -2340,7 +2341,8 @@ window.__ModuleLoader__.load({
           section('已形成', formed.length, formedRows),
           section('观察中', observing.length, observingRows),
           section('最近变化', changes.length, changeRows),
-          empty ? h('div', { style: PANEL_MUTED }, '还没有值得记下的偏好') : null),
+          empty ? h('div', { style: PANEL_MUTED }, '还没有值得记下的偏好') : null,
+          pending > 0 ? h('div', { key: 'pending', style: PANEL_MUTED }, `还有 ${pending} 段对话没有整理`) : null),
           note ? h('div', { style: { ...PANEL_MUTED, wordBreak: 'break-word' } }, note) : null,
           clearLine)
         : h('div', { style: PANEL_MUTED }, busy ? '读取中' : '');

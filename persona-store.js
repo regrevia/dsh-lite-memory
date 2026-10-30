@@ -491,6 +491,8 @@ export function describePersona(input = {}) {
   }));
   return {
     enabled: data.control.enabled, corrupt: read.corrupt, reason: read.reason,
+    /** 队列长度只给数字：面板用它说明「为什么还没形成」，不暴露片段内容。 */
+    pending: Array.isArray(data.pending) ? data.pending.length : 0,
     formed, observing, evidence, recentChanges: data.recentChanges.slice(-5), revision: data.revision,
   };
 }

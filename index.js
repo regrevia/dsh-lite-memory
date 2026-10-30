@@ -240,6 +240,7 @@ function personaPanel() {
   return {
     ok: true,
     enabled: panel.enabled === true,
+    pending: Number(panel.pending) || 0,
     corrupt: panel.corrupt === true,
     reason: panel.reason || '',
     revision: panel.revision,
