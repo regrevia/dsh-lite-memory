@@ -761,7 +761,7 @@ window.__ModuleLoader__.load({
         : [];
       return h('div', { style: DOCK, 'data-memory-section': props.label },
         h('button', {
-          type: 'button',
+          type: 'button', // ui-copy-ignore
           onClick: () => { if (open) close(); else setOpen(true); },
           'aria-expanded': open,
           'aria-label': `${open ? '收起' : '展开'}${props.label}，${items.length} 条`,
@@ -2263,15 +2263,18 @@ window.__ModuleLoader__.load({
       const section = (label, count, rows) => (rows.length > 0
         ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '1px', minWidth: 0 } }, heading(label, count), rows)
         : null);
+      const supportNote = (count) => (count > 0 ? h('span', { style: { ...PANEL_MUTED, flex: '0 0 auto' } }, `依据 ${count}`) : null);
       const formedRows = formed.map((row) => h('div', { key: `formed:${row.dimension}`, style: { ...ROW, gap: '8px' } },
         h('span', { style: { ...LABEL, flex: 1 } }, `${row.label} · ${row.valueLabel || row.value}`),
+        supportNote(row.support),
         row.lockedByUser === true
           ? h('span', { style: { ...PANEL_MUTED, flex: '0 0 auto' } }, '已确认')
           : h('span', { style: { display: 'flex', alignItems: 'center', gap: '8px', flex: '0 0 auto' } },
             h(Action, { disabled: busy, onClick: () => send({ op: 'edit', dimension: row.dimension, value: row.value }) }, '确认'),
             h(Action, { disabled: busy, onClick: () => send({ op: 'reject', dimension: row.dimension }) }, '不用这个'))));
       const observingRows = observing.map((row) => h('div', { key: `observing:${row.dimension}`, style: ROW },
-        h('span', { style: LABEL }, `${row.label} · ${row.text || ''}`)));
+        h('span', { style: { ...LABEL, flex: 1 } }, `${row.label} · ${row.text || ''}`),
+        supportNote(row.support)));
       const changeRows = changes.map((row) => {
         const ago = agoLabel(row.at);
         const from = row.from ? valueLabelOf(row.dimension, row.from) : '未定';
