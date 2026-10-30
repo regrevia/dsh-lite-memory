@@ -2290,7 +2290,9 @@ window.__ModuleLoader__.load({
       const observingRows = observing.map((row) => h('div', { key: `observing:${row.dimension}`, style: { display: 'flex', flexDirection: 'column', gap: '1px', minWidth: 0 } },
         h('div', { style: ROW },
           h('span', { style: { ...LABEL, flex: 1 } }, `${row.label} · ${row.text || ''}`),
-          basisNote(row.dimension)),
+          h('span', { style: { display: 'flex', alignItems: 'center', gap: '8px', flex: '0 0 auto' } },
+            basisNote(row.dimension),
+            h(Action, { disabled: busy, onClick: () => send({ op: 'reject', dimension: row.dimension }) }, '不用这个'))),
         evidenceRows(row.dimension)));
       const changeRows = changes.map((row) => {
         const ago = agoLabel(row.at);
