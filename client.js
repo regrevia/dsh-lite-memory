@@ -2214,6 +2214,7 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false);
       const [note, setNote] = React.useState('');
       const [confirmClear, setConfirmClear] = React.useState(false);
+      const [openDim, setOpenDim] = React.useState('');
       const [gone, setGone] = React.useState(false);
       const alive = React.useRef(true);
       const loaded = React.useRef(false);
@@ -2251,6 +2252,7 @@ window.__ModuleLoader__.load({
       const enabled = panel ? panel.enabled === true : false;
       const formed = panel && Array.isArray(panel.formed) ? panel.formed : EMPTY;
       const observing = panel && Array.isArray(panel.observing) ? panel.observing : EMPTY;
+      const evidence = panel && Array.isArray(panel.evidence) ? panel.evidence : EMPTY;
       const changes = panel && Array.isArray(panel.recentChanges) ? panel.recentChanges.slice(-5) : EMPTY;
       const valueLabelOf = (dimension, value) => {
         const row = catalog.find((item) => item.dimension === dimension);
@@ -2263,18 +2265,33 @@ window.__ModuleLoader__.load({
       const section = (label, count, rows) => (rows.length > 0
         ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '1px', minWidth: 0 } }, heading(label, count), rows)
         : null);
-      const supportNote = (count) => (count > 0 ? h('span', { style: { ...PANEL_MUTED, flex: '0 0 auto' } }, `依据 ${count}`) : null);
-      const formedRows = formed.map((row) => h('div', { key: `formed:${row.dimension}`, style: { ...ROW, gap: '8px' } },
-        h('span', { style: { ...LABEL, flex: 1 } }, `${row.label} · ${row.valueLabel || row.value}`),
-        supportNote(row.support),
-        row.lockedByUser === true
-          ? h('span', { style: { ...PANEL_MUTED, flex: '0 0 auto' } }, '已确认')
-          : h('span', { style: { display: 'flex', alignItems: 'center', gap: '8px', flex: '0 0 auto' } },
-            h(Action, { disabled: busy, onClick: () => send({ op: 'edit', dimension: row.dimension, value: row.value }) }, '确认'),
-            h(Action, { disabled: busy, onClick: () => send({ op: 'reject', dimension: row.dimension }) }, '不用这个'))));
-      const observingRows = observing.map((row) => h('div', { key: `observing:${row.dimension}`, style: ROW },
-        h('span', { style: { ...LABEL, flex: 1 } }, `${row.label} · ${row.text || ''}`),
-        supportNote(row.support)));
+      const basisText = (basis) => (basis === 'repeat_choice' ? '多次选择' : basis === 'manual_edit' ? '手动改' : '你明确说过');
+      const evidenceOf = (dimension) => evidence.filter((row) => row.dimension === dimension && row.eventId);
+      const basisNote = (dimension) => {
+        const count = evidenceOf(dimension).length;
+        if (!count) return null;
+        return h(Action, { disabled: busy, onClick: () => setOpenDim(openDim === dimension ? '' : dimension) }, `依据 ${count}`);
+      };
+      const evidenceRows = (dimension) => (openDim === dimension
+        ? evidenceOf(dimension).map((row) => h('div', { key: `evidence:${row.eventId}`, style: { ...ROW, gap: '8px', paddingLeft: '10px' } },
+          h('span', { style: { ...PANEL_MUTED, flex: 1 } }, `${row.valueLabel || row.value || row.label} · ${basisText(row.basis)}${row.date ? ` · ${row.date}` : ''}`),
+          h(Action, { disabled: busy, danger: true, onClick: () => send({ op: 'forget_evidence', eventId: row.eventId }) }, '删')))
+        : null);
+      const formedRows = formed.map((row) => h('div', { key: `formed:${row.dimension}`, style: { display: 'flex', flexDirection: 'column', gap: '1px', minWidth: 0 } },
+        h('div', { style: { ...ROW, gap: '8px' } },
+          h('span', { style: { ...LABEL, flex: 1 } }, `${row.label} · ${row.valueLabel || row.value}`),
+          basisNote(row.dimension),
+          row.lockedByUser === true
+            ? h('span', { style: { ...PANEL_MUTED, flex: '0 0 auto' } }, '已确认')
+            : h('span', { style: { display: 'flex', alignItems: 'center', gap: '8px', flex: '0 0 auto' } },
+              h(Action, { disabled: busy, onClick: () => send({ op: 'edit', dimension: row.dimension, value: row.value }) }, '确认'),
+              h(Action, { disabled: busy, onClick: () => send({ op: 'reject', dimension: row.dimension }) }, '不用这个'))),
+        evidenceRows(row.dimension)));
+      const observingRows = observing.map((row) => h('div', { key: `observing:${row.dimension}`, style: { display: 'flex', flexDirection: 'column', gap: '1px', minWidth: 0 } },
+        h('div', { style: ROW },
+          h('span', { style: { ...LABEL, flex: 1 } }, `${row.label} · ${row.text || ''}`),
+          basisNote(row.dimension)),
+        evidenceRows(row.dimension)));
       const changeRows = changes.map((row) => {
         const ago = agoLabel(row.at);
         const from = row.from ? valueLabelOf(row.dimension, row.from) : '未定';

@@ -206,4 +206,31 @@ test('删除画像清空全部内容，但保持开关；坏文件不覆盖', ()
   assert.equal(fs.readFileSync(file, 'utf8'), '{not json');
 });
 
+test('删掉支撑证据后计数跟着重算，清零就退回观察中', () => {
+  reset();
+  store.setPersonaEnabled({ enabled: true, userId: 'u1', now: at(0) });
+  const read = store.readPersona({ userId: 'u1' });
+  const data = read.persona;
+  data.preferences.answer_order = {
+    value: 'conclusion_first', state: 'formed', source: 'inferred', support: 2, opposition: 0,
+    distinctDays: 2, contexts: 2, firstSeenAt: at(1), lastSupportedAt: at(30),
+    lockedByUser: false, pausedByUser: false,
+  };
+  data.evidence = [
+    { dedupeKey: 'k1', dimension: 'answer_order', polarity: 'support', value: 'conclusion_first', sessionId: 's1', taskId: 't1', projectId: 'p1', date: '2026-01-01', at: at(1), eventId: 'ev1', basis: 'explicit_feedback' },
+    { dedupeKey: 'k2', dimension: 'answer_order', polarity: 'support', value: 'conclusion_first', sessionId: 's2', taskId: 't2', projectId: 'p1', date: '2026-01-02', at: at(30), eventId: 'ev2', basis: 'repeat_choice' },
+  ];
+  store.writePersona(data, { userId: 'u1', revision: data.revision });
+  const seeded = store.describePersona({ userId: 'u1' });
+  assert.equal(seeded.evidence.length, 2);
+  assert.equal(seeded.evidence[0].eventId, 'ev1');
+  store.retractPersonaEvidence({ userId: 'u1', eventId: 'ev1' });
+  assert.equal(store.describePersona({ userId: 'u1' }).formed[0].support, 1);
+  store.retractPersonaEvidence({ userId: 'u1', eventId: 'ev2' });
+  const after = store.describePersona({ userId: 'u1' });
+  assert.equal(after.formed.length, 0);
+  assert.equal(after.observing.length, 1);
+  assert.equal(store.readPersona({ userId: 'u1' }).persona.preferences.answer_order.state, 'observing');
+});
+
 console.log(`persona-store.test.mjs: ${passed} passed`);

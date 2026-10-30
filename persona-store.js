@@ -381,20 +381,49 @@ export function rejectPersonaPreference(input = {}) {
 }
 
 /** 删掉某条证据：删完刷新证据代次，让正在跑的抽取结果直接失效。 */
+/** 证据删掉后，条数/天数/情境数要跟着重算，否则面板会显示「已形成 · 依据 0」。 */
+function recountDimension(data, dimension) {
+  const preference = data.preferences[dimension];
+  if (!preference) return;
+  const rows = data.evidence.filter((row) => row.dimension === dimension);
+  const support = rows.filter((row) => row.polarity !== 'oppose');
+  const days = new Set(support.map((row) => String(row.date || row.at || '')).filter((day) => /^\d{4}-\d{2}-\d{2}/.test(day)).map((day) => day.slice(0, 10)));
+  const contexts = new Set(support.map((row) => String(row.taskId || row.projectId || row.sessionId || 'none')));
+  preference.support = support.length;
+  preference.opposition = rows.length - support.length;
+  preference.distinctDays = days.size;
+  preference.contexts = contexts.size;
+  preference.dayKeys = [...days].sort().slice(-64);
+  preference.contextKeys = [...contexts].slice(-16);
+  /** 手动定的偏好锁着不动；推断出来的偏好只要支撑证据清零，就退回观察中。 */
+  if (preference.lockedByUser === true || preference.source === 'manual') return;
+  if (preference.state !== 'formed') return;
+  if (support.some((row) => !row.value || row.value === preference.value)) return;
+  preference.state = 'observing';
+  preference.value = null;
+  preference.firstSeenAt = '';
+  data.recentChanges.push({ dimension, at: nowIso(), kind: 'cleared', automatic: false, used: false, reason: 'evidence_removed' });
+}
+
 export function retractPersonaEvidence(input = {}) {
   const read = readPersona({ userId: input.userId });
   const data = read.persona;
   const before = data.evidence.length + data.pending.length;
+  const touched = new Set();
   if (input.eventId) {
+    for (const row of data.evidence) if (row.eventId === input.eventId) touched.add(row.dimension);
+    for (const row of data.pending) if (row.id === input.eventId) touched.add(row.dimension);
     data.evidence = data.evidence.filter((row) => row.eventId !== input.eventId);
     data.pending = data.pending.filter((row) => row.id !== input.eventId);
   } else if (input.dimension) {
+    touched.add(input.dimension);
     data.evidence = data.evidence.filter((row) => row.dimension !== input.dimension);
     data.pending = data.pending.filter((row) => row.dimension !== input.dimension);
   } else {
     return { ok: false, reason: 'missing_selector' };
   }
   if (data.evidence.length + data.pending.length === before) return { ok: false, reason: 'not_found' };
+  for (const dimension of touched) recountDimension(data, dimension);
   data.evidenceGeneration = token();
   const written = writePersona(data, { userId: input.userId, revision: data.revision });
   return { ok: written.ok, persona: written.persona };
@@ -433,8 +462,14 @@ export function describePersona(input = {}) {
       observing.push({ dimension, ...persona.describeObserving(row) });
     }
   }
+  /** 证据按维度给出最近几条，面板据此能说清「凭什么」并能逐条撤掉。 */
+  const evidence = data.evidence.slice(-40).map((row) => ({
+    dimension: row.dimension, eventId: row.eventId || '', at: row.at || '', date: row.date || '',
+    basis: row.basis || 'explicit_feedback', polarity: row.polarity === 'oppose' ? 'oppose' : 'support',
+    value: row.value || '',
+  }));
   return {
     enabled: data.control.enabled, corrupt: read.corrupt, reason: read.reason,
-    formed, observing, recentChanges: data.recentChanges.slice(-5), revision: data.revision,
+    formed, observing, evidence, recentChanges: data.recentChanges.slice(-5), revision: data.revision,
   };
 }

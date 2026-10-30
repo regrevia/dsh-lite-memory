@@ -1416,6 +1416,11 @@ assert.equal(cleared.body.formed.length, 0);
 assert.equal(cleared.body.observing.length, 0);
 const turnedOff = await call('/lite-memory/persona', { op: 'disable' });
 assert.equal(turnedOff.body.enabled, false);
+assert.ok(Array.isArray(personaFresh.body.evidence), '面板要能列出依据');
+assert.equal((await call('/lite-memory/persona', { op: 'forget_evidence' })).status, 400);
+const forgetGone = await call('/lite-memory/persona', { op: 'forget_evidence', eventId: 'ev-not-there' });
+assert.equal(forgetGone.status, 409);
+assert.equal(forgetGone.body.ok, false, '找不到就不改画像');
 
 // ── 参数进化（受限自进化）────────────────────────────────────────────────────
 const tuneNoSession = await call('/lite-memory/tune', { op: 'status' });

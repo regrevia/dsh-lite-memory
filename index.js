@@ -259,6 +259,17 @@ function personaPanel() {
       support: Number(row.support) || 0,
       missing: Array.isArray(row.missing) ? row.missing.slice(0, 3) : [],
     })),
+    evidence: panel.evidence.map((row) => ({
+      dimension: row.dimension,
+      label: labelOf(row.dimension),
+      eventId: row.eventId || '',
+      at: row.at || '',
+      date: row.date || '',
+      value: row.value || '',
+      valueLabel: row.value ? valueLabel(row.dimension, row.value) : '',
+      basis: row.basis || '',
+      oppose: row.polarity === 'oppose',
+    })),
     recentChanges: panel.recentChanges.map((row) => ({
       at: row.at || '',
       dimension: row.dimension || '',
@@ -521,7 +532,7 @@ function keepHandler(webServer, cwdForSession) {
      */
     if (action === 'persona') {
       const op = typeof body.op === 'string' && body.op ? body.op : 'status';
-      const allowed = new Set(['status', 'enable', 'disable', 'edit', 'reject', 'clear']);
+      const allowed = new Set(['status', 'enable', 'disable', 'edit', 'reject', 'clear', 'forget_evidence']);
       if (!allowed.has(op)) return sendJson(res, 400, { ok: false, reason: '不认识这个操作' });
       const dim = typeof body.dimension === 'string' ? body.dimension.trim() : '';
       const value = typeof body.value === 'string' ? body.value.trim() : '';
@@ -543,6 +554,14 @@ function keepHandler(webServer, cwdForSession) {
           const next = personaStore.rejectPersonaPreference({ dimension: dim });
           if (!next.ok) {
             const reason = next.reason === 'unknown_dimension' ? '没有这个维度' : '这次没有改动';
+            return sendJson(res, 409, { ...personaPanel(), ok: false, reason });
+          }
+        } else if (op === 'forget_evidence') {
+          const eventId = typeof body.eventId === 'string' ? body.eventId.trim() : '';
+          if (!eventId) return sendJson(res, 400, { ok: false, reason: '缺少要删的依据' });
+          const next = personaStore.retractPersonaEvidence({ eventId });
+          if (!next.ok) {
+            const reason = next.reason === 'not_found' ? '这条依据已经不在了' : '这次没有改动';
             return sendJson(res, 409, { ...personaPanel(), ok: false, reason });
           }
         } else if (op === 'clear') {
