@@ -330,16 +330,20 @@ function tuneAction(scope, body) {
     if (!snapshot.some((row) => row.id === entryId && textOf(row).trim())) {
       return { status: 400, value: { ok: false, reason: '这条记忆没有可匹配的正文' } };
     }
+    /** 题只存问答与预期，快照共用一份，文件体积不再随题数翻倍。 */
     const cases = (lab.replay.cases || []).filter((row) => row && row.query !== query);
-    cases.push({ id: `case-${cases.length + 1}-${Date.now()}`, query, expectIds: [entryId], forbidIds: [], records: snapshot });
-    const frozen = evolveStore.freezeReplay(scope, cases.slice(-evolve.LIMITS.maxCases));
+    cases.push({
+      id: `case-${cases.length + 1}-${Date.now()}`, query, expectIds: [entryId], forbidIds: [],
+      context: { taskKind: typeof body.taskKind === 'string' ? body.taskKind.trim().slice(0, 40) : '' },
+    });
+    const frozen = evolveStore.freezeReplay(scope, cases.slice(-evolve.LIMITS.maxCases), { records: snapshot });
     return { status: frozen.ok ? 200 : 409, value: { ...tunePanel(scope), changed: frozen.ok === true, reason: frozen.reason || '' } };
   }
   if (op === 'clear') {
     const frozen = evolveStore.freezeReplay(scope, []);
     return { status: frozen.ok ? 200 : 409, value: { ...tunePanel(scope), changed: frozen.ok === true, reason: frozen.reason || '' } };
   }
-  const cases = lab.replay.cases || [];
+  const cases = evolveStore.materializeCases(lab);
   if (!cases.length) return { status: 409, value: { ...tunePanel(scope), ok: false, reason: '还没有标注过没被想起来的查询' } };
   if (op === 'suggest') {
     const proposal = evolve.proposeChange(cases, lab.params);
@@ -3892,7 +3896,7 @@ export function apply(ctx, config) {
       .map((dimension) => `- ${dimension}: ${persona.PREFERENCE_DIMENSIONS[dimension].join(' / ')}`)
       .join('\n');
     const lines = snippets.slice(-6)
-      .map((row, index) => `${index + 1}. ${String(row.text || '').slice(0, 200)}`)
+      .map((row, index) => `${index + 1}. [${row.id}] ${String(row.text || '').slice(0, 200)}`)
       .join('\n');
     return [
       '你在判断用户对「怎么和你协作」的长期偏好。只看沟通方式：顺序、深浅、例子、选项、语气、过程汇报。',
@@ -3900,7 +3904,9 @@ export function apply(ctx, config) {
       '维度与允许取值：',
       catalog,
       `片段：\n${lines}`,
-      '只输出一行 JSON，最多一条：{"dimension":"...","polarity":"support|oppose","value":"...","basis":"explicit_feedback|repeat_choice"}',
+      '只输出一行 JSON。「snippetId」必须抄上面某一段的方括号编号。',
+      '发现偏好：{"snippetId":"...","dimension":"...","polarity":"support|oppose","value":"...","basis":"explicit_feedback|repeat_choice"}',
+      '看完整批都没有：{"snippetId":"...","no_change":true}',
     ].join('\n');
   }
 
@@ -3941,17 +3947,22 @@ export function apply(ctx, config) {
       if (!match) return;
       let parsed;
       try { parsed = JSON.parse(match[0]); } catch { return; }
+      /** 只认本次带出去的片段编号；模型自己编的号会被提交门禁拒掉。 */
+      const cited = typeof parsed.snippetId === 'string' ? parsed.snippetId.trim().slice(0, 80) : '';
+      if (parsed.no_change === true) {
+        personaStore.commitPersonaObservation({ attempt: begin.attempt, observations: [], outcome: 'no_change', snippetId: cited });
+        return;
+      }
       const observation = {
         dimension: String(parsed.dimension || ''),
         polarity: parsed.polarity === 'oppose' ? 'oppose' : 'support',
         value: typeof parsed.value === 'string' ? parsed.value : null,
         basis: parsed.basis === 'repeat_choice' ? 'repeat_choice' : 'explicit_feedback',
-        /** 证据编号来自本次抽取带出的片段，不让模型自己编。 */
-        evidenceIds: begin.attempt.snippetIds.slice(-6),
+        snippetId: cited,
       };
       const valid = persona.validateObservation(observation);
       if (!valid || valid.ok !== true) return;
-      personaStore.commitPersonaObservation({ attempt: begin.attempt, observations: [observation] });
+      personaStore.commitPersonaObservation({ attempt: begin.attempt, observations: [observation], snippetId: cited });
     } catch { /* 抽不到就等下一次窗口 */ } finally {
       clearTimeout(deadline);
       personaAborts.delete(controller);

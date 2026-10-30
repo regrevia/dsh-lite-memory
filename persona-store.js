@@ -42,6 +42,8 @@ export function emptyPersona() {
     owner: '',
     control: { enabled: false, consentEpoch: token(), updatedAt: '' },
     revision: 1,
+    /** 只随「用户能看到的选择」轮换：开关、人工改/暂停、清空。攒队列、写证据都不动它。 */
+    preferenceEpoch: token(),
     evidenceGeneration: token(),
     learning: { lastPassAt: '', attempts: [] },
     preferences: {},
@@ -70,6 +72,7 @@ export function normalizePersona(raw) {
     };
   }
   out.revision = Number.isInteger(raw.revision) && raw.revision > 0 ? raw.revision : 1;
+  out.preferenceEpoch = text(raw.preferenceEpoch, 40) || base.preferenceEpoch;
   out.evidenceGeneration = text(raw.evidenceGeneration, 40) || base.evidenceGeneration;
   if (raw.learning && typeof raw.learning === 'object') {
     out.learning.lastPassAt = text(raw.learning.lastPassAt, 40);
@@ -79,6 +82,7 @@ export function normalizePersona(raw) {
       .map((item) => ({
         attemptId: text(item.attemptId, 40), eventId: text(item.eventId, 40), at: text(item.at, 40),
         consentEpoch: text(item.consentEpoch, 40), revision: Number.isInteger(item.revision) ? item.revision : 1,
+        preferenceEpoch: text(item.preferenceEpoch, 40),
         evidenceGeneration: text(item.evidenceGeneration, 40), snippetIds: (Array.isArray(item.snippetIds) ? item.snippetIds : []).slice(0, PENDING_MIN * 2).map((id) => text(id, 60)),
         observation: item.observation && typeof item.observation === 'object' ? item.observation : null,
       }));
@@ -176,11 +180,32 @@ function writeAtomic(file, data) {
   return { ok: true };
 }
 
+/** 容量吃紧时的让路顺序：先丢最老的证据，再丢最老的待查、在途与改动记录。 */
+const PRESSURE = { evidence: 100, pending: 8, attempts: 1, changes: 6 };
+
+function fitPersona(data) {
+  if (Buffer.byteLength(JSON.stringify(data)) <= MAX_FILE_BYTES) return data;
+  const steps = [];
+  if (data.evidence.length > PRESSURE.evidence) steps.push(() => { data.evidence = data.evidence.slice(-PRESSURE.evidence); });
+  if (data.pending.length > PRESSURE.pending) steps.push(() => { data.pending = data.pending.slice(-PRESSURE.pending); });
+  if (data.learning.attempts.length > PRESSURE.attempts) steps.push(() => { data.learning.attempts = data.learning.attempts.slice(-PRESSURE.attempts); });
+  if (data.recentChanges.length > PRESSURE.changes) steps.push(() => { data.recentChanges = data.recentChanges.slice(-PRESSURE.changes); });
+  for (const step of steps) {
+    step();
+    if (Buffer.byteLength(JSON.stringify(data)) <= MAX_FILE_BYTES) return data;
+  }
+  if (data.evidence.length > 1) { data.evidence = data.evidence.slice(-1); }
+  if (data.pending.length > 1) { data.pending = data.pending.slice(-1); }
+  return Buffer.byteLength(JSON.stringify(data)) <= MAX_FILE_BYTES ? data : null;
+}
+
 /** 单点写入：所有变更都走这里，写完回执带上新版本号，调用方不用自己再读一次。 */
 export function writePersona(next, options = {}) {
-  const data = normalizePersona(next);
-  if (options.userId) data.owner = options.userId;
-  data.revision = (Number(options.revision) || data.revision) + 1;
+  const raw = normalizePersona(next);
+  if (options.userId) raw.owner = options.userId;
+  raw.revision = (Number(options.revision) || raw.revision) + 1;
+  const data = fitPersona(raw);
+  if (!data) return { ok: false, reason: 'too_large', persona: normalizePersona(next) };
   const written = writeAtomic(personaFile(), data);
   if (!written.ok) return { ok: false, reason: written.reason, persona: data };
   return { ok: true, persona: data };
@@ -199,6 +224,7 @@ export function setPersonaEnabled(input = {}) {
   const enabled = input.enabled === true;
   const read = readPersona({ userId: input.userId });
   const data = read.persona;
+  data.preferenceEpoch = token();
   if (data.control.enabled === enabled) {
     return { ok: true, changed: false, persona: data, reason: read.reason };
   }
@@ -241,7 +267,7 @@ export function queuePersonaPending(input = {}) {
   };
   data.pending = [...freshPending(data.pending, row.at), row].slice(-MAX_PENDING);
   const written = writePersona(data, { userId: input.userId, revision: data.revision });
-  return { ok: written.ok, persona: written.persona, snippet: row };
+  return { ok: written.ok, reason: written.reason || '', persona: written.persona, snippet: row };
 }
 
 /**
@@ -260,7 +286,7 @@ export function beginPersonaAttempt(input = {}) {
   if (last && new Date(at).getTime() - last < PASS_GAP_HOURS * 3600000) return { ok: false, reason: 'budget' };
   const attempt = {
     attemptId: token(), eventId: token(), at,
-    consentEpoch: data.control.consentEpoch, revision: data.revision,
+    consentEpoch: data.control.consentEpoch, revision: data.revision, preferenceEpoch: data.preferenceEpoch,
     evidenceGeneration: data.evidenceGeneration,
     snippetIds: data.pending.slice(-PENDING_MIN * 2).map((row) => row.id),
     observation: null,
@@ -273,7 +299,7 @@ export function beginPersonaAttempt(input = {}) {
     ok: true, persona: written.persona,
     attempt: {
       attemptId: attempt.attemptId, eventId: attempt.eventId,
-      consentEpoch: attempt.consentEpoch, revision: written.persona.revision,
+      consentEpoch: attempt.consentEpoch, revision: written.persona.revision, preferenceEpoch: attempt.preferenceEpoch,
       evidenceGeneration: attempt.evidenceGeneration, snippetIds: attempt.snippetIds,
       snippets: data.pending.filter((row) => attempt.snippetIds.includes(row.id)),
     },
@@ -296,7 +322,22 @@ export function commitPersonaObservation(input = {}) {
   if (data.control.consentEpoch !== attempt.consentEpoch) return { ok: false, reason: 'consent_changed' };
   /** 先判证据代次：删过证据要报「证据变了」，而不是笼统的版本变了。 */
   if (data.evidenceGeneration !== attempt.evidenceGeneration) return { ok: false, reason: 'evidence_changed' };
-  if (data.revision !== attempt.revision) return { ok: false, reason: 'revision_changed' };
+  /** 只认用户改过的选择；期间只是又攒了几条片段，不该把已经跑完的结果作废。 */
+  if ((attempt.preferenceEpoch || '') && data.preferenceEpoch !== attempt.preferenceEpoch) return { ok: false, reason: 'revision_changed' };
+  /** 模型点名的是哪一段：只认本次带出去的编号，编出来的编号整条作废。 */
+  const citedId = text(input.snippetId || (observations[0] && observations[0].snippetId) || '', 80);
+  const pool = (data.pending || []).filter((row) => (attempt.snippetIds || []).includes(row.id));
+  if (citedId && !pool.some((row) => row.id === citedId)) return { ok: false, reason: 'citation_invalid' };
+  /** 这次用到的片段：点名了就只算那一段，没点名（旧通道 / 只看整体）整批算处理过。 */
+  const consumed = citedId ? [citedId] : (attempt.snippetIds || []);
+  const outcome = input.outcome === 'no_change' ? 'no_change' : '';
+  if (outcome === 'no_change') {
+    /** 有效但没发现偏好：这批看过就算处理完，明天不再重复抽样。 */
+    data.pending = (data.pending || []).filter((row) => !consumed.includes(row.id));
+    finalizeAttempt(data, attempt, null);
+    const written = writePersona(data, { userId: input.userId, revision: data.revision });
+    return { ok: written.ok, reason: 'no_change', persona: written.persona };
+  }
   const accepted = [];
   for (const observation of observations) {
     const valid = persona.validateObservation(observation);
@@ -305,7 +346,7 @@ export function commitPersonaObservation(input = {}) {
     accepted.push(observation);
   }
   if (!accepted.length) return { ok: false, reason: 'no_observation' };
-  const snippet = (data.pending || []).find((row) => (attempt.snippetIds || []).includes(row.id)) || {};
+  const snippet = pool.find((row) => row.id === citedId) || pool[0] || {};
   const evidenceRow = {
     dimension: accepted[0].dimension, polarity: accepted[0].polarity, value: accepted[0].value || null,
     userId: text(input.userId, 80), sessionId: snippet.sessionId || '', taskId: snippet.taskId || '',
@@ -316,7 +357,7 @@ export function commitPersonaObservation(input = {}) {
   const deduped = persona.deduplicateEvidence(next);
   if (deduped.length === data.evidence.length) {
     /** 去重后没有新增：这次反馈只算同一份证据，不改计数，也不消耗下一次预算。 */
-    data.pending = (data.pending || []).filter((row) => !(attempt.snippetIds || []).includes(row.id));
+    data.pending = (data.pending || []).filter((row) => !consumed.includes(row.id));
     finalizeAttempt(data, attempt, null);
     const written = writePersona(data, { userId: input.userId, revision: data.revision });
     return { ok: written.ok, reason: 'duplicate', persona: written.persona };
@@ -327,7 +368,7 @@ export function commitPersonaObservation(input = {}) {
   const blocked = data.blockedDimensions.includes(dimension)
     || (data.preferences[dimension] && data.preferences[dimension].pausedByUser);
   if (blocked) {
-    data.pending = (data.pending || []).filter((row) => !(attempt.snippetIds || []).includes(row.id));
+    data.pending = (data.pending || []).filter((row) => !consumed.includes(row.id));
     finalizeAttempt(data, attempt, accepted[0]);
     writePersona(data, { userId: input.userId, revision: data.revision });
     return { ok: false, reason: 'dimension_blocked' };
@@ -350,8 +391,7 @@ export function commitPersonaObservation(input = {}) {
       dimension, at: nowIso(input.now), kind: previous ? 'changed' : 'formed', automatic: true, used: false, reason: verdict.reason,
     });
   }
-  const remaining = (data.pending || []).filter((row) => !(attempt.snippetIds || []).includes(row.id));
-  data.pending = remaining;
+  data.pending = (data.pending || []).filter((row) => !consumed.includes(row.id));
   finalizeAttempt(data, attempt, accepted[0]);
   const written = writePersona(data, { userId: input.userId, revision: data.revision });
   return { ok: written.ok, reason: written.ok ? 'committed' : written.reason, persona: written.persona, verdict, dimension };
@@ -373,6 +413,7 @@ export function editPersonaPreference(input = {}) {
   const read = readPersona({ userId: input.userId });
   const data = read.persona;
   const previous = data.preferences[dimension] || null;
+  data.preferenceEpoch = token();
   data.preferences[dimension] = {
     ...(previous || {}), value: input.value, state: 'formed', source: 'manual', lockedByUser: true,
     pausedByUser: false, support: (previous && previous.support) || 0,
@@ -391,6 +432,7 @@ export function rejectPersonaPreference(input = {}) {
   const read = readPersona({ userId: input.userId });
   const data = read.persona;
   const previous = data.preferences[dimension] || {};
+  data.preferenceEpoch = token();
   data.preferences[dimension] = {
     ...previous, state: 'paused', pausedByUser: true, lockedByUser: false,
     opposition: (previous.opposition || 0) + 1,
@@ -465,6 +507,7 @@ export function clearPersona(input = {}) {
   data.blockedDimensions = [];
   data.learning = { lastPassAt: '', attempts: [] };
   data.evidenceGeneration = token();
+  data.preferenceEpoch = token();
   data.control.consentEpoch = token();
   data.control.updatedAt = nowIso(input.now);
   const written = writePersona(data, { userId: input.userId, revision: data.revision });

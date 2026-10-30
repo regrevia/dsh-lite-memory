@@ -250,4 +250,69 @@ test('过期片段不再占着待查队列', () => {
   assert.equal(store.beginPersonaAttempt({ userId: 'u1', now: at(20 * 24 + 1) }).reason, 'not_enough');
 });
 
+
+test('批量整理只消耗模型点名的片段，来源按点名的片段落账', () => {
+  reset();
+  store.setPersonaEnabled({ enabled: true, userId: 'u1', now: at(0) });
+  seedPending(6);
+  const begun = store.beginPersonaAttempt({ userId: 'u1', now: at(9) });
+  const snippets = begun.attempt.snippets;
+  assert.equal(snippets.length, 6);
+  const cited = snippets[2];
+  const done = store.commitPersonaObservation({
+    userId: 'u1', now: at(10), attempt: begun.attempt, snippetId: cited.id, observations: [OBS],
+  });
+  assert.equal(done.ok, true);
+  const after = store.readPersona({ userId: 'u1' }).persona;
+  assert.equal(after.evidence.length, 1);
+  assert.equal(after.evidence[0].taskId, cited.taskId);
+  assert.equal(after.pending.length, 5, '没点名的片段留在队列里，下一批还能用');
+  assert.equal(after.pending.some((row) => row.id === cited.id), false);
+});
+
+test('模型自己编的片段编号整条作废，不写证据也不吃掉片段', () => {
+  reset();
+  store.setPersonaEnabled({ enabled: true, userId: 'u1', now: at(0) });
+  seedPending(6);
+  const begun = store.beginPersonaAttempt({ userId: 'u1', now: at(9) });
+  const rejected = store.commitPersonaObservation({
+    userId: 'u1', now: at(10), attempt: begun.attempt, snippetId: 'made-up-id', observations: [OBS],
+  });
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.reason, 'citation_invalid');
+  const after = store.readPersona({ userId: 'u1' }).persona;
+  assert.equal(after.evidence.length, 0);
+  assert.equal(after.pending.length, 6);
+});
+
+test('有效但没发现偏好：整批算处理完，明天不再重复抽同一批', () => {
+  reset();
+  store.setPersonaEnabled({ enabled: true, userId: 'u1', now: at(0) });
+  seedPending(6);
+  const begun = store.beginPersonaAttempt({ userId: 'u1', now: at(9) });
+  const none = store.commitPersonaObservation({
+    userId: 'u1', now: at(10), attempt: begun.attempt, outcome: 'no_change', observations: [],
+  });
+  assert.equal(none.ok, true);
+  assert.equal(none.reason, 'no_change');
+  const after = store.readPersona({ userId: 'u1' }).persona;
+  assert.equal(after.evidence.length, 0);
+  assert.equal(after.pending.length, 0);
+  assert.equal(store.beginPersonaAttempt({ userId: 'u1', now: at(11) }).reason, 'not_enough');
+});
+
+test('抽取期间又攒了新片段不作废已经跑完的结果', () => {
+  reset();
+  store.setPersonaEnabled({ enabled: true, userId: 'u1', now: at(0) });
+  seedPending(6);
+  const begun = store.beginPersonaAttempt({ userId: 'u1', now: at(9) });
+  seedPending(2, 10);
+  const done = store.commitPersonaObservation({
+    userId: 'u1', now: at(11), attempt: begun.attempt, snippetId: begun.attempt.snippets[0].id, observations: [OBS],
+  });
+  assert.equal(done.ok, true);
+  assert.equal(done.reason, 'committed');
+  assert.equal(store.readPersona({ userId: 'u1' }).persona.pending.length, 7, '新攒的 2 条还在，原来的只消耗点名那条');
+});
+
 console.log(`persona-store.test.mjs: ${passed} passed`);

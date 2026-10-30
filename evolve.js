@@ -8,6 +8,8 @@
  * - 任何一条用例变差就不采纳；平手也不采纳，避免无收益漂移。
  * - 每次采纳都留参数差异与指标，可一键回滚；历史有上限，不会无限长。
  */
+import { createHash } from 'node:crypto';
+
 import { CARD, rank, selectCards } from './view.js';
 
 export const EVOLVE_VERSION = 1;
@@ -59,7 +61,8 @@ export function replayDigestOf(cases) {
       aliases: (Array.isArray(record && record.aliases) ? record.aliases : []).map(String),
     })),
   }));
-  return JSON.stringify(rows);
+  /** 摘要是定长哈希：完整快照留在 replay.records 里，不能把摘要当正文写进文件。 */
+  return createHash('sha256').update(JSON.stringify(rows)).digest('hex');
 }
 
 /** 一条用例按参数跑一次：拿到前三与卡片字节成本，只回报答卡需要的数字。 */
