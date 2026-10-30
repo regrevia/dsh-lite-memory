@@ -2353,6 +2353,7 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false);
       const [showReason, setShowReason] = React.useState(false);
       const [showSettings, setShowSettings] = React.useState(false);
+      const [tune, setTune] = React.useState(null);
       const [explainOn, setExplainOn] = React.useState(explainModeOf(sessionId));
       const [display, setDisplay] = React.useState({ ...DISPLAY_DEFAULTS });
       const [hubFilter, setHubFilter] = React.useState(null);
@@ -2368,6 +2369,31 @@ window.__ModuleLoader__.load({
         alive.current = true;
         return () => { alive.current = false; };
       }, []);
+
+      /** 调参与记忆列表是两份数据。 */
+      const loadTune = () => {
+        post('/lite-memory/tune', { sessionId, op: 'status' }).then((result) => {
+          if (!alive.current) return;
+          if (result.ok && result.body && result.body.ok !== false) setTune(result.body);
+        });
+      };
+      const tuneAct = (op) => {
+        if (busy) return;
+        setBusy(true);
+        setNote('');
+        post('/lite-memory/tune', { sessionId, op }).then((result) => {
+          if (!alive.current) return;
+          setBusy(false);
+          const body = result && result.body ? result.body : null;
+          if (result.ok && body) {
+            setTune((prev) => ({ ...(prev || {}), ...body, proposal: op === 'suggest' ? body.proposal : undefined }));
+            setNote(typeof body.reason === 'string' ? body.reason : '');
+            if (op !== 'suggest') loadTune();
+            return;
+          }
+          setNote(failure(result, '这次没有改动'));
+        });
+      };
 
       const load = (scopeKey = '', focusRule = '') => {
         const request = generation.current + 1;
@@ -2394,6 +2420,7 @@ window.__ModuleLoader__.load({
             setDetailNote('');
             setShowReason(false);
             setConflictAll(false);
+            loadTune();
           } else {
             setFailed(true);
             setNote(failure(result, '读不到记忆'));
@@ -2831,6 +2858,26 @@ window.__ModuleLoader__.load({
           showSettings ? displayToggle('启用记忆宫殿', 'palace') : null,
           showSettings ? explainToggle() : null,
         ),
+      showSettings && !globalView && tune
+        ? h('div', {
+          style: { display: 'flex', flexDirection: 'column', gap: '4px', padding: '7px 18px 8px', borderTop: '1px solid var(--dsw-alias-border-l1)' },
+        },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
+          h('span', { style: { fontSize: '12px', fontWeight: 600 } }, '排序调参'),
+          h('span', { style: { ...PANEL_MUTED, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+            tune.replayCases > 0
+              ? `回放 ${tune.replayCases} 条 · ${tune.params && tune.params.summaryWeight}`
+              : '标一条漏掉的查询后才可试算'),
+          tune.replayCases > 0 ? h(Action, { disabled: busy, onClick: () => tuneAct('suggest') }, '试算') : null,
+          tune.proposal ? h(Action, { disabled: busy, onClick: () => tuneAct('apply') }, '采纳') : null,
+          tune.canRollback === true ? h(Action, { disabled: busy, onClick: () => tuneAct('rollback') }, '回滚') : null),
+        tune.proposal
+          ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, `${tune.proposal.key} ${tune.proposal.from} → ${tune.proposal.to}，${tune.proposal.improved > 0 ? `改善 ${tune.proposal.improved} 条、` : ''}其余不变差`)
+          : null,
+        tune.lastChange
+          ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, `上次采纳 ${tune.lastChange.key} ${tune.lastChange.from} → ${tune.lastChange.to}`)
+          : null)
+        : null,
       !globalView && !canToggle ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, '只读，切换回当前项目后可修改') : null,
       note ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px', color: 'var(--dsw-alias-state-error-primary)' } }, note) : null,
       !globalView && recallLine ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, recallLine) : null,

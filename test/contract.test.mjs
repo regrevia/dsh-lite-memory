@@ -88,7 +88,7 @@ function call(pathname, payload, options = {}) {
 const json = (body) => JSON.parse(body);
 
 // ── tool contract ────────────────────────────────────────────────────────────
-const names = ['memory_save', 'memory_suggest', 'memory_search', 'memory_read', 'memory_forget', 'memory_persona'];
+const names = ['memory_save', 'memory_suggest', 'memory_search', 'memory_read', 'memory_forget', 'memory_persona', 'memory_tune'];
 assert.deepEqual([...defs.keys()].sort(), [...names].sort());
 const TITLE_ADDRESSED = ['memory_read', 'memory_forget'];
 for (const name of names) {
@@ -1416,5 +1416,67 @@ assert.equal(cleared.body.formed.length, 0);
 assert.equal(cleared.body.observing.length, 0);
 const turnedOff = await call('/lite-memory/persona', { op: 'disable' });
 assert.equal(turnedOff.body.enabled, false);
+
+// ── 参数进化（受限自进化）────────────────────────────────────────────────────
+const tuneNoSession = await call('/lite-memory/tune', { op: 'status' });
+assert.equal(tuneNoSession.status, 409, '没有项目目录就不猜作用域');
+assert.equal(tuneNoSession.body.ok, false, '不返回半个面板');
+const tuneBadOp = await call('/lite-memory/tune', { sessionId: 'session-evo-read', op: 'publish' });
+assert.equal(tuneBadOp.status, 400);
+const tuneStatus = await call('/lite-memory/tune', { sessionId: 'session-evo-read' });
+assert.equal(tuneStatus.status, 200);
+assert.deepEqual(tuneStatus.body.params, { floor: 2.4, summaryWeight: 1.5 });
+assert.equal(tuneStatus.body.replayCases, 0);
+assert.equal(tuneStatus.body.canRollback, false);
+const tuneEmpty = await call('/lite-memory/tune', { sessionId: 'session-evo-read', op: 'suggest' });
+assert.equal(tuneEmpty.status, 409, '没有标注过就不试算');
+assert.equal(tuneEmpty.body.reason, '还没有标注过没被想起来的查询');
+const tuneMissing = await call('/lite-memory/tune', { sessionId: 'session-evo-read', op: 'remember', query: '口播开头', entryId: 'mem_不存在' });
+assert.equal(tuneMissing.status, 404);
+const tuneNoQuery = await call('/lite-memory/tune', { sessionId: 'session-evo-read', op: 'remember', entryId: evoRow.id });
+assert.equal(tuneNoQuery.status, 400);
+await defs.get('memory_save').execute({ title: '节奏', summary: '口播', body: '前三句就给结论，别铺垫。' }, { agent: evoAgentSeed });
+const tuneSeedRow = store.loadIndex(state.scopeOf(evoReadCwd)).entries.find((row) => row.title === '节奏');
+assert.ok(tuneSeedRow && tuneSeedRow.id, '新存的记忆能定位');
+const tuneRemember = await call('/lite-memory/tune', { sessionId: 'session-evo-read', op: 'remember', query: '口播', entryId: tuneSeedRow.id });
+assert.equal(tuneRemember.status, 200);
+assert.equal(tuneRemember.body.replayCases, 1);
+assert.equal(tuneRemember.body.changed, true);
+const tuneSuggest = await call('/lite-memory/tune', { sessionId: 'session-evo-read', op: 'suggest' });
+assert.equal(tuneSuggest.status, 200);
+assert.equal(tuneSuggest.body.baseline.cases, 1, '回放只跑标过的那条');
+assert.ok(tuneSuggest.body.baseline.hit <= 1);
+const tuneRollbackEmpty = await call('/lite-memory/tune', { sessionId: 'session-evo-read', op: 'rollback' });
+assert.equal(tuneRollbackEmpty.status, 409, '没改过就没有回滚');
+const tuneStep = await call('/lite-memory/tune', { sessionId: 'session-evo-read', op: 'suggest' });
+assert.equal(tuneStep.status, 200);
+assert.equal(tuneStep.body.baseline.hit, 0, '默认档确实漏掉了这条');
+assert.equal(tuneStep.body.proposal.key, 'summaryWeight');
+assert.equal(tuneStep.body.proposal.from, 1.5);
+assert.equal(tuneStep.body.proposal.to, 2.5);
+assert.equal(tuneStep.body.proposal.improved.length, 1);
+const tuneApplied = await call('/lite-memory/tune', { sessionId: 'session-evo-read', op: 'apply' });
+assert.equal(tuneApplied.status, 200);
+assert.equal(tuneApplied.body.changed, true);
+assert.deepEqual(tuneApplied.body.params, { floor: 2.4, summaryWeight: 2.5 });
+assert.equal(tuneApplied.body.canRollback, true);
+const tuneBack = await call('/lite-memory/tune', { sessionId: 'session-evo-read', op: 'rollback' });
+assert.equal(tuneBack.status, 200);
+assert.deepEqual(tuneBack.body.params, { floor: 2.4, summaryWeight: 1.5 });
+const tuneTool = defs.get('memory_tune');
+const tuneToolStatus = await tuneTool.execute({ action: 'status' }, { agent: evoAgent });
+assert.equal(tuneToolStatus.ok, true);
+assert.deepEqual(tuneToolStatus.params, { floor: 2.4, summaryWeight: 1.5 });
+assert.equal(tuneToolStatus.replayCases, 1);
+const tuneToolSuggest = await tuneTool.execute({ action: 'suggest' }, { agent: evoAgent });
+assert.equal(tuneToolSuggest.ok, true);
+assert.equal(tuneToolSuggest.changed, false);
+assert.equal(tuneToolSuggest.proposal.key, 'summaryWeight');
+assert.equal(render('memory_tune', { action: 'suggest' }, tuneToolSuggest).includes('summaryWeight'), true);
+const tuneClear = await call('/lite-memory/tune', { sessionId: 'session-evo-read', op: 'clear' });
+assert.equal(tuneClear.status, 200);
+assert.equal(tuneClear.body.replayCases, 0);
+const tuneCross = await call('/lite-memory/tune', { sessionId: 'session-evo-read', op: 'status' }, { origin: 'http://evil.example' });
+assert.equal(tuneCross.status, 403);
 
 console.log('contract.test.mjs: all passed');

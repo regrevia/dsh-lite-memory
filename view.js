@@ -406,7 +406,7 @@ function longestRun(text, raw) {
  * 轻量匹配：标题 / 旧标题 / 关键词 / 摘要各算各的分，先过阈值再排序。
  * 排序固定用 id 兜底，同一批数据每次顺序一致。
  */
-export function matchScore(record, query, corpus = null) {
+export function matchScore(record, query, corpus = null, params = {}) {
   const raw = plain(query, 400);
   if (!raw) return { score: 0, hints: [] };
   if (new RegExp(`\\b${String(record.id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(raw)) {
@@ -503,14 +503,16 @@ export function matchScore(record, query, corpus = null) {
   if (titleWords.size >= 2) { score += WEIGHT.coverage; hints.push('coverage'); }
   /** 四字以上的连续重合直接算强命中：句子换了说法但词还连着，就该被想起。 */
   /** 分已经够的就不必算连续片段；这一步只是补「换了说法但词连着」的情况。 */
-  const run = score >= MATCH_FLOOR ? 0 : Math.max(0, ...[record.title, (record.aliases || []).join(' '), record.summary, record.when]
+  const floor = Number.isFinite(params.floor) ? params.floor : MATCH_FLOOR;
+  const summaryWeight = Number.isFinite(params.summaryWeight) ? params.summaryWeight : WEIGHT.summary;
+  const run = score >= floor ? 0 : Math.max(0, ...[record.title, (record.aliases || []).join(' '), record.summary, record.when]
     .filter(Boolean)
     .map((text) => longestRun(text, raw)));
   if (run >= 4) {
     score += WEIGHT.title;
     hints.push('phrase');
   }
-  const summaryScore = hit(record.summary, WEIGHT.summary);
+  const summaryScore = hit(record.summary, summaryWeight);
   if (summaryScore > 0) {
     score += summaryScore;
     hints.push('summary');
@@ -534,6 +536,10 @@ export const MATCH_FLOOR = 2.4;
  */
 export function rank(records, query, options = {}) {
   const limit = Number.isInteger(options.limit) ? options.limit : 4;
+  /** 自进化只能在这几个白名单参数里动，值不合法就回落到内置常量。 */
+  const params = options.params || {};
+  const floor = Number.isFinite(params.floor) ? params.floor : MATCH_FLOOR;
+  const sameTaskBonus = Number.isFinite(params.sameTaskBonus) ? params.sameTaskBonus : 1.5;
   const context = options.context || {};
   const rows = [];
   /** 先数一遍词出现在多少条记忆里：通用词降权，只在这批候选内统计，不额外读盘。 */
@@ -559,8 +565,8 @@ export function rank(records, query, options = {}) {
       status = options.requireApplicable ? statusOf(record, context) : 'ok';
       if (options.requireApplicable && status !== 'ok') continue;
     }
-    const matched = matchScore(record, query, corpus);
-    if (matched.score < MATCH_FLOOR) continue;
+    const matched = matchScore(record, query, corpus, params);
+    if (matched.score < floor) continue;
     /** 当前任务明确的对象级绑定优先，但不覆盖查询本身的字面命中；粗分类取值不加分。 */
     const task = options.task || {};
     const sameTask = objectBindingsOf(record).some((condition) => {
@@ -569,7 +575,7 @@ export function rank(records, query, options = {}) {
       if (condition.key === 'artifactKey') return task.artifactKey && sameText(condition.value, task.artifactKey);
       return false;
     });
-    rows.push({ record, score: matched.score + (sameTask ? 1.5 : 0), hints: matched.hints, status, sameTask, raw: matched.score });
+    rows.push({ record, score: matched.score + (sameTask ? sameTaskBonus : 0), hints: matched.hints, status, sameTask, raw: matched.score });
   }
   /**
    * 多路召回后融合：同一条记忆在被越多条独立路径命中，越该排在前面。

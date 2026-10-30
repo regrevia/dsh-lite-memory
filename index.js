@@ -62,6 +62,8 @@ import * as anchor from './anchor.js';
 import * as learning from './learning.js';
 import * as persona from './persona.js';
 import * as personaStore from './persona-store.js';
+import * as evolve from './evolve.js';
+import * as evolveStore from './evolve-store.js';
 
 /** 开关路由在 apply 外，也要能中止在途整理。 */
 const learningAborts = new Map();
@@ -270,6 +272,73 @@ function personaPanel() {
 }
 
 /**
+ * 参数进化（受限自进化）：唯一的数据来源是用户自己标注的「这条查询该想起哪条」。
+ * 不凭空造用例、不动隔离与授权，只按白名单参数一档一档试，而且必须整批不变差。
+ */
+const TUNE_FIELDS = ['id', 'title', 'summary', 'when', 'body', 'kind', 'status', 'aliases', 'tags', 'triggers', 'conditions', 'applicability'];
+
+function tunePanel(scope) {
+  const described = evolveStore.describeEvolve(scope);
+  return {
+    ok: true,
+    corrupt: described.corrupt === true,
+    revision: described.revision,
+    params: described.params,
+    defaults: described.defaults,
+    replayCases: described.replayCases,
+    canRollback: described.canRollback === true,
+    lastChange: described.lastChange || null,
+  };
+}
+
+function tuneAction(scope, body) {
+  const op = typeof body.op === 'string' && body.op ? body.op : 'status';
+  const allowed = new Set(['status', 'remember', 'suggest', 'apply', 'rollback', 'clear']);
+  if (!allowed.has(op)) return { status: 400, value: { ok: false, reason: '不认识这个操作' } };
+  if (op === 'status') return { status: 200, value: tunePanel(scope) };
+  const lab = evolveStore.readEvolve(scope).lab;
+  if (op === 'remember') {
+    const query = typeof body.query === 'string' ? body.query.trim().slice(0, 120) : '';
+    const entryId = typeof body.entryId === 'string' ? body.entryId.trim() : '';
+    if (!query || !entryId) return { status: 400, value: { ok: false, reason: '缺查询或记忆 id' } };
+    /** 只拿还能被想起的记忆当回放题：归档行永远不参与排序，收进来只会让整批题永远全空。 */
+    const current = (state.load(scope).state.entries || []).filter((row) => row && row.id && row.status !== 'archived');
+    const target = current.find((row) => row.id === entryId);
+    if (!target) return { status: 404, value: { ok: false, reason: '这个项目里没有这条记忆' } };
+    /** 库里是 {id, status, current:{正文}} 的包裹结构，回放要的是摊平后可排序的一份。 */
+    const snapshot = current.slice(0, 60).map((row) => {
+      const flat = { ...(row.current || {}), id: row.id, status: row.status || (row.current && row.current.status) };
+      const shape = {};
+      for (const key of TUNE_FIELDS) if (flat[key] !== undefined) shape[key] = flat[key];
+      return shape;
+    });
+    const cases = (lab.replay.cases || []).filter((row) => row && row.query !== query);
+    cases.push({ id: `case-${cases.length + 1}-${Date.now()}`, query, expectIds: [entryId], forbidIds: [], records: snapshot });
+    const frozen = evolveStore.freezeReplay(scope, cases.slice(-evolve.LIMITS.maxCases));
+    return { status: frozen.ok ? 200 : 409, value: { ...tunePanel(scope), changed: frozen.ok === true, reason: frozen.reason || '' } };
+  }
+  if (op === 'clear') {
+    const frozen = evolveStore.freezeReplay(scope, []);
+    return { status: frozen.ok ? 200 : 409, value: { ...tunePanel(scope), changed: frozen.ok === true, reason: frozen.reason || '' } };
+  }
+  const cases = lab.replay.cases || [];
+  if (!cases.length) return { status: 409, value: { ...tunePanel(scope), ok: false, reason: '还没有标注过没被想起来的查询' } };
+  if (op === 'suggest') {
+    const proposal = evolve.proposeChange(cases, lab.params);
+    return { status: 200, value: { ...tunePanel(scope), baseline: proposal.baseline, proposal: proposal.proposal } };
+  }
+  if (op === 'apply') {
+    const proposal = evolve.proposeChange(cases, lab.params);
+    if (!proposal.proposal) return { status: 409, value: { ...tunePanel(scope), ok: false, reason: '没有整批不变差的档位' } };
+    const applied = evolveStore.applyProposal(scope, proposal.proposal, { cases });
+    if (!applied.ok) return { status: 409, value: { ...tunePanel(scope), ok: false, reason: applied.reason || '这次没有改动' } };
+    return { status: 200, value: { ...tunePanel(scope), changed: true, applied: proposal.proposal } };
+  }
+  const back = evolveStore.rollbackParams(scope);
+  return { status: back.ok ? 200 : 409, value: { ...tunePanel(scope), changed: back.ok === true, reason: back.ok ? '' : (back.reason || '没有可回滚的改动') } };
+}
+
+/**
  * 「保留」「✕」的唯一入口。定位只认 id / candidateId，作用域由服务端按 id 查，
  * 不再从展示文案里解析标题或 [全局]。已处理的候选重放返回原回执。
  */
@@ -293,7 +362,8 @@ function keepHandler(webServer, cwdForSession) {
                   : pathname === REMOTE_PATH + '/control' ? 'control'
                   : pathname === REMOTE_PATH + '/evolution' ? 'evolution'
                   : pathname === REMOTE_PATH + '/resume-move' ? 'resume-move'
-                    : pathname === REMOTE_PATH + '/persona' ? 'persona' : '';
+                    : pathname === REMOTE_PATH + '/persona' ? 'persona'
+                      : pathname === REMOTE_PATH + '/tune' ? 'tune' : '';
     if (!action) return sendJson(res, 404, { ok: false, reason: '未知操作' });
     let body;
     try {
@@ -482,6 +552,23 @@ function keepHandler(webServer, cwdForSession) {
         return sendJson(res, 200, { ...personaPanel(), changed: op !== 'status' });
       } catch (error) {
         return sendJson(res, 500, { ok: false, reason: error instanceof Error ? error.message : '画像文件读不了' });
+      }
+    }
+
+    /**
+     * 参数进化：读现状、记下一条漏报、试一档、采纳、回滚、清空。
+     * 作用域就是面板当前项目；用户级画像不在这里，互不影响。
+     */
+    if (action === 'tune') {
+      const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
+      const cwd = typeof cwdForSession === 'function' ? cwdForSession(sessionId) : '';
+      if (!cwd) return sendJson(res, 409, { ok: false, reason: '这个会话还没有项目目录' });
+      const scope = scopeOf(cwd);
+      try {
+        const { status, value } = tuneAction(scope, body);
+        return sendJson(res, status, value);
+      } catch (error) {
+        return sendJson(res, 500, { ok: false, reason: error instanceof Error ? error.message : '这次没有改动' });
       }
     }
 
@@ -1500,8 +1587,17 @@ export function apply(ctx, config) {
     }
     const gateRuntime = runtime || (win && win.runtime) || null;
     const task = runtime && runtime.task ? runtime.task : null;
+    /** 进化里被采纳的参数只影响排序阈值，绝不影响存储、隔离或授权；读不到就用默认值。 */
+    const tuned = (() => {
+      try {
+        return evolveStore.readEvolve(scope).lab.params;
+      } catch {
+        return null;
+      }
+    })();
     const ranked = view.rank(records, query, {
       limit: 8, requireApplicable: true, context, runtime: gateRuntime, task,
+      ...(tuned ? { params: tuned } : {}),
     });
     /** 普通记忆与实验规则共用一份自动注入预算：总条数和最终完整文本字节一起算。 */
     const auto = win && win.autoBudget ? win.autoBudget : null;
@@ -2848,6 +2944,20 @@ export function apply(ctx, config) {
     required: ['action'],
     additionalProperties: false,
   };
+  const TUNE_PARAMS = {
+    type: 'object',
+    properties: {
+      action: {
+        type: 'string',
+        enum: ['status', 'remember', 'suggest', 'apply', 'rollback', 'clear'],
+        description: 'status 看现状；remember 记一条「这条查询该想起某条记忆」；suggest 试算一档；apply 采纳；rollback 回到上一组；clear 清空标注',
+      },
+      query: { type: 'string', description: 'remember 用：当时没被想起来的查询' },
+      entryId: { type: 'string', description: 'remember 用：该想起的记忆 id' },
+    },
+    required: ['action'],
+    additionalProperties: false,
+  };
   const personaSummary = (action, persona_, extra = {}) => {
     const panel = personaStore.describePersona();
     return {
@@ -2918,6 +3028,43 @@ export function apply(ctx, config) {
       return fail(`不认识的 action：${action}`);
     },
   }), 'lite-memory: memory_persona');
+
+  /** 受限自进化：只吃用户标过「该想起却没想到」的查询，一次只走一档，必须整批不变差。 */
+  ctx.effect(() => tools.register({
+    name: 'memory_tune',
+    description: '记忆排序的自进化。只按用户明确标过的「这条查询该想起某条记忆」调整白名单参数，一次一档、可回滚；不改存储、隔离与授权。用户说「刚才没想起来」时才 remember。',
+    parameters: TUNE_PARAMS,
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          action: { type: 'string' },
+          ok: { type: 'boolean' },
+          reason: { type: 'string' },
+          changed: { type: 'boolean' },
+          replayCases: { type: 'number' },
+          canRollback: { type: 'boolean' },
+          params: { type: 'object', additionalProperties: true },
+          proposal: { type: 'object', additionalProperties: true },
+          lastChange: { type: 'object', additionalProperties: true },
+        },
+        required: ['action'],
+        additionalProperties: false,
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.ok === false
+          ? `memory · 调参没有改动${value.reason ? ` · ${value.reason}` : ''}`
+          : `memory · 调参 · 回放 ${Number(value.replayCases) || 0} 条 · ${value.changed ? '已改一档' : '未改动'}${value.proposal ? ` · 建议 ${value.proposal.key} ${value.proposal.from}→${value.proposal.to}` : ''}`,
+      }],
+    },
+    execute: async (args, execution) => {
+      const action = String(args.action || 'status');
+      const scope = scopeOf(cwdOf(execution));
+      const { status, value } = tuneAction(scope, { op: action, query: args.query, entryId: args.entryId });
+      return { action, ...value, ok: status === 200 && value.ok !== false, changed: value.changed === true };
+    },
+  }), 'lite-memory: memory_tune');
 
   /** 「保留」「✕」按钮与统计都挂在 WebServer 上；没有该服务时工具照常可用。 */
   const mountRoute = (holder) => {
