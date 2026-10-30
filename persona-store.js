@@ -17,6 +17,8 @@ export const MAX_CHANGES = 20;
 export const MAX_FORMED_DIMENSIONS = 8;
 export const PENDING_MIN = 6;
 export const PASS_GAP_HOURS = 24;
+/** 待查片段只在这段时间内有效：太久没人管的旧片段不该继续占着队列。 */
+export const PENDING_TTL_DAYS = 14;
 export const MAX_ATTEMPTS = 4;
 
 const DIMENSIONS = persona.DIMENSION_NAMES;
@@ -213,6 +215,17 @@ export function setPersonaEnabled(input = {}) {
 }
 
 /** 本地筛出的一条待查片段：只有闭集枚举与一句原话，最多 400 字。 */
+function freshPending(rows, at) {
+  const base = new Date(at).getTime();
+  if (!Number.isFinite(base)) return Array.isArray(rows) ? rows : [];
+  const keep = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const when = new Date(row && row.at).getTime();
+    if (!Number.isFinite(when) || base - when <= PENDING_TTL_DAYS * 86400000) keep.push(row);
+  }
+  return keep;
+}
+
 export function queuePersonaPending(input = {}) {
   const read = readPersona({ userId: input.userId });
   const data = read.persona;
@@ -226,7 +239,7 @@ export function queuePersonaPending(input = {}) {
     dimension: observation.dimension, polarity: observation.polarity, value: observation.value,
     basis: observation.basis, text: text(snippet.text, 400),
   };
-  data.pending = [...data.pending, row].slice(-MAX_PENDING);
+  data.pending = [...freshPending(data.pending, row.at), row].slice(-MAX_PENDING);
   const written = writePersona(data, { userId: input.userId, revision: data.revision });
   return { ok: written.ok, persona: written.persona, snippet: row };
 }
@@ -239,8 +252,10 @@ export function beginPersonaAttempt(input = {}) {
   const read = readPersona({ userId: input.userId });
   const data = read.persona;
   if (!data.control.enabled) return { ok: false, reason: 'off' };
-  if (data.pending.length < PENDING_MIN) return { ok: false, reason: 'not_enough', pending: data.pending.length };
   const at = nowIso(input.now);
+  const fresh = freshPending(data.pending, at);
+  if (fresh.length !== data.pending.length) data.pending = fresh;
+  if (data.pending.length < PENDING_MIN) return { ok: false, reason: 'not_enough', pending: data.pending.length };
   const last = data.learning.lastPassAt ? new Date(data.learning.lastPassAt).getTime() : 0;
   if (last && new Date(at).getTime() - last < PASS_GAP_HOURS * 3600000) return { ok: false, reason: 'budget' };
   const attempt = {
@@ -301,6 +316,7 @@ export function commitPersonaObservation(input = {}) {
   const deduped = persona.deduplicateEvidence(next);
   if (deduped.length === data.evidence.length) {
     /** 去重后没有新增：这次反馈只算同一份证据，不改计数，也不消耗下一次预算。 */
+    data.pending = (data.pending || []).filter((row) => !(attempt.snippetIds || []).includes(row.id));
     finalizeAttempt(data, attempt, null);
     const written = writePersona(data, { userId: input.userId, revision: data.revision });
     return { ok: written.ok, reason: 'duplicate', persona: written.persona };
@@ -310,7 +326,12 @@ export function commitPersonaObservation(input = {}) {
   const dimension = accepted[0].dimension;
   const blocked = data.blockedDimensions.includes(dimension)
     || (data.preferences[dimension] && data.preferences[dimension].pausedByUser);
-  if (blocked) return { ok: false, reason: 'dimension_blocked' };
+  if (blocked) {
+    data.pending = (data.pending || []).filter((row) => !(attempt.snippetIds || []).includes(row.id));
+    finalizeAttempt(data, attempt, accepted[0]);
+    writePersona(data, { userId: input.userId, revision: data.revision });
+    return { ok: false, reason: 'dimension_blocked' };
+  }
   const previous = data.preferences[dimension] || null;
   const updated = persona.updateEvidence(previous, accepted[0], evidenceRow, {
     blockedDimensions: data.blockedDimensions,

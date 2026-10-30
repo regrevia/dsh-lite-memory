@@ -233,4 +233,18 @@ test('删掉支撑证据后计数跟着重算，清零就退回观察中', () =>
   assert.equal(store.readPersona({ userId: 'u1' }).persona.preferences.answer_order.state, 'observing');
 });
 
+test('过期片段不再占着待查队列', () => {
+  reset();
+  store.setPersonaEnabled({ enabled: true, userId: 'u1', now: at(0) });
+  seedPending(6);
+  assert.equal(store.readPersona({ userId: 'u1' }).persona.pending.length, 6);
+  store.queuePersonaPending({
+    now: at(20 * 24), snippet: { text: '以后先给结论，别铺垫', sessionId: 's9', taskId: 't9', projectId: 'p1' },
+  });
+  const pending = store.readPersona({ userId: 'u1' }).persona.pending;
+  assert.equal(pending.length, 1, '两周前的片段直接丢，不和新的混在一起');
+  assert.equal(pending[0].taskId, 't9');
+  assert.equal(store.beginPersonaAttempt({ userId: 'u1', now: at(20 * 24 + 1) }).reason, 'not_enough');
+});
+
 console.log(`persona-store.test.mjs: ${passed} passed`);
