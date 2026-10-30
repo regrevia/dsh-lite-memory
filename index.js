@@ -121,7 +121,7 @@ function memoryEnabledFor(execution) {
 }
 
 /** 总开关关掉时这组工具对模型不可见，也不接受执行。 */
-const MEMORY_TOOLS = ['memory_save', 'memory_suggest', 'memory_search', 'memory_read', 'memory_forget'];
+const MEMORY_TOOLS = ['memory_save', 'memory_suggest', 'memory_search', 'memory_read', 'memory_forget', 'memory_persona', 'memory_tune'];
 
 const REMOTE_PATH = '/lite-memory';
 
@@ -299,7 +299,7 @@ function tunePanel(scope) {
     defaults: described.defaults,
     replayCases: described.replayCases,
     canRollback: described.canRollback === true,
-    lastChange: described.lastChange || null,
+    ...(described.lastChange ? { lastChange: described.lastChange } : {}),
   };
 }
 
@@ -360,6 +360,8 @@ function tuneAction(scope, body) {
  * 「保留」「✕」的唯一入口。定位只认 id / candidateId，作用域由服务端按 id 查，
  * 不再从展示文案里解析标题或 [全局]。已处理的候选重放返回原回执。
  */
+/** 路由层改开关时用来取消在途抽取；插件没加载时是空操作。 */
+let personaAbortHook = () => {};
 function keepHandler(webServer, cwdForSession) {
   return async (req, res) => {
     if (req.method !== 'POST') return sendJson(res, 405, { ok: false, reason: '只接受 POST' });
@@ -545,6 +547,7 @@ function keepHandler(webServer, cwdForSession) {
       const value = typeof body.value === 'string' ? body.value.trim() : '';
       try {
         if (op === 'enable' || op === 'disable') {
+          if (op === 'disable') personaAbortHook();
           const next = personaStore.setPersonaEnabled({ enabled: op === 'enable' });
           if (!next.ok) return sendJson(res, 409, { ...personaPanel(), ok: false, reason: next.reason || '这次没有改动' });
         } else if (op === 'edit') {
@@ -591,6 +594,7 @@ function keepHandler(webServer, cwdForSession) {
       const cwd = typeof cwdForSession === 'function' ? cwdForSession(sessionId) : '';
       if (!cwd) return sendJson(res, 409, { ok: false, reason: '这个会话还没有项目目录' });
       const scope = scopeOf(cwd);
+      if (!memoryEnabled(scope)) return sendJson(res, 409, { ok: false, code: 'memory_disabled', reason: '本项目记忆已关闭' });
       try {
         const { status, value } = tuneAction(scope, body);
         return sendJson(res, status, value);
@@ -842,6 +846,7 @@ function keepHandler(webServer, cwdForSession) {
           }, { operationId })
           : { ok: true, ...controlStatus(scope) };
         if (typeof body.enabled === 'boolean' && result && result.ok !== false && body.enabled === false) {
+          personaAbortHook();
           const controller = learningAborts.get(scope.key);
           if (controller) {
             try { controller.abort(); } catch { /* already gone */ }
@@ -3000,7 +3005,7 @@ export function apply(ctx, config) {
 
   ctx.effect(() => tools.register({
     name: 'memory_persona',
-    description: `用户的长期表达偏好（「记住我」），默认关闭。只记沟通方式，不记技术结论、项目事实或任何指令。status 看现状；改完立刻生效。用户说「记住我喜欢先看结论」这类长期偏好时，先 status，确认它确实是长期且跨项目，再 edit。`,
+    description: `用户的长期表达偏好（「记住我」），默认关闭。只记沟通方式，不记技术结论、项目事实或任何指令。status 看现状；disable 关掉。开启和修改只在记忆面板里由人确认，模型不能代办。`,
     parameters: PERSONA_PARAMS,
     output: {
       schema: {
@@ -3024,13 +3029,17 @@ export function apply(ctx, config) {
           : `memory · 记住我 ${value.enabled ? '已开启' : '已关闭'}${value.formed.length ? ` · 已形成 ${value.formed.length} 项` : ''}${value.observing.length ? ` · 观察中 ${value.observing.length} 项` : ''}${value.reason ? `\n${value.reason}` : ''}`,
       }],
     },
-    execute: async (args) => {
+    execute: async (args, execution) => {
       const action = String(args.action || 'status');
       const fail = (reason) => ({ action, ok: false, reason, enabled: false, corrupt: false, formed: [], observing: [] });
+      /** 工具自带这道门：宿主层的隐藏/守卫之外再核一次，关着就什么都不读不写。 */
+      if (!memoryEnabledFor(execution)) return fail(memoryOffCopy(scopeOf(cwdOf(execution))));
       const dim = String(args.dimension || '').trim();
       const value = String(args.value || '').trim();
-      if (action === 'enable' || action === 'disable') {
-        const next = personaStore.setPersonaEnabled({ enabled: action === 'enable' });
+      /** 开启与手动设定只由人在面板里做，模型不能把一次调用写成用户确认。 */
+      if (action === 'enable') return fail('开启只在记忆面板里由你确认');
+      if (action === 'disable') {
+        const next = personaStore.setPersonaEnabled({ enabled: false });
         return personaSummary(action, next.persona, { ok: next.ok });
       }
       if (action === 'status') return personaSummary(action, null);
@@ -3040,8 +3049,7 @@ export function apply(ctx, config) {
       }
       if (action === 'edit') {
         if (!dim || !value) return fail('edit 需要 dimension 和 value');
-        const next = personaStore.editPersonaPreference({ dimension: dim, value });
-        return personaSummary(action, next.persona, { ok: next.ok, reason: next.ok ? '' : next.reason });
+        return fail('修改只在记忆面板里由你确认');
       }
       if (action === 'reject') {
         if (!dim) return fail('reject 需要 dimension');
@@ -3072,6 +3080,9 @@ export function apply(ctx, config) {
           replayCases: { type: 'number' },
           canRollback: { type: 'boolean' },
           params: { type: 'object', additionalProperties: true },
+          defaults: { type: 'object', additionalProperties: true },
+          corrupt: { type: 'boolean' },
+          revision: { type: 'number' },
           proposal: { type: 'object', additionalProperties: true },
           lastChange: { type: 'object', additionalProperties: true },
         },
@@ -3088,6 +3099,7 @@ export function apply(ctx, config) {
     execute: async (args, execution) => {
       const action = String(args.action || 'status');
       const scope = scopeOf(cwdOf(execution));
+      if (!memoryEnabled(scope)) return { action, ok: false, reason: memoryOffCopy(scope), changed: false };
       const { status, value } = tuneAction(scope, { op: action, query: args.query, entryId: args.entryId });
       return { action, ...value, ok: status === 200 && value.ok !== false, changed: value.changed === true };
     },
@@ -3282,7 +3294,15 @@ export function apply(ctx, config) {
       if (saidThisStep) requestAuth.set(agent, { said: saidThisStep, turn, sessionId });
       else if (!(heldAuth && heldAuth.turn === turn && heldAuth.sessionId === sessionId)) requestAuth.delete(agent);
       /** 「记住我」第一阶段：只在本轮真人原话里认信号，不调模型、不写项目记忆。 */
-      if (saidThisStep) enqueuePersonaSignal(saidThisStep, { sessionId, taskId: '' });
+      if (saidThisStep) {
+        const personaScope = scopeOf(cwdOf({ agent }));
+        enqueuePersonaSignal(saidThisStep, {
+          sessionId,
+          taskId: '',
+          projectId: personaScope ? personaScope.key : '',
+          memoryOn: memoryEnabled(personaScope),
+        });
+      }
 
       if (fresh.length === 0) {
         /** 工具续步：内容冻结，只把快照绑到本步的 signal；盘上版本变了才重投影。 */
@@ -3842,16 +3862,27 @@ export function apply(ctx, config) {
    * 只做沟通方式，不看项目内容；失败或没模型就静默跳过，不排队重试、不占回合时间。
    */
   const personaLearning = { inFlight: false, lastTryAt: 0 };
+  const personaAborts = new Set();
+  /** 关项目、关画像、卸载插件：在途抽取立刻取消，晚到的结果不再提交。 */
+  const abortPersonaLearning = () => {
+    for (const controller of personaAborts) {
+      try { controller.abort(); } catch { /* already gone */ }
+    }
+    personaAborts.clear();
+  };
+  personaAbortHook = abortPersonaLearning;
   const PERSONA_LEARN_TIMEOUT_MS = 20000;
 
   /** 第一阶段：本地正则筛信号入队，单条最多 400 字，不复制整段对话。 */
-  function enqueuePersonaSignal(text, { sessionId, taskId }) {
+  function enqueuePersonaSignal(text, { sessionId, taskId, projectId, memoryOn }) {
     try {
+      /** 项目记忆关着就不采集：来源项目必须是真的，空来源不算一次观察。 */
+      if (memoryOn !== true || !projectId) return;
       /** 先做纯正则筛：没有偏好信号就不读文件，绝大多数回合零 I/O。 */
       if (!persona.detectPreferenceSignal({ text })) return;
       const read = personaStore.readPersona();
       if (!read || !read.persona || read.persona.control.enabled !== true) return;
-      personaStore.queuePersonaPending({ snippet: { text, sessionId, taskId, projectId: '' } });
+      personaStore.queuePersonaPending({ snippet: { text, sessionId, taskId, projectId } });
     } catch { /* 记不住偏好不影响会话 */ }
   }
 
@@ -3880,10 +3911,13 @@ export function apply(ctx, config) {
     const route = routeForSession(session);
     const llm = getService('llm');
     if (!route || !llm || typeof llm.prepareCall !== 'function') return;
+    const scope = scopeOfSession(session);
+    if (!scope || !memoryEnabled(scope)) return;
     const begin = personaStore.beginPersonaAttempt({});
     if (!begin || begin.ok !== true) return;
     personaLearning.inFlight = true;
     const controller = new AbortController();
+    personaAborts.add(controller);
     const deadline = setTimeout(() => { try { controller.abort(); } catch { /* already aborted */ } }, PERSONA_LEARN_TIMEOUT_MS);
     let payload = '';
     try {
@@ -3899,6 +3933,10 @@ export function apply(ctx, config) {
         if (chunk && chunk.type === 'text-delta') payload += String(chunk.text || '');
         if (payload.length > 2048) break;
       }
+      /** 抽取途中关了项目或关了画像，结果就不能再用。 */
+      if (controller.signal.aborted || !memoryEnabled(scope)) return;
+      const personaNow = personaStore.readPersona();
+      if (!personaNow || !personaNow.persona || personaNow.persona.control.enabled !== true) return;
       const match = payload.match(/\{[\s\S]*\}/u);
       if (!match) return;
       let parsed;
@@ -3916,6 +3954,7 @@ export function apply(ctx, config) {
       personaStore.commitPersonaObservation({ attempt: begin.attempt, observations: [observation] });
     } catch { /* 抽不到就等下一次窗口 */ } finally {
       clearTimeout(deadline);
+      personaAborts.delete(controller);
       personaLearning.inFlight = false;
       personaLearning.lastTryAt = Date.now();
     }
@@ -3930,6 +3969,7 @@ export function apply(ctx, config) {
 
   /** 插件卸载时中止在途整理；提交门禁仍会拒绝过期结果。 */
   ctx.effect(() => () => {
+    abortPersonaLearning();
     for (const controller of learningAborts.values()) {
       try { controller.abort(); } catch { /* already gone */ }
     }

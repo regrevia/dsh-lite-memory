@@ -2249,7 +2249,7 @@ window.__ModuleLoader__.load({
 
       const catalog = panel && Array.isArray(panel.catalog) ? panel.catalog : EMPTY;
       if (panel && catalog.length === 0) return null;
-      const enabled = panel ? panel.enabled === true : false;
+      const enabled = typeof props.personaOn === 'boolean' ? props.personaOn : (panel ? panel.enabled === true : false);
       const formed = panel && Array.isArray(panel.formed) ? panel.formed : EMPTY;
       const observing = panel && Array.isArray(panel.observing) ? panel.observing : EMPTY;
       const evidence = panel && Array.isArray(panel.evidence) ? panel.evidence : EMPTY;
@@ -2323,13 +2323,7 @@ window.__ModuleLoader__.load({
         },
         h(RefChevron, { open }),
         h('span', { style: { flex: '0 0 auto', fontSize: '12px', fontWeight: 600 } }, '记住我'),
-        h('span', { style: { ...PANEL_MUTED, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, statusText)),
-        panel
-          ? h(Action, {
-            disabled: busy, 'aria-pressed': enabled,
-            onClick: () => send({ op: enabled ? 'disable' : 'enable' }),
-          }, enabled ? '已开启' : '已关闭')
-          : null);
+        h('span', { style: { ...PANEL_MUTED, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, statusText)));
       const body = panel
         ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '7px', minWidth: 0 } },
           h('div', {
@@ -2380,6 +2374,7 @@ window.__ModuleLoader__.load({
       const [tune, setTune] = React.useState(null);
       const [explainOn, setExplainOn] = React.useState(explainModeOf(sessionId));
       const [display, setDisplay] = React.useState({ ...DISPLAY_DEFAULTS });
+      const [personaOn, setPersonaOn] = React.useState(null);
       const [hubFilter, setHubFilter] = React.useState(null);
       const [checkup, setCheckup] = React.useState(false);
       const [expandedConflict, setExpandedConflict] = React.useState('');
@@ -2419,6 +2414,27 @@ window.__ModuleLoader__.load({
         });
       };
 
+      /** 记住我是用户级开关，与选中项目无关。 */
+      const loadPersona = () => {
+        post('/lite-memory/persona', { sessionId, op: 'status' }).then((result) => {
+          if (!alive.current) return;
+          const body = result && result.body;
+          if (succeeded(result) && body && typeof body.enabled === 'boolean') setPersonaOn(body.enabled);
+        });
+      };
+      const togglePersona = () => {
+        if (busy) return;
+        setBusy(true);
+        setNote('');
+        post('/lite-memory/persona', { sessionId, op: personaOn === true ? 'disable' : 'enable' }).then((result) => {
+          if (!alive.current) return;
+          setBusy(false);
+          const body = result && result.body;
+          const next = body && typeof body.enabled === 'boolean' ? body : null;
+          if (succeeded(result) && next) setPersonaOn(next.enabled);
+          else setNote(failure(result, '开关没有改动'));
+        });
+      };
       const load = (scopeKey = '', focusRule = '') => {
         const request = generation.current + 1;
         generation.current = request;
@@ -2445,6 +2461,7 @@ window.__ModuleLoader__.load({
             setShowReason(false);
             setConflictAll(false);
             loadTune();
+            loadPersona();
           } else {
             setFailed(true);
             setNote(failure(result, '读不到记忆'));
@@ -2853,13 +2870,10 @@ window.__ModuleLoader__.load({
         } : undefined,
       );
 
-      /** 三个按钮改成两个开关：亮着的即当前状态。 */
+      /** 四个开关一行：项目级三个加用户级一个。 */
       const reminderOn = memoryMode === 'adaptive';
-      const modeChoices = () => h('div', {
-        style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '4px 18px' },
-      },
-      modeSwitchesOf(memoryMode).map((item) => switchItem(item.label, item.hint, item.on, item.key === 'remind' ? busy || !canToggle || !memoryOn : busy || !canToggle,
-        () => setControlMode(item.key === 'remind' ? (reminderOn ? 'tool_only' : 'adaptive') : (memoryOn ? 'off' : 'adaptive')))));
+      const modeSwitches = () => modeSwitchesOf(memoryMode).map((item) => switchItem(item.label, item.hint, item.on, item.key === 'remind' ? busy || !canToggle || !memoryOn : busy || !canToggle,
+        () => setControlMode(item.key === 'remind' ? (reminderOn ? 'tool_only' : 'adaptive') : (memoryOn ? 'off' : 'adaptive'))));
       const switchItem = (label, hint, on, disabled, onClick) => h('div', {
         style: { display: 'flex', flexDirection: 'column', gap: '1px', minWidth: 0, opacity: disabled && !on ? 0.55 : 1 },
       },
@@ -2876,8 +2890,10 @@ window.__ModuleLoader__.load({
       globalView
         ? h('div', { style: { ...PANEL_MUTED, lineHeight: '20px' } }, '全局记忆只读，可移回项目')
         : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
-          modeChoices(),
-          switchItem('自进化', evolutionOn ? '实验功能，会增加 token 消耗' : '从反馈里整理经验', evolutionOn, busy || !evolution || !canToggle || !memoryOn, toggleEvolution), // ui-copy-ignore 用户指定文案
+          h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: '20px', flexWrap: 'wrap' } },
+            modeSwitches(),
+            switchItem('自进化', evolutionOn ? '实验功能，会增加 token 消耗' : '从反馈里整理经验', evolutionOn, busy || !evolution || !canToggle || !memoryOn, toggleEvolution), // ui-copy-ignore 用户指定文案
+            switchItem('记住我', personaOn === true ? '用户级，关掉后不再了解你' : '用户级，默认关闭', personaOn === true, busy || !canToggle, togglePersona)),
           showSettings ? displayToggle('启用图谱', 'graph') : null,
           showSettings ? displayToggle('启用记忆宫殿', 'palace') : null,
           showSettings ? explainToggle() : null,
@@ -3133,7 +3149,7 @@ window.__ModuleLoader__.load({
           h('div', { style: { display: memoryViewActive === 'graph' ? 'flex' : 'none', minWidth: 0, minHeight: 0, width: '100%' } }, memoryGraphPane),
           h('div', { style: { display: memoryViewActive === 'palace' ? 'flex' : 'none', minWidth: 0, minHeight: 0, width: '100%' } }, memoryPalacePane),
           h('div', { style: { display: memoryViewActive === 'list' ? 'flex' : 'none', minWidth: 0, minHeight: 0, width: '100%', flexDirection: 'column' } }, memoryListPane)),
-        h(PersonaSection, { key: 'persona', sessionId }),
+        h(PersonaSection, { key: 'persona', sessionId, personaOn }),
         memoryDetail),
       );
 

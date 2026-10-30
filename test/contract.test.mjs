@@ -746,6 +746,21 @@ assertSchema('memory_save', closedTool);
 assert.equal(closedTool.id, undefined);
 /** 关闭态的保存回执也要能渲染：不能等用户真去写一条才报 ReferenceError。 */
 assert.match(render('memory_save', {}, closedTool), /^memory · 本项目记忆已关闭/);
+/**
+ * 两个实验工具也在同一道门下：关着就报状态，不能借 tune 写回放题，
+ * 也不能用 persona 读/改画像。
+ */
+const closedPersona = await defs.get('memory_persona').execute({ action: 'status' }, { agent: closedAgent });
+assert.equal(closedPersona.ok, false);
+assert.match(closedPersona.reason, /本项目记忆已关闭/);
+assertSchema('memory_persona', closedPersona);
+const closedTune = await defs.get('memory_tune').execute({ action: 'status' }, { agent: closedAgent });
+assert.equal(closedTune.ok, false);
+assert.match(closedTune.reason, /本项目记忆已关闭/);
+assertSchema('memory_tune', closedTune);
+const closedTuneHttp = await call('/lite-memory/tune', { sessionId: 'session-closed', op: 'status' });
+assert.equal(closedTuneHttp.status, 409);
+assert.equal(closedTuneHttp.body.code, 'memory_disabled');
 /** 关闭状态下的读取也只报状态，不返回正文。 */
 const closedRead = await defs.get('memory_read').execute({ title: closedSeed.title }, { agent: closedAgent });
 assert.equal(closedRead.status, 'memory_disabled');
@@ -1484,6 +1499,16 @@ assert.equal(render('memory_tune', { action: 'suggest' }, tuneToolSuggest).inclu
 const tuneClear = await call('/lite-memory/tune', { sessionId: 'session-evo-read', op: 'clear' });
 assert.equal(tuneClear.status, 200);
 assert.equal(tuneClear.body.replayCases, 0);
+assert.equal(typeof tuneToolStatus.revision, 'number');
+assert.equal(tuneToolStatus.corrupt, false);
+assert.deepEqual(tuneToolStatus.defaults, { floor: 2.4, summaryWeight: 1.5 });
+/** 开启和手动改画像只能由人在面板里做：模型调用不能写成用户确认。 */
+const modelEnable = await defs.get('memory_persona').execute({ action: 'enable' }, { agent: evoAgent });
+assert.equal(modelEnable.ok, false);
+assert.equal(modelEnable.enabled, false);
+const modelEdit = await defs.get('memory_persona').execute({ action: 'edit', dimension: 'tone', value: 'warm' }, { agent: evoAgent });
+assert.equal(modelEdit.ok, false);
+assert.equal(modelEdit.formed.length, 0);
 const tuneCross = await call('/lite-memory/tune', { sessionId: 'session-evo-read', op: 'status' }, { origin: 'http://evil.example' });
 assert.equal(tuneCross.status, 403);
 
