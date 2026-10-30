@@ -564,8 +564,9 @@ function keepHandler(webServer, cwdForSession) {
           }
         } else if (op === 'forget_evidence') {
           const eventId = typeof body.eventId === 'string' ? body.eventId.trim() : '';
-          if (!eventId) return sendJson(res, 400, { ok: false, reason: '缺少要删的依据' });
-          const next = personaStore.retractPersonaEvidence({ eventId });
+          /** 单条依据按 eventId 删；整维清空按 dimension 删，两种都得给一个。 */
+          if (!eventId && !dim) return sendJson(res, 400, { ok: false, reason: '缺少要删的依据' });
+          const next = personaStore.retractPersonaEvidence({ eventId, dimension: dim || undefined });
           if (!next.ok) {
             const reason = next.reason === 'not_found' ? '这条依据已经不在了' : '这次没有改动';
             return sendJson(res, 409, { ...personaPanel(), ok: false, reason });

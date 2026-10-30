@@ -1421,6 +1421,9 @@ assert.equal((await call('/lite-memory/persona', { op: 'forget_evidence' })).sta
 const forgetGone = await call('/lite-memory/persona', { op: 'forget_evidence', eventId: 'ev-not-there' });
 assert.equal(forgetGone.status, 409);
 assert.equal(forgetGone.body.ok, false, '找不到就不改画像');
+const forgetByDim = await call('/lite-memory/persona', { op: 'forget_evidence', dimension: 'explanation_depth' });
+assert.equal(forgetByDim.status, 409, '按维度删也能用，没证据就是没改动');
+assert.equal(forgetByDim.body.ok, false);
 
 // ── 参数进化（受限自进化）────────────────────────────────────────────────────
 const tuneNoSession = await call('/lite-memory/tune', { op: 'status' });
