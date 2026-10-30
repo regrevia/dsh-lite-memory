@@ -339,7 +339,7 @@ export function commitPersonaObservation(input = {}) {
     contexts: previous && previous.contextKeys,
   });
   const lastFormationAt = (data.recentChanges || [])
-    .filter((row) => row.kind === 'formed')
+    .filter((row) => row.kind === 'formed' || row.kind === 'changed')
     .map((row) => row.at)
     .sort()
     .pop();
@@ -406,24 +406,28 @@ export function rejectPersonaPreference(input = {}) {
 function recountDimension(data, dimension) {
   const preference = data.preferences[dimension];
   if (!preference) return;
-  const rows = data.evidence.filter((row) => row.dimension === dimension);
-  const support = rows.filter((row) => row.polarity !== 'oppose');
-  const days = new Set(support.map((row) => String(row.date || row.at || '')).filter((day) => /^\d{4}-\d{2}-\d{2}/.test(day)).map((day) => day.slice(0, 10)));
-  const contexts = new Set(support.map((row) => String(row.taskId || row.projectId || row.sessionId || 'none')));
-  preference.support = support.length;
-  preference.opposition = rows.length - support.length;
-  preference.distinctDays = days.size;
-  preference.contexts = contexts.size;
-  preference.dayKeys = [...days].sort().slice(-64);
-  preference.contextKeys = [...contexts].slice(-16);
-  /** 手动定的偏好锁着不动；推断出来的偏好只要支撑证据清零，就退回观察中。 */
+  const summary = persona.summarizeEvidence(data.evidence, dimension);
+  const previousState = preference.state;
+  preference.value = summary.value || null;
+  preference.valueTallies = summary.valueTallies;
+  preference.support = summary.support;
+  preference.opposition = summary.opposition;
+  preference.distinctDays = summary.distinctDays;
+  preference.contexts = summary.contexts;
+  preference.dayKeys = summary.dayKeys;
+  preference.contextKeys = summary.contextKeys;
+  preference.firstSeenAt = summary.firstSeenAt;
+  preference.lastSupportedAt = summary.lastSupportedAt;
+  /** 手动定的偏好锁着不动；推断出来的偏好按剩下的证据整体重判门槛。 */
   if (preference.lockedByUser === true || preference.source === 'manual') return;
-  if (preference.state !== 'formed') return;
-  if (support.some((row) => !row.value || row.value === preference.value)) return;
-  preference.state = 'observing';
-  preference.value = null;
-  preference.firstSeenAt = '';
-  data.recentChanges.push({ dimension, at: nowIso(), kind: 'cleared', automatic: false, used: false, reason: 'evidence_removed' });
+  const lastFormationAt = (data.recentChanges || [])
+    .filter((row) => row.kind === 'formed' || row.kind === 'changed')
+    .map((row) => row.at).sort().pop();
+  const verdict = persona.decideMaturity(preference, { now: nowIso(), lastFormationAt });
+  preference.state = verdict.state;
+  if (verdict.state !== 'formed' && previousState === 'formed') {
+    data.recentChanges.push({ dimension, at: nowIso(), kind: 'cleared', automatic: false, used: false, reason: 'evidence_removed' });
+  }
 }
 
 export function retractPersonaEvidence(input = {}) {

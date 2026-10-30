@@ -155,6 +155,8 @@ export function deduplicateEvidence(rows) {
 const emptyCounts = () => ({
   value: null, state: 'observing', source: 'inferred', support: 0, opposition: 0,
   distinctDays: 0, contexts: 0, firstSeenAt: '', lastSupportedAt: '', lockedByUser: false, pausedByUser: false,
+  /** 每个取值各记一份票：换取值就从头攒，旧取值的票不跟过来。 */
+  valueTallies: {},
 });
 
 function dayKey(instant) {
@@ -186,14 +188,51 @@ export function updateEvidence(preference, observation, evidence, options = {}) 
     state.state = 'paused';
     state.pausedByUser = state.pausedByUser || Boolean(evidence && evidence.byUser);
   } else {
-    state.support += 1;
-    state.value = observation.value || state.value;
-    state.lastSupportedAt = String((evidence && (evidence.at || evidence.date)) || state.lastSupportedAt || '');
-    if (!state.firstSeenAt) state.firstSeenAt = state.lastSupportedAt;
+    const value = String(observation.value || state.value || '');
+    const tallies = state.valueTallies && typeof state.valueTallies === 'object' ? state.valueTallies : {};
+    const prior = tallies[value] || { support: 0, dayKeys: [], contextKeys: [], firstSeenAt: '', lastSupportedAt: '' };
+    const tallyDays = new Set(Array.isArray(prior.dayKeys) ? prior.dayKeys : []);
+    if (date) tallyDays.add(date);
+    const tallyContexts = new Set(Array.isArray(prior.contextKeys) ? prior.contextKeys : []);
+    tallyContexts.add(contextId);
+    const at = String((evidence && (evidence.at || evidence.date)) || '');
+    const active = {
+      support: (prior.support || 0) + 1,
+      dayKeys: [...tallyDays].sort().slice(-64),
+      contextKeys: [...tallyContexts].slice(-16),
+      firstSeenAt: prior.firstSeenAt || at,
+      lastSupportedAt: at || prior.lastSupportedAt || '',
+    };
+    state.valueTallies = { ...tallies, [value]: active };
+    state.value = value || state.value;
+    /** 维度上的计数只反映当前取值，不把同一维别的取值的观察累进来。 */
+    state.support = active.support;
+    state.dayKeys = active.dayKeys;
+    state.contextKeys = active.contextKeys;
+    state.distinctDays = active.dayKeys.length;
+    state.contexts = active.contextKeys.length;
+    state.firstSeenAt = active.firstSeenAt;
+    state.lastSupportedAt = active.lastSupportedAt;
   }
-  state.distinctDays = days.size;
-  state.contexts = contexts.size;
-  return { ...state, dayKeys: [...days].sort().slice(-64), contextKeys: [...contexts].slice(-16) };
+  if (observation.polarity === 'oppose') {
+    state.distinctDays = days.size;
+    state.contexts = contexts.size;
+    state.dayKeys = [...days].sort().slice(-64);
+    state.contextKeys = [...contexts].slice(-16);
+  }
+  return state;
+}
+
+/** 从存下来的证据整份重算一维：删依据、清证据之后都走这条路，避免留下过期计数。 */
+export function summarizeEvidence(rows, dimension) {
+  let state = emptyCounts();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!row || row.dimension !== dimension) continue;
+    state = updateEvidence(state, { dimension, polarity: row.polarity, value: row.value }, row, {
+      days: state.dayKeys, contexts: state.contextKeys,
+    });
+  }
+  return state;
 }
 
 /**

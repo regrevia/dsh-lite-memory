@@ -164,3 +164,37 @@ test('验收：装不下两条就退一条，不整段丢弃', () => {
 
 console.log(`persona.test.mjs: ${passed} passed`);
 
+
+test('换取值不继承旧票：8 次 brief 之后来 1 次 detailed 仍从 1 开始', () => {
+  const base = new Date('2026-01-01T00:00:00.000Z').getTime();
+  const rowAt = (day, value, index) => ({
+    dimension: 'explanation_depth', value, taskId: `t${index}`, date: `2026-01-${String(day).padStart(2, '0')}`,
+    at: new Date(base + (day - 1) * 86400000).toISOString(), polarity: 'support',
+  });
+  let state = {};
+  for (let i = 0; i < 8; i += 1) {
+    state = persona.updateEvidence(state, rowAt(i + 1, 'brief', i), rowAt(i + 1, 'brief', i));
+  }
+  assert.equal(state.value, 'brief');
+  assert.equal(state.support, 8);
+  const detailed = rowAt(20, 'detailed', 8);
+  const next = persona.updateEvidence(state, detailed, detailed);
+  assert.equal(next.value, 'detailed');
+  assert.equal(next.support, 1, '新取值只算自己的证据');
+  assert.equal(next.valueTallies.brief.support, 8, '旧取值的票保留但不参与活跃计数');
+  const verdict = persona.decideMaturity(next, { now: new Date(base + 21 * 86400000).toISOString() });
+  assert.equal(verdict.state, 'observing');
+});
+
+test('同一份证据整份重算时按每个取值各自累计', () => {
+  const rows = [
+    { dimension: 'tone', polarity: 'support', value: 'plain', sessionId: 's1', date: '2026-01-01', at: '2026-01-01T00:00:00.000Z' },
+    { dimension: 'tone', polarity: 'support', value: 'plain', sessionId: 's2', date: '2026-01-02', at: '2026-01-02T00:00:00.000Z' },
+    { dimension: 'tone', polarity: 'support', value: 'warm', sessionId: 's3', date: '2026-01-03', at: '2026-01-03T00:00:00.000Z' },
+  ];
+  const summary = persona.summarizeEvidence(rows, 'tone');
+  assert.equal(summary.value, 'warm');
+  assert.equal(summary.support, 1);
+  assert.equal(summary.valueTallies.plain.support, 2);
+  assert.equal(summary.distinctDays, 1);
+});

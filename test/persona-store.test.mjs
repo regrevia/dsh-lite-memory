@@ -225,7 +225,10 @@ test('删掉支撑证据后计数跟着重算，清零就退回观察中', () =>
   assert.equal(seeded.evidence.length, 2);
   assert.equal(seeded.evidence[0].eventId, 'ev1');
   store.retractPersonaEvidence({ userId: 'u1', eventId: 'ev1' });
-  assert.equal(store.describePersona({ userId: 'u1' }).formed[0].support, 1);
+  /** 只剩一条证据就不再满足门槛：计数重算，状态也一起退回观察中。 */
+  const mid = store.readPersona({ userId: 'u1' }).persona.preferences.answer_order;
+  assert.equal(mid.support, 1);
+  assert.equal(mid.state, 'observing');
   store.retractPersonaEvidence({ userId: 'u1', eventId: 'ev2' });
   const after = store.describePersona({ userId: 'u1' });
   assert.equal(after.formed.length, 0);
