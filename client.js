@@ -965,7 +965,7 @@ window.__ModuleLoader__.load({
     /** 三个按钮压成两个开关：亮着的即当前状态。 */
     const modeSwitchesOf = (mode) => [
       { key: 'remind', label: '自动提醒', hint: mode === 'adaptive' ? '相关时自动放进这一轮' : '关掉后只在你搜索时出现', on: mode === 'adaptive' },
-      { key: 'enabled', label: '启用记忆', hint: mode === 'off' ? '已关闭' : '关掉后不参与回答', on: mode !== 'off' },
+      { key: 'enabled', label: '启用记忆', hint: mode === 'off' ? '项目级，已关闭' : '项目级，关掉后不参与回答', on: mode !== 'off' },
     ];
 
     const recallLineOf = (receipt) => {
@@ -2215,7 +2215,7 @@ window.__ModuleLoader__.load({
       const [note, setNote] = React.useState('');
       const [confirmClear, setConfirmClear] = React.useState(false);
       const [openDim, setOpenDim] = React.useState('');
-      const [gone, setGone] = React.useState(false);
+      const [failed, setFailed] = React.useState(false);
       const alive = React.useRef(true);
       const loaded = React.useRef(false);
       React.useEffect(() => {
@@ -2237,7 +2237,7 @@ window.__ModuleLoader__.load({
             return;
           }
           if (next) setNote(failure(result, '这次没有改动'));
-          else setGone(true);
+          else setFailed(true);
         });
       };
       React.useEffect(() => {
@@ -2245,7 +2245,6 @@ window.__ModuleLoader__.load({
         loaded.current = true;
         send({ op: 'status' });
       }, [open]);
-      if (gone) return null;
 
       const catalog = panel && Array.isArray(panel.catalog) ? panel.catalog : EMPTY;
       if (panel && catalog.length === 0) return null;
@@ -2339,7 +2338,9 @@ window.__ModuleLoader__.load({
           pending > 0 ? h('div', { key: 'pending', style: PANEL_MUTED }, `还有 ${pending} 段对话没有整理`) : null),
           note ? h('div', { style: { ...PANEL_MUTED, wordBreak: 'break-word' } }, note) : null,
           clearLine)
-        : h('div', { style: PANEL_MUTED }, busy ? '读取中' : '');
+        : h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
+          h('span', { style: { ...PANEL_MUTED, minWidth: 0 } }, busy ? '读取中' : '读不到记住我'),
+          busy ? null : h(Action, { onClick: () => { setFailed(false); send({ op: 'status' }); } }, '重试'));
       return h('section', {
         'aria-label': '记住我',
         style: {
@@ -2397,7 +2398,7 @@ window.__ModuleLoader__.load({
         });
       };
       const tuneAct = (op) => {
-        if (busy) return;
+        if (busy || selectedKey !== currentKey) return;
         setBusy(true);
         setNote('');
         post('/lite-memory/tune', { sessionId, op }).then((result) => {
@@ -2908,9 +2909,9 @@ window.__ModuleLoader__.load({
             tune.replayCases > 0
               ? `回放 ${tune.replayCases} 条 · ${tune.params && tune.params.summaryWeight}`
               : '标一条漏掉的查询后才可试算'),
-          tune.replayCases > 0 ? h(Action, { disabled: busy, onClick: () => tuneAct('suggest') }, '试算') : null,
-          tune.proposal ? h(Action, { disabled: busy, onClick: () => tuneAct('apply') }, '采纳') : null,
-          tune.canRollback === true ? h(Action, { disabled: busy, onClick: () => tuneAct('rollback') }, '回滚') : null),
+          tune.replayCases > 0 ? h(Action, { disabled: busy || !canToggle, onClick: () => tuneAct('suggest') }, '试算') : null,
+          tune.proposal ? h(Action, { disabled: busy || !canToggle, onClick: () => tuneAct('apply') }, '采纳') : null,
+          tune.canRollback === true ? h(Action, { disabled: busy || !canToggle, onClick: () => tuneAct('rollback') }, '回滚') : null),
         tune.proposal
           ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, `${tune.proposal.key} ${tune.proposal.from} → ${tune.proposal.to}，${tune.proposal.improved > 0 ? `改善 ${tune.proposal.improved} 条、` : ''}其余不变差`)
           : null,

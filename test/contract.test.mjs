@@ -1425,6 +1425,22 @@ assert.equal(personaCtx.text({ agent: recallAgent, signal: personaSignal }), '')
 const personaMemoryOn = await call('/lite-memory/control', { sessionId: 'session-recall', enabled: true, operationId: 'op_persona_mem_on' });
 assert.equal(personaMemoryOn.status, 200);
 assert.equal(personaCtx.text({ agent: recallAgent, signal: personaSignal }), '表达偏好：平实说。');
+// 这一轮明确要 JSON：格式优先，画像不插话
+await preStep({ agent: recallAgent, signal: personaSignal, turn: '52' }, pass('只输出 JSON，别加解释', 'p52'));
+assert.equal(personaCtx.text({ agent: recallAgent, signal: personaSignal }), '', '严格格式回合不投影表达偏好');
+await preStep({ agent: recallAgent, signal: personaSignal, turn: '53' }, pass('帮我写个文案，语气自然点', 'p53'));
+assert.equal(personaCtx.text({ agent: recallAgent, signal: personaSignal }), '表达偏好：平实说。');
+// 召回模式只走工具时，画像也不许自己冒出来
+const personaToolOnly = await call('/lite-memory/control', { sessionId: 'session-recall', enabled: true, mode: 'tool_only', operationId: 'op_persona_tool_only' });
+assert.equal(personaToolOnly.status, 200);
+assert.equal(personaCtx.text({ agent: recallAgent, signal: personaSignal }), '', 'tool_only 下画像不注入');
+const personaAdaptive = await call('/lite-memory/control', { sessionId: 'session-recall', enabled: true, mode: 'adaptive', operationId: 'op_persona_adaptive' });
+assert.equal(personaAdaptive.status, 200);
+assert.equal(personaCtx.text({ agent: recallAgent, signal: personaSignal }), '表达偏好：平实说。');
+const personaOff = await call('/lite-memory/control', { sessionId: 'session-recall', enabled: true, mode: 'off', operationId: 'op_persona_off' });
+assert.equal(personaOff.status, 200);
+assert.equal(personaCtx.text({ agent: recallAgent, signal: personaSignal }), '', '召回全关时画像也不注入');
+await call('/lite-memory/control', { sessionId: 'session-recall', enabled: true, mode: 'adaptive', operationId: 'op_persona_adaptive_back' });
 const cleared = await call('/lite-memory/persona', { op: 'clear' });
 assert.equal(cleared.status, 200);
 assert.equal(cleared.body.formed.length, 0);

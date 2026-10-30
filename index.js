@@ -2258,6 +2258,23 @@ export function apply(ctx, config) {
     }
   }
 
+  /** 交付形式明确的回合（JSON、翻译、模板）不投影表达偏好：格式优先于风格。 */
+  const outputModeOf = (said) => {
+    const text = String(said || '');
+    if (/(?:只|仅|必须)?\s*(?:输出|返回|给我)\s*(?:一段|一个|纯)?\s*(?:JSON|json)/u.test(text)
+      || /(?:JSON|json)\s*(?:格式|only)/u.test(text)) return 'strict_json';
+    if (/(?:翻译成|译成|翻成|translate to)/iu.test(text)) return 'verbatim_translation';
+    if (/(?:按|用).{0,6}(?:模板|格式)\s*(?:输出|写|回)/u.test(text)) return 'fixed_template';
+    return 'chat';
+  };
+  /** 本轮原话里的硬要求要压过已形成的偏好；只在本轮，不写回画像。 */
+  const explicitRequirementOf = (said) => {
+    const text = String(said || '');
+    return /(?:务必|必须|一定要|不要|别|只用|仅用|先说结论|分成?\d|表格|列表|分点|要点|代码块|英文|中文)/u.test(text)
+      ? text.slice(0, 200)
+      : '';
+  };
+
   /**
    * 「记住我」投影：只在本轮交付形式确实相关时放一两句表达偏好。
    * 与召回完全分开：它不取记忆正文、不碰项目层，也不改任何技术结论。
@@ -2282,10 +2299,12 @@ export function apply(ctx, config) {
         if (row && row.state === 'formed' && row.value) formed[dimension] = row;
       }
       if (!Object.keys(formed).length) return '';
+      /** 自动出口同样受召回模式约束（项目自己的选择优先）：只走工具或全关时画像不冒出来。 */
+      if (modeFor(scope) !== 'adaptive') return '';
       const picked = persona.selectPreferenceProjection({
         currentRequest: said.slice(0, 400),
-        outputMode: 'chat',
-        explicitRequirements: '',
+        outputMode: outputModeOf(said),
+        explicitRequirements: explicitRequirementOf(said),
         formed,
       });
       return picked && picked.block ? picked.block : '';

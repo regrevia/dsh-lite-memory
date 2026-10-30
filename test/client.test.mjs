@@ -365,10 +365,10 @@ assert.equal(recallLineOf(null), '');
 assert.deepEqual(modeSwitchesOf('adaptive').map((item) => item.on), [true, true]);
 assert.deepEqual(modeSwitchesOf('tool_only'), [
   { key: 'remind', label: '自动提醒', hint: '关掉后只在你搜索时出现', on: false },
-  { key: 'enabled', label: '启用记忆', hint: '关掉后不参与回答', on: true },
+  { key: 'enabled', label: '启用记忆', hint: '项目级，关掉后不参与回答', on: true },
 ]);
 assert.deepEqual(modeSwitchesOf('off').map((item) => item.on), [false, false]);
-assert.equal(modeSwitchesOf('off')[1].hint, '已关闭');
+assert.equal(modeSwitchesOf('off')[1].hint, '项目级，已关闭');
 assert.equal(recallLineOf({ reason: 'hit', cards: 1, matched: 1 }), '上次自动提醒 1 条');
 assert.equal(recallLineOf({ reason: 'hit', cards: 1, matched: 1, at: new Date(Date.now() - 120000).toISOString() }), '上次自动提醒 1 条 · 2 分钟前');
 assert.equal(recallLineOf({ reason: 'no_overlap', at: new Date().toISOString() }), '上次没提醒，没有匹配的记忆 · 刚刚');

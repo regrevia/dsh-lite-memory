@@ -184,6 +184,13 @@ function writeAtomic(file, data) {
 const PRESSURE = { evidence: 100, pending: 8, attempts: 1, changes: 6 };
 
 function fitPersona(data) {
+  if (!data || typeof data !== 'object') return null;
+  /** 盘上旧文件可能缺字段：先兜成数组，缺一个字段不该让整个画像写不进去。 */
+  if (!Array.isArray(data.evidence)) data.evidence = [];
+  if (!Array.isArray(data.pending)) data.pending = [];
+  if (!Array.isArray(data.recentChanges)) data.recentChanges = [];
+  if (!data.learning || typeof data.learning !== 'object') data.learning = {};
+  if (!Array.isArray(data.learning.attempts)) data.learning.attempts = [];
   if (Buffer.byteLength(JSON.stringify(data)) <= MAX_FILE_BYTES) return data;
   const steps = [];
   if (data.evidence.length > PRESSURE.evidence) steps.push(() => { data.evidence = data.evidence.slice(-PRESSURE.evidence); });
