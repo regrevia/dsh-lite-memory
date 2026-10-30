@@ -323,6 +323,12 @@ function tuneAction(scope, body) {
       for (const key of TUNE_FIELDS) if (flat[key] !== undefined) shape[key] = flat[key];
       return shape;
     });
+    /** 没有任何可匹配文字的条目排不出名次，标了也只会得到空回放，当场说清楚。 */
+    const textOf = (row) => [row.title, row.summary, row.when, row.body, ...(Array.isArray(row.aliases) ? row.aliases : [])]
+      .map((part) => String(part || '')).join('');
+    if (!snapshot.some((row) => row.id === entryId && textOf(row).trim())) {
+      return { status: 400, value: { ok: false, reason: '这条记忆没有可匹配的正文' } };
+    }
     const cases = (lab.replay.cases || []).filter((row) => row && row.query !== query);
     cases.push({ id: `case-${cases.length + 1}-${Date.now()}`, query, expectIds: [entryId], forbidIds: [], records: snapshot });
     const frozen = evolveStore.freezeReplay(scope, cases.slice(-evolve.LIMITS.maxCases));
