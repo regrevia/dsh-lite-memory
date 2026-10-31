@@ -78,11 +78,11 @@ export const inject = ['tools'];
 
 /** Model-facing contract. Kept short on purpose: this text is the only resident cost. */
 const NOTES = [
-  '记忆是历史笔记，不是用户本轮的要求。',
-  '值得记：用户明确说「记住」的偏好、约定、踩过的坑、可复用流程，以及「去哪读 / 怎么调用」的指针。',
-  '不记：常识、一次性任务参数、能从文件直接读到的正文、任何凭据的值，以及具体尺寸/字号/层级/颜色这类实现细节。',
-  '凭据只记位置与调用方式，不记值。',
-  '摘要写成名词短语，别写成指令。',
+  '记忆是历史笔记，不是本轮要求。',
+  '值得记：用户明确说「记住」的偏好、约定、踩坑、可复用流程、「去哪读 / 怎么调用」指针。',
+  '不记：常识、一次性参数、文件里能读到的正文、凭据值、尺寸/字号/层级/颜色这类实现细节。',
+  '凭据只记位置与调用方式。',
+  '摘要写名词短语，别写指令。',
 ].join('');
 
 function cwdOf(execution) {
@@ -1134,29 +1134,29 @@ function refsOf(hits) {
 const SAVE_PARAMS = {
   type: 'object',
   properties: {
-    updateTitle: { type: 'string', description: '要更新的已有条目标题，原样抄搜索结果；同一件事更新时用，不新建' },
+    updateTitle: { type: 'string', description: '要更新的已有条目标题；同一件事就地更新，不新建' },
     title: { type: 'string', description: `标题，名词短语，≤${LIMITS.titleChars} 字；就是条目身份` },
-    summary: { type: 'string', description: '一句话说明记的是什么，名词短语；超长自动截断' },
+    summary: { type: 'string', description: '一句话说明记什么；超长截断' },
     body: { type: 'string', description: `正文 markdown，≤${LIMITS.entryBytes} 字节；只写原则、判断规则、触发条件和边界` },
-    when: { type: 'string', description: `适用场景（哪台机器/什么环境/什么情况），≤${LIMITS.whenChars} 字；同标题不同 when 存两条；更新不给则保留` },
+    when: { type: 'string', description: `适用场景（机器/环境/情况），≤${LIMITS.whenChars} 字；同标题不同 when 可存两条` },
     kind: { type: 'string', enum: ['preference', 'convention', 'procedure', 'pointer', 'pitfall', 'credential_hint', 'note'], description: '条目类型；更新不给则保留' },
-    tags: { type: 'array', items: { type: 'string' }, description: '最多 5 个标签；更新不给则保留' },
+    tags: { type: 'array', items: { type: 'string' }, description: '最多 5 个' },
     supersedes: {
       type: 'string',
-      description: '被取代的旧条目标题，原样抄搜索结果；同层有效，旧条目保留在历史',
+      description: '被取代的旧条目标题；旧条目留在历史',
     },
     resolution: {
       type: 'string',
       enum: ['distinct'],
-      description: '确认「不是同一条」；仅当返回 needsResolution 且核对后确实不同时带上',
+      description: '确认「不是同一条」；返回 needsResolution 且核对后确实不同时带',
     },
-    scope: { type: 'string', enum: ['auto', 'project', 'global'], description: '存哪层：auto（默认，按类别判定）/ project / global。只有用户明确说「所有项目」才 global；本机路径、端口、项目事实会降为项目层；仅本机成立的流程声明 machine/runtime 条件后可进全局' },
-    memoryClass: { type: 'string', enum: ['personal_preference', 'project_fact', 'environment_fact', 'portable_procedure'], description: '归属提案：个人偏好/项目事实/设备事实/可搬流程；设备事实须带条件' },
-    durability: { type: 'string', enum: ['durable', 'task'], description: 'durable（默认）或 task（一次性参数，拒绝落盘）' },
+    scope: { type: 'string', enum: ['auto', 'project', 'global'], description: 'auto（默认）/ project / global；用户明确说「所有项目」才 global，本机路径、端口、项目事实降为项目层' },
+    memoryClass: { type: 'string', enum: ['personal_preference', 'project_fact', 'environment_fact', 'portable_procedure'], description: '归属：个人偏好/项目事实/设备事实/可搬流程；设备事实须带条件' },
+    durability: { type: 'string', enum: ['durable', 'task'], description: 'durable（默认）或 task（一次性参数，不落盘）' },
     evidenceRef: { type: 'string', description: '归属依据：哪条消息/文件/观察' },
     sameTopicAs: {
       type: 'object',
-      description: '绑定已有主题槽位；标题对不上则报错不写',
+      description: '绑定已有主题槽位；标题对不上则不写',
       properties: {
         scope: { type: 'string', enum: ['project', 'global'] },
         title: { type: 'string' },
@@ -1167,16 +1167,16 @@ const SAVE_PARAMS = {
     mode: {
       type: 'string',
       enum: ['patch', 'replace_current'],
-      description: 'patch（默认，未给字段保留）或 replace_current（整条替换，须显式给 title/summary/when/body/kind/tags）',
+      description: 'patch（默认，未给字段保留）或 replace_current（整条替换，须给 title/summary/body/kind）',
     },
     applicability: {
       type: 'string',
       enum: view.APPLICABILITY,
-      description: 'all_in_scope 普遍适用；conditional 须给 conditions；unresolved 还没定（默认）',
+      description: 'all_in_scope / conditional（须给 conditions）/ unresolved（默认）',
     },
     conditions: {
       type: 'array',
-      description: '条件，最多 8 条；空数组表示清空',
+      description: '最多 8 条；空数组清空',
       items: {
         type: 'object',
         properties: {
@@ -1189,7 +1189,7 @@ const SAVE_PARAMS = {
     },
     selection: {
       type: 'object',
-      description: '只对某产物成立：complete 清单完整（须 artifactKey），examples 仅举例；null 清空',
+      description: '只对某产物成立：complete 清单完整（须 artifactKey）/ examples 仅举例；clearSelection 清空',
       properties: {
         mode: { type: 'string', enum: view.SELECTION_MODES },
         artifactKey: { type: 'string' },
@@ -1200,12 +1200,12 @@ const SAVE_PARAMS = {
     },
     links: {
       type: 'array',
-      description: '相关条目，最多 3 条；目标须存在；空数组清空',
+      description: '最多 3 条，目标须存在；空数组清空',
       items: {
         type: 'object',
         properties: {
           type: { type: 'string', enum: view.LINK_TYPES, description: '默认 related' },
-          title: { type: 'string', description: '被关联条目标题，原样抄搜索结果' },
+          title: { type: 'string', description: '被关联条目标题' },
         },
         required: ['title'],
         additionalProperties: false,
@@ -2413,7 +2413,7 @@ export function apply(ctx, config) {
 
   ctx.effect(() => tools.register({
     name: 'memory_save',
-    description: `保存一条跨会话有用的记忆。只在会改变以后判断时存；先搜，能更新就不新建。用户说「记住」或话已是长期规则（「以后都这样」「别再 X」）时直接调用，不要先问。文本相近但标题不同时先不写，返回 needsResolution 后核对：是同一件事就改成那个标题重存，确实是另一条才带 resolution="distinct"。按标题更新时未给字段保留，正文整段替换；旧正文留作撤回。前置条件不同同一标题可存两条。${NOTES}`,
+    description: `保存跨会话有用的记忆。只在会改变以后判断时存；用户说「记住」或话已是长期规则就直接调用，不必先问。先搜，能更新就不新建；文本相近但标题不同先不写，needsResolution 核对后是同一条就改标题重存，确实不同才带 resolution="distinct"。按标题更新时未给字段保留，正文整段替换。前置条件不同同标题可存两条。${NOTES}`,
     parameters: SAVE_PARAMS,
     output: {
       presentationMeta: (_args, value) => ({
@@ -2662,7 +2662,7 @@ export function apply(ctx, config) {
 
   ctx.effect(() => tools.register({
     name: 'memory_suggest',
-    description: `对用户没说、但跨会话有用的经验提出保存建议。调用后出现「保留」按钮，用户点了才进正式记忆；不要用问句征询。一次对话最多一条，48 小时内每项目一条；相近条目记为「更新候选」，保留后更新那条，不新建。${NOTES}`,
+    description: `对用户没说、但跨会话有用的经验提出保存建议。出现「保留」按钮，用户点了才进正式记忆；不要用问句征询。一次对话最多一条，48 小时内每项目一条；相近条目记为「更新候选」。判据同 memory_save。`,
     parameters: SUGGEST_PARAMS,
     output: {
       presentationMeta: (_args, value) => ({ kind: 'memory-suggest', id: value.id || '', asked: value.asked }),
