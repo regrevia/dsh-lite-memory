@@ -405,7 +405,7 @@ assert.equal(exec === null, false);
 const machineGlobal = await exec('memory_save', {
   title: '本机目录同步步骤',
   summary: '流程里写了本机路径，写全局也会留在项目层',
-  body: '在 /Users/apple/Desktop/DSH 下改完再同步。',
+  body: '在 /Users/example/work 下改完再同步。',
   scope: 'global',
   memoryClass: 'portable_procedure',
 });
@@ -1288,6 +1288,7 @@ const cfStale = await call('/lite-memory/conflict', {
 });
 assert.equal(cfStale.status, 409);
 assert.equal(cfStale.body.code, 'stale_draft');
+assert.equal(cfStale.body.remaining, 1, '版本过期时队列还有一条');
 const cfStaleView = await call('/lite-memory/overview', { sessionId: 'session-conflict-panel' });
 assert.equal(cfStaleView.body.selected.conflicts[0].revision, 2, '草稿换了版本要涨');
 assert.equal(cfStaleView.body.selected.conflicts[0].draft.body, '周六发版。');
@@ -1304,6 +1305,32 @@ const cfAgain = await call('/lite-memory/conflict', {
   sessionId: 'session-conflict-panel', scopeKey: cfScopeKey, conflictId: cfRow.id, expectedRevision: 2, op: 'keep',
 });
 assert.equal(cfAgain.status, 409, '队列没了就明确说，不重复落库');
+
+// 丢掉：只删待办、不写记忆；删完再点必须明确失败，不能假装成功
+const cfDropSave = await defs.get('memory_save').execute({ title: '发布窗口', summary: '本项目周日发版', body: '周日发版。' }, { agent: cfAgent });
+assert.equal(cfDropSave.needsResolution, true);
+const cfDropView = await call('/lite-memory/overview', { sessionId: 'session-conflict-panel' });
+const cfDropRow = cfDropView.body.selected.conflicts.find((row) => row.title === '发布窗口');
+assert.ok(cfDropRow, '新草稿要出现在待裁决里');
+const cfDrop = await call('/lite-memory/conflict', {
+  sessionId: 'session-conflict-panel', scopeKey: cfScopeKey, conflictId: cfDropRow.id, expectedRevision: cfDropRow.revision, op: 'drop',
+});
+assert.equal(cfDrop.status, 200);
+assert.equal(cfDrop.body.ok, true);
+assert.equal(cfDrop.body.remaining, 0);
+assert.equal(store.loadIndex(store.scopeOf(cfCwd)).conflicts.length, 0, '丢掉要真的出队');
+assert.equal(store.conflictsOf(store.scopeOf(cfCwd)).length, 0);
+assert.ok(
+  store.loadIndex(store.scopeOf(cfCwd)).entries.every((entry) => entry.summary !== '本项目周日发版'),
+  '丢掉不写记忆',
+);
+const cfDropAgain = await call('/lite-memory/conflict', {
+  sessionId: 'session-conflict-panel', scopeKey: cfScopeKey, conflictId: cfDropRow.id, expectedRevision: cfDropRow.revision, op: 'drop',
+});
+assert.equal(cfDropAgain.status, 409, '队列没了再丢要明确失败');
+assert.equal(cfDropAgain.body.code, 'gone', '面板据此换掉过期行');
+assert.match(cfDropAgain.body.reason, /不在了/);
+assert.equal(cfDropAgain.body.remaining, 0, '失败也带队列现状');
 
 // 项目记忆关闭时，选全局待裁决也不能借这个入口落盘
 const cfgCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-conflict-global-'));
@@ -1414,10 +1441,30 @@ assert.equal(learningAfter.lastPassAt || '', learningBefore.lastPassAt || '', '�
 // 验收：画像只影响表达，跟着「记住我」开关和项目记忆开关一起收放
 const personaCtx = promptContexts.find((entry) => entry.name === 'lite-memory:persona');
 assert.ok(personaCtx && typeof personaCtx.text === 'function');
-assert.equal(personaCtx.order, 61);
+assert.equal(personaCtx.order, 59, '画像段排在召回段之前，两段共用同一份 1200 字节');
 const personaSignal = new AbortController().signal;
 await preStep({ agent: recallAgent, signal: personaSignal, turn: '51' }, pass('帮我写个文案，语气自然点', 'p51'));
 assert.equal(personaCtx.text({ agent: recallAgent, signal: personaSignal }), '表达偏好：平实说。');
+// 验收：画像段和召回段共用同一份 1200 字节账本，量的是最终拼接后的文本
+const personaWin = globalThis.__liteMemoryRecall.windowOf(recallAgent);
+const personaAuto = personaWin.autoBudget;
+assert.ok(personaAuto && personaAuto.personaBytes > 0, '画像段写进共享预算账本');
+assert.equal(personaAuto.personaText, '表达偏好：平实说。');
+assert.ok(personaAuto.totalBytes <= 1200, `total ${personaAuto.totalBytes} over cap`);
+assert.equal(
+  personaAuto.totalBytes,
+  Buffer.byteLength([personaAuto.experimentText, personaAuto.personaText, personaAuto.normalText].filter(Boolean).join('\n\n')),
+  '账本字节与最终拼接文本一致',
+);
+// 预算被卡片占满时画像让路，不能把注入撑破 1200 字节
+const heldPersonaNormal = personaAuto.normalText;
+const heldPersonaTotal = personaAuto.totalBytes;
+personaAuto.normalText = 'x'.repeat(1190);
+personaAuto.totalBytes = 1190;
+assert.equal(personaCtx.text({ agent: recallAgent, signal: personaSignal }), '', '装不下就不投影画像');
+assert.equal(personaAuto.totalBytes, 1190, '拒绝时账本原样回退');
+personaAuto.normalText = heldPersonaNormal;
+personaAuto.totalBytes = heldPersonaTotal;
 // 项目记忆关掉后画像也不参与（用户级开关仍开着）
 const personaMemoryOff = await call('/lite-memory/control', { sessionId: 'session-recall', enabled: false, operationId: 'op_persona_mem_off' });
 assert.equal(personaMemoryOff.status, 200);
@@ -1527,5 +1574,26 @@ assert.equal(modelEdit.ok, false);
 assert.equal(modelEdit.formed.length, 0);
 const tuneCross = await call('/lite-memory/tune', { sessionId: 'session-evo-read', op: 'status' }, { origin: 'http://evil.example' });
 assert.equal(tuneCross.status, 403);
+
+/** 生产召回与回放必须是同一条流水线：同一查询、同一参数下名次与卡片字节逐项相等。 */
+const viewMod = await import('../view.js');
+const evolveMod = await import('../evolve.js');
+const tuneParams = { floor: 2.4, summaryWeight: 1.5 };
+const tuneQuery = '部署脚本用 bash 还是 zsh';
+const tuneRecords = [
+  { id: 'm1', title: '部署脚本用 bash', summary: '部署脚本统一写 bash', status: 'ok' },
+  { id: 'm2', title: '部署脚本位置', summary: '部署脚本放在 scripts/ 下', status: 'ok' },
+  { id: 'm3', title: '本地终端', summary: '本地终端用 zsh', status: 'ok' },
+  { id: 'm4', title: '部署脚本条件', summary: '部署脚本用 bash 条件分支', status: 'ok', applicability: 'conditional', conditions: [{ key: 'taskKind', value: 'release' }] },
+  { id: 'm0', title: '部署脚本旧方案', summary: '部署脚本 旧方案', status: 'archived' },
+];
+const prodRank = viewMod.recallRank(tuneRecords, tuneQuery, { limit: 3, requireApplicable: true, context: {}, task: null, params: tuneParams });
+const prodCards = viewMod.recallCards(prodRank, { max: viewMod.CARD.max, bytes: viewMod.CARD.bytes });
+assert.ok(prodRank.length > 0, 'production rank returns candidates');
+assert.equal(prodRank.some((row) => row.record.id === 'm4'), false, 'conditional entry still gated');
+assert.equal(prodRank.some((row) => row.record.id === 'm0'), false, 'archived entry still hidden');
+const replayCase = evolveMod.runCase({ id: 'same-pipeline', query: tuneQuery, records: tuneRecords, expectIds: [prodCards.cards[0].id], forbidIds: [] }, tuneParams);
+assert.deepEqual(replayCase.topIds, prodRank.slice(0, 3).map((row) => String(row.record.id)), 'replay top-3 matches production rank');
+assert.equal(replayCase.bytes, prodCards.bytes, 'replay card bytes match production rendered bytes');
 
 console.log('contract.test.mjs: all passed');

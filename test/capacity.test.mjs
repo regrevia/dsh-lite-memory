@@ -84,6 +84,33 @@ test('证据挤满 64KB 时仍能继续收片段：先丢最老的证据，文�
   assert.ok(fs.statSync(personaFile()).size <= personaStore.MAX_FILE_BYTES);
 });
 
+test('容量裁剪后语义跟着证据重算：人工偏好原样保留，学习结论按剩余证据重计', () => {
+  reset();
+  personaStore.setPersonaEnabled({ enabled: true, userId: 'u1', now: at(0) });
+  const seeded = seedNearCap();
+  /** 一条人工确认的偏好 + 一条按证据得出的维度，看裁剪时会不会被一起抹掉或留下旧计数。 */
+  seeded.preferences = {
+    tone: { dimension: 'tone', value: 'warm', source: 'manual', state: 'formed', lockedByUser: true, support: 5, firstSeenAt: at(0), lastSupportedAt: at(5) },
+    answer_order: { dimension: 'answer_order', source: 'learned', state: 'watching' },
+  };
+  const withPrefs = personaStore.writePersona(seeded, { userId: 'u1', revision: seeded.revision });
+  assert.equal(withPrefs.ok, true, '加偏好后仍应写得进去');
+  for (let index = 0; index < 6; index += 1) {
+    personaStore.queuePersonaPending({ userId: 'u1', now: at(30 + index), snippet: seedSnippet(index) });
+  }
+  const read = personaStore.readPersona({ userId: 'u1' });
+  assert.equal(read.corrupt, false);
+  const kept = read.persona.evidence.filter((row) => row && row.dimension === 'answer_order');
+  const order = read.persona.preferences.answer_order;
+  assert.equal(order.support, kept.length, '学习维度的支持数要按裁剪后的证据重算');
+  assert.equal(order.valueTallies ? Object.values(order.valueTallies).reduce((sum, tally) => sum + (tally.support || 0), 0) : order.support, order.support, '取值累加与总数同源');
+  const tone = read.persona.preferences.tone;
+  assert.equal(tone.value, 'warm', '人工确认的取值不因裁剪改变');
+  assert.equal(tone.source, 'manual');
+  assert.equal(tone.lockedByUser, true);
+  assert.equal(tone.support, 0, '人工取值的关联条数按现存证据刷新，不沿用旧数字');
+});
+
 test('容量吃紧时关闭开关仍然写得进去，不会把用户卡在关不掉的状态', () => {
   reset();
   personaStore.setPersonaEnabled({ enabled: true, userId: 'u1', now: at(0) });

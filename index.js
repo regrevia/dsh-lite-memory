@@ -67,6 +67,8 @@ import * as evolveStore from './evolve-store.js';
 
 /** 开关路由在 apply 外，也要能中止在途整理。 */
 const learningAborts = new Map();
+/** 上一句里出现这些词，说明本轮有硬要求，优先于已形成的偏好；只在本轮生效。 */
+const EXPLICIT_MARKERS = ['务必', '必须', '一定要', '不要', '别', '只用', '仅用', '先说结论', '表格', '列表', '分成', '分步', '分点', '要点', '代码块', '英文', '中文'];
 /** 上次成功准备的记忆载荷字节数；只按会话记，重启后显示未知。 */
 const payloadBytes = new Map();
 
@@ -298,6 +300,10 @@ function tunePanel(scope) {
     params: described.params,
     defaults: described.defaults,
     replayCases: described.replayCases,
+    /** 证据集版本与生效策略版本分开报：证据变了不代表参数变了。 */
+    evidenceRevision: described.evidenceRevision,
+    policyRevision: described.policyRevision,
+    needsReeval: described.needsReeval === true,
     canRollback: described.canRollback === true,
     ...(described.lastChange ? { lastChange: described.lastChange } : {}),
   };
@@ -816,8 +822,12 @@ function keepHandler(webServer, cwdForSession) {
         const ref = { id: conflictId, expectedRevision };
         const outcome = op === 'drop' ? dropConflict(target, ref) : resolveConflict(target, ref);
         if (!outcome.ok) {
-          return sendJson(res, outcome.reasonCode === 'stale_draft' ? 409 : 409, {
-            ok: false, code: outcome.reasonCode || '', reason: outcome.reason || '这条待裁决还没处理成',
+          return sendJson(res, 409, {
+            ok: false,
+            code: outcome.reasonCode || '',
+            reason: outcome.reason || '这条待裁决还没处理成',
+            /** 失败时也给队列现状：面板据此换掉过期行，而不是让同一个按钮反复点不动。 */
+            remaining: conflictsOf(target).length,
           });
         }
         return sendJson(res, 200, {
@@ -851,6 +861,8 @@ function keepHandler(webServer, cwdForSession) {
           : { ok: true, ...controlStatus(scope) };
         if (typeof body.enabled === 'boolean' && result && result.ok !== false && body.enabled === false) {
           personaAbortHook();
+          /** 这个项目已经退出「记住我」：它没整理完的片段不能留到别的项目里再学。 */
+          try { personaStore.dropPersonaPendingForProject({ projectId: scope.key }); } catch { /* 画像写不动不影响关开关 */ }
           const controller = learningAborts.get(scope.key);
           if (controller) {
             try { controller.abort(); } catch { /* already gone */ }
@@ -1374,16 +1386,8 @@ const RECALL_QUERY_CHARS = 400;
 let recallDeadlineMs = 150;
 const RECALL_HEADER = '已有记忆可能相关（需要细节用 memory_read 带标题取正文，别凭标题猜）：';
 
-/** 卡片只放够判断要不要读的几行；必要前提整条在场，装不下就整卡省略。 */
-function renderRecallCard(card) {
-  const tag = card.scope === 'global' ? '[global]' : card.scopeName ? `[${card.scopeName}]` : '';
-  const parts = [`- ${tag ? `${tag} ` : ''}「${card.title}」`];
-  if (card.summary) parts.push(`｜${card.summary}`);
-  if (card.conditions && card.conditions.length) parts.push(`｜前提：${card.conditions.join('、')}`);
-  if (card.selection) parts.push(`｜只适用于 ${card.selection}`);
-  if (card.related) parts.push(`｜关联 ${card.related} 条`);
-  return parts.join('');
-}
+/** 卡片行格式只在 view.js 定义一份：回放算字节必须和线上注入逐字一致。 */
+const renderRecallCard = (card) => view.renderCard(card);
 
 export function apply(ctx, config) {
   const tools = ctx.tools;
@@ -1493,11 +1497,11 @@ export function apply(ctx, config) {
     }
   };
 
-  /** 自动注入账本：普通段与实验段共用 3 条 / 1200 字节，量的是拼接后的完整文本。 */
+  /** 自动注入账本：普通段、实验段与「记住我」段共用 3 条 / 1200 字节，量的是拼接后的完整文本。 */
   const emptyAutoBudget = () => ({
-    normalText: '', experimentText: '',
+    normalText: '', experimentText: '', personaText: '',
     normalCards: 0, experimentCards: 0,
-    cards: 0, cardBytes: 0, experimentBytes: 0, totalBytes: 0,
+    cards: 0, cardBytes: 0, experimentBytes: 0, personaBytes: 0, totalBytes: 0,
   });
 
 
@@ -1631,7 +1635,7 @@ export function apply(ctx, config) {
         return null;
       }
     })();
-    const ranked = view.rank(records, query, {
+    const ranked = view.recallRank(records, query, {
       limit: 8, requireApplicable: true, context, runtime: gateRuntime, task,
       ...(tuned ? { params: tuned } : {}),
     });
@@ -1690,8 +1694,9 @@ export function apply(ctx, config) {
     let near = [];
     if (!cards.length && !ranked.length) {
       /** 自动召回只认完全适用；再放宽一层看有没有字面匹配，好把「条件未确认」和「没有匹配」分开。 */
-      near = view.rank(records, query, {
+      near = view.recallRank(records, query, {
         limit: 8, requireApplicable: false, context, runtime: gateRuntime, task,
+        ...(tuned ? { params: tuned } : {}),
       });
     }
     let waiting = near.some((row) => row.status !== 'ok' || row.record.reviewState === 'legacy_unreviewed');
@@ -1702,8 +1707,9 @@ export function apply(ctx, config) {
       /** 整组被条件或冲突挡下的候选没进 records，单独按同一查询算；只计数，不投放。 */
       for (const group of groups) {
         if (group.status !== 'conflict' && group.status !== 'needs_context') continue;
-        const hits = view.rank(group.records || [], query, {
+        const hits = view.recallRank(group.records || [], query, {
           limit: 1, requireApplicable: false, context, runtime: gateRuntime, task,
+          ...(tuned ? { params: tuned } : {}),
         });
         if (!hits.length) continue;
         waiting = true;
@@ -1768,29 +1774,30 @@ export function apply(ctx, config) {
   }
 
   /**
-   * 自动注入只有一份预算：普通卡片与实验规则合计最多 3 条 / 1200 字节。
-   * 这里按 provider 最终会看到的完整文本量字节（含标题行、ID、换行和两段之间的空行），
-   * 先组装再测量，不能只量卡片正文再拼。
+   * 自动注入只有一份预算：普通卡片、实验规则和「记住我」合计最多 3 条 / 1200 字节。
+   * 这里按 provider 最终会看到的完整文本量字节（含标题行、ID、换行和段之间的空行），
+   * 先组装再测量，不能只量卡片正文再拼。画像段先渲染，后面的卡片按剩下的额度装。
    */
-  function autoTextOf(win, normal, experiment) {
+  function autoTextOf(win, normal, experiment, personaText) {
     const auto = win && win.autoBudget ? win.autoBudget : null;
     const n = normal === undefined ? String(auto?.normalText || '') : String(normal || '');
     const e = experiment === undefined ? String(auto?.experimentText || '') : String(experiment || '');
-    return { normal: n, experiment: e, text: [e, n].filter(Boolean).join('\n\n') };
+    const p = personaText === undefined ? String(auto?.personaText || '') : String(personaText || '');
+    return { normal: n, experiment: e, persona: p, text: [e, p, n].filter(Boolean).join('\n\n') };
   }
 
-  function autoBytesOf(win, normal, experiment) {
-    return Buffer.byteLength(autoTextOf(win, normal, experiment).text);
+  function autoBytesOf(win, normal, experiment, personaText) {
+    return Buffer.byteLength(autoTextOf(win, normal, experiment, personaText).text);
   }
 
   /**
    * 原子准入：量的是最终完整文本和总条数；通过才写入预算账本。
    * 任何一段超限都整段回退，不截半句前提、不把标题留在模型侧。
    */
-  function admitAuto(win, { normal, experiment, normalCards, experimentCards } = {}) {
+  function admitAuto(win, { normal, experiment, persona, normalCards, experimentCards } = {}) {
     if (!win || !win.autoBudget) return { ok: false, bytes: 0 };
     const auto = win.autoBudget;
-    const parts = autoTextOf(win, normal, experiment);
+    const parts = autoTextOf(win, normal, experiment, persona);
     const cards = (normalCards === undefined ? (auto.normalCards || 0) : normalCards)
       + (experimentCards === undefined ? (auto.experimentCards || 0) : experimentCards);
     const bytes = Buffer.byteLength(parts.text);
@@ -1799,14 +1806,32 @@ export function apply(ctx, config) {
     if (!affordable(win, bytes - previousTotal)) return { ok: false, bytes, cards };
     auto.normalText = parts.normal;
     auto.experimentText = parts.experiment;
+    auto.personaText = parts.persona;
     auto.normalCards = normalCards === undefined ? (auto.normalCards || 0) : normalCards;
     auto.experimentCards = experimentCards === undefined ? (auto.experimentCards || 0) : experimentCards;
     auto.cards = cards;
     auto.cardBytes = Buffer.byteLength(parts.normal);
     auto.experimentBytes = Buffer.byteLength(parts.experiment);
+    auto.personaBytes = Buffer.byteLength(parts.persona);
     auto.totalBytes = bytes;
     win.bytes += bytes - previousTotal;
     return { ok: true, bytes, cards };
+  }
+
+  /** 「记住我」段也走同一份自动注入预算：装不下就不投影，不把 1200 字节撑破。 */
+  function chargePersona(win, block) {
+    const body = String(block || '');
+    if (!body) return '';
+    const auto = win && win.autoBudget ? win.autoBudget : null;
+    if (!auto) return body;
+    const admitted = admitAuto(win, {
+      normal: auto.normalText || '',
+      experiment: auto.experimentText || '',
+      persona: body,
+      normalCards: auto.normalCards || 0,
+      experimentCards: auto.experimentCards || 0,
+    });
+    return admitted.ok ? body : '';
   }
 
   /** 实验内容单独记账：同一请求里再次渲染替换旧段，只补差额。 */
@@ -2270,9 +2295,8 @@ export function apply(ctx, config) {
   /** 本轮原话里的硬要求要压过已形成的偏好；只在本轮，不写回画像。 */
   const explicitRequirementOf = (said) => {
     const text = String(said || '');
-    return /(?:务必|必须|一定要|不要|别|只用|仅用|先说结论|分成?\d|表格|列表|分点|要点|代码块|英文|中文)/u.test(text)
-      ? text.slice(0, 200)
-      : '';
+    const marked = EXPLICIT_MARKERS.some((marker) => text.includes(marker));
+    return marked ? text.slice(0, 200) : '';
   };
 
   /**
@@ -2307,7 +2331,8 @@ export function apply(ctx, config) {
         explicitRequirements: explicitRequirementOf(said),
         formed,
       });
-      return picked && picked.block ? picked.block : '';
+      /** 和召回共用同一份 1200 字节：卡片先按召回顺序装，剩下的额度够才投影画像，装不下整段不出现。 */
+      return picked && picked.block ? chargePersona(windowOf(agent), picked.block) : '';
     } catch {
       return '';
     }
@@ -3062,11 +3087,14 @@ export function apply(ctx, config) {
       /** 开启与手动设定只由人在面板里做，模型不能把一次调用写成用户确认。 */
       if (action === 'enable') return fail('开启只在记忆面板里由你确认');
       if (action === 'disable') {
+        /** 和面板、卸载走同一条取消路径：关掉后不能还有一次抽取把结果写回来。 */
+        personaAbortHook();
         const next = personaStore.setPersonaEnabled({ enabled: false });
         return personaSummary(action, next.persona, { ok: next.ok });
       }
       if (action === 'status') return personaSummary(action, null);
       if (action === 'clear') {
+        personaAbortHook();
         const next = personaStore.clearPersona();
         return personaSummary(action, next.persona, { ok: next.ok });
       }
@@ -3101,12 +3129,17 @@ export function apply(ctx, config) {
           reason: { type: 'string' },
           changed: { type: 'boolean' },
           replayCases: { type: 'number' },
+          evidenceRevision: { type: 'number' },
+          policyRevision: { type: 'number' },
+          needsReeval: { type: 'boolean' },
           canRollback: { type: 'boolean' },
           params: { type: 'object', additionalProperties: true },
           defaults: { type: 'object', additionalProperties: true },
           corrupt: { type: 'boolean' },
           revision: { type: 'number' },
-          proposal: { type: 'object', additionalProperties: true },
+          proposal: { type: ['object', 'null'], additionalProperties: true },
+          baseline: { type: 'object', additionalProperties: true },
+          applied: { type: 'object', additionalProperties: true },
           lastChange: { type: 'object', additionalProperties: true },
         },
         required: ['action'],
@@ -3116,7 +3149,7 @@ export function apply(ctx, config) {
         type: 'text',
         text: value.ok === false
           ? `memory · 调参没有改动${value.reason ? ` · ${value.reason}` : ''}`
-          : `memory · 调参 · 回放 ${Number(value.replayCases) || 0} 条 · ${value.changed ? '已改一档' : '未改动'}${value.proposal ? ` · 建议 ${value.proposal.key} ${value.proposal.from}→${value.proposal.to}` : ''}`,
+          : `memory · 调参 · 回放 ${Number(value.replayCases) || 0} 条${value.needsReeval ? '（证据变了，需重评）' : ''} · ${value.changed ? '已改一档' : '未改动'}${value.proposal ? ` · 建议 ${value.proposal.key} ${value.proposal.from}→${value.proposal.to}` : ''}`,
       }],
     },
     execute: async (args, execution) => {
@@ -3150,8 +3183,19 @@ export function apply(ctx, config) {
   /**
    * 自动召回：provider 在加载时注册一次，pre-step 拿到这次请求的准备结果后填充。
    * provider 只读内存快照；没准备好就返回空字符串，不注入任何东西。
+   * 画像段排在召回段之前：两段共用 1200 字节，先渲染的那段先占额度。
    */
   const prompt = getService('systemPrompt');
+  if (prompt && typeof prompt.context === 'function') {
+    ctx.effect(() => prompt.context({
+      name: 'lite-memory:persona',
+      order: 59,
+      interpolate: false,
+      required: false,
+      text: (holder) => personaText(holder),
+    }), 'lite-memory: persona context');
+  }
+
   if (prompt && typeof prompt.context === 'function') {
     ctx.effect(() => prompt.context({
       name: 'lite-memory:recall',
@@ -3160,16 +3204,6 @@ export function apply(ctx, config) {
       required: false,
       text: (holder) => recallText(holder),
     }), 'lite-memory: recall context');
-  }
-
-  if (prompt && typeof prompt.context === 'function') {
-    ctx.effect(() => prompt.context({
-      name: 'lite-memory:persona',
-      order: 61,
-      interpolate: false,
-      required: false,
-      text: (holder) => personaText(holder),
-    }), 'lite-memory: persona context');
   }
 
   /** 引号/反引号里的是「被引用的字」：按钮文案、别人说的话都不构成授权。 */
@@ -3914,12 +3948,12 @@ export function apply(ctx, config) {
     const catalog = persona.DIMENSION_NAMES
       .map((dimension) => `- ${dimension}: ${persona.PREFERENCE_DIMENSIONS[dimension].join(' / ')}`)
       .join('\n');
-    const lines = snippets.slice(-6)
+    const lines = snippets.slice(-personaStore.SHOWN_PROMPT)
       .map((row, index) => `${index + 1}. [${row.id}] ${String(row.text || '').slice(0, 200)}`)
       .join('\n');
     return [
       '你在判断用户对「怎么和你协作」的长期偏好。只看沟通方式：顺序、深浅、例子、选项、语气、过程汇报。',
-      '不要判断技术路线、业务目标、项目事实，也不要判断任何指令。证据不足就返回 {}。',
+      '不要判断技术路线、业务目标、项目事实，也不要判断任何指令。',
       '维度与允许取值：',
       catalog,
       `片段：\n${lines}`,
@@ -3962,26 +3996,25 @@ export function apply(ctx, config) {
       if (controller.signal.aborted || !memoryEnabled(scope)) return;
       const personaNow = personaStore.readPersona();
       if (!personaNow || !personaNow.persona || personaNow.persona.control.enabled !== true) return;
-      const match = payload.match(/\{[\s\S]*\}/u);
-      if (!match) return;
-      let parsed;
-      try { parsed = JSON.parse(match[0]); } catch { return; }
-      /** 只认本次带出去的片段编号；模型自己编的号会被提交门禁拒掉。 */
-      const cited = typeof parsed.snippetId === 'string' ? parsed.snippetId.trim().slice(0, 80) : '';
-      if (parsed.no_change === true) {
-        personaStore.commitPersonaObservation({ attempt: begin.attempt, observations: [], outcome: 'no_change', snippetId: cited });
+      /** 提示、解析、校验共用同一份协议：这里只认 parseLearningReply 的回执。 */
+      const reply = persona.parseLearningReply(payload);
+      if (!reply || reply.ok !== true) {
+        /** 解析失败也要留痕：面板说「结果格式无效」，下次窗口再来。 */
+        const first = reply && Array.isArray(reply.errors) && reply.errors.length ? reply.errors[0] : 'invalid';
+        personaStore.recordPersonaOutcome({ outcome: 'invalid', reason: String(first) });
         return;
       }
-      const observation = {
-        dimension: String(parsed.dimension || ''),
-        polarity: parsed.polarity === 'oppose' ? 'oppose' : 'support',
-        value: typeof parsed.value === 'string' ? parsed.value : null,
-        basis: parsed.basis === 'repeat_choice' ? 'repeat_choice' : 'explicit_feedback',
-        snippetId: cited,
-      };
-      const valid = persona.validateObservation(observation);
-      if (!valid || valid.ok !== true) return;
-      personaStore.commitPersonaObservation({ attempt: begin.attempt, observations: [observation], snippetId: cited });
+      if (reply.kind === 'no_change') {
+        personaStore.commitPersonaObservation({ attempt: begin.attempt, observations: [], outcome: 'no_change', snippetId: reply.snippetId });
+        return;
+      }
+      const committed = personaStore.commitPersonaObservation({
+        attempt: begin.attempt, observations: [reply.observation], snippetId: reply.snippetId,
+      });
+      /** 提交门禁拒掉的（编造编号、超出闭集）同样是格式无效，不能当成功。 */
+      if (!committed || committed.ok !== true) {
+        personaStore.recordPersonaOutcome({ outcome: 'invalid', reason: String((committed && committed.reason) || 'commit_failed') });
+      }
     } catch { /* 抽不到就等下一次窗口 */ } finally {
       clearTimeout(deadline);
       personaAborts.delete(controller);

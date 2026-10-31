@@ -10,7 +10,7 @@
  */
 import { createHash } from 'node:crypto';
 
-import { CARD, rank, selectCards } from './view.js';
+import { CARD, recallCards, recallRank } from './view.js';
 
 export const EVOLVE_VERSION = 1;
 
@@ -43,48 +43,81 @@ export function sameParams(a, b) {
   return Object.keys(DEFAULT_PARAMS).every((key) => normalizeParams(a)[key] === normalizeParams(b)[key]);
 }
 
-/**
- * 回放集的摘要只覆盖「答题卡」：记录 id/标题/摘要/条件与查询、期望 id。
- * 用例顺序也算：摘要一致意味着这一轮和上一轮看的是同一批题。
- */
-export function replayDigestOf(cases) {
-  const rows = (Array.isArray(cases) ? cases : []).map((item) => ({
-    id: String(item && item.id ? item.id : ''),
-    query: String(item && item.query ? item.query : ''),
-    expect: (Array.isArray(item && item.expectIds) ? item.expectIds : []).map(String).sort(),
-    forbid: (Array.isArray(item && item.forbidIds) ? item.forbidIds : []).map(String).sort(),
-    records: (Array.isArray(item && item.records) ? item.records : []).map((record) => ({
-      id: String(record && record.id ? record.id : ''),
-      title: String(record && record.title ? record.title : ''),
-      summary: String(record && record.summary ? record.summary : ''),
-      when: String(record && record.when ? record.when : ''),
-      aliases: (Array.isArray(record && record.aliases) ? record.aliases : []).map(String),
-    })),
-  }));
-  /** 摘要是定长哈希：完整快照留在 replay.records 里，不能把摘要当正文写进文件。 */
-  return createHash('sha256').update(JSON.stringify(rows)).digest('hex');
+/** 把任意 JSON 值折成与键序无关的稳定形状，摘要才不会被对象键序左右。 */
+function stableOf(value) {
+  if (Array.isArray(value)) return value.map(stableOf);
+  if (value && typeof value === 'object') {
+    return Object.keys(value).sort().map((key) => [key, stableOf(value[key])]);
+  }
+  if (value === undefined || value === null) return '';
+  return String(value);
 }
 
-/** 一条用例按参数跑一次：拿到前三与卡片字节成本，只回报答卡需要的数字。 */
+/** 一条记忆里所有会影响评测的字段；顺序无意义的列表先排序，避免假变更。 */
+function digestRecord(record) {
+  const row = record && typeof record === 'object' ? record : {};
+  const list = (value) => (Array.isArray(value) ? value : []).map((item) => String(item)).sort();
+  return {
+    id: String(row.id || ''),
+    title: String(row.title || ''),
+    summary: String(row.summary || ''),
+    when: String(row.when || ''),
+    body: String(row.body || ''),
+    kind: String(row.kind || ''),
+    status: String(row.status || ''),
+    applicability: String(row.applicability || ''),
+    aliases: list(row.aliases),
+    tags: list(row.tags),
+    triggers: list(row.triggers),
+    conditions: stableOf(row.conditions),
+  };
+}
+
+/**
+ * 回放集的摘要覆盖全部影响评测的输入：答题卡（查询/期望/禁止/上下文）、
+ * 每条记忆的完整内容（正文、when、条件、触发词、标签、状态、适用性），以及当前参数。
+ * 任何一处变了摘要就变，才谈得上「同一批题」。
+ */
+export function replayDigestOf(cases, params = DEFAULT_PARAMS) {
+  const rows = (Array.isArray(cases) ? cases : []).map((item) => {
+    const row = item && typeof item === 'object' ? item : {};
+    return {
+      id: String(row.id || ''),
+      query: String(row.query || ''),
+      expect: (Array.isArray(row.expectIds) ? row.expectIds : []).map(String).sort(),
+      forbid: (Array.isArray(row.forbidIds) ? row.forbidIds : []).map(String).sort(),
+      context: stableOf(row.context && typeof row.context === 'object' ? row.context : {}),
+      records: (Array.isArray(row.records) ? row.records : []).map(digestRecord),
+    };
+  });
+  /** 参数也进摘要：同一批题换了参数，评测结果就不再可比。 */
+  const payload = { params: normalizeParams(params), rows };
+  /** 摘要是定长哈希：完整快照留在 replay.records 里，不能把摘要当正文写进文件。 */
+  return createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+}
+
+/**
+ * 一条用例按参数跑一次：拿到前三与卡片字节成本，只回报答卡需要的数字。
+ * 与生产召回的保留差异（有意，回放只求两轮可比）：
+ * - 冻结快照里没有 runtime，重建不了 runtime 分支的资格门槛，只按 context 判适用性；
+ * - 快照不带 scopeName，项目卡片标签的字节恢复不出来，卡片字节按全局形态计。
+ */
 export function runCase(item, params) {
   const records = (Array.isArray(item && item.records) ? item.records : []).slice(0, LIMITS.maxRecords);
-  const rows = rank(records, String(item && item.query ? item.query : ''), {
+  const task = item && item.task && typeof item.task === 'object' ? item.task : undefined;
+  /** 与生产召回同一个排序入口：同样的适用性门槛、同样的参数，回放名次才可比。 */
+  const rows = recallRank(records, String(item && item.query ? item.query : ''), {
     limit: LIMITS.topN,
     params: normalizeParams(params),
-    task: item && item.task && typeof item.task === 'object' ? item.task : undefined,
+    context: item && item.context && typeof item.context === 'object' ? item.context : {},
+    task,
   });
   const top = rows.slice(0, LIMITS.topN);
   const topIds = top.map((row) => String(row.record.id));
   const expectIds = (Array.isArray(item && item.expectIds) ? item.expectIds : []).map(String);
   const forbidIds = (Array.isArray(item && item.forbidIds) ? item.forbidIds : []).map(String);
-  const cards = selectCards(top.map((row) => ({
-    ...row.record,
-    score: row.score,
-    hints: row.hints,
-    status: row.status,
-    sameTask: row.sameTask,
-    raw: row.raw,
-  })), { maxItems: CARD.max, maxBytes: CARD.bytes });
+  /** 卡片字节也走生产那套「按最终渲染行计费」，不再拿内存对象估个近似值。 */
+  const cards = recallCards(top, { max: CARD.max, bytes: CARD.bytes });
   /** 位置分：期望项排第几就记几，没进前三记 topN+1；越小越好。 */
   let position = 0;
   for (const id of expectIds) {
@@ -174,10 +207,21 @@ export function proposeChange(cases, current) {
   return { baseline, proposal: candidates[0] || null, tried: candidates.length };
 }
 
-/** 回滚只要把上一轮的参数取回来；历史里找最近一条有 from 的记录。 */
-export function rollbackTarget(history = []) {
-  const rows = Array.isArray(history) ? history.filter((row) => row && row.from) : [];
-  if (!rows.length) return null;
-  const last = rows[rows.length - 1];
-  return { params: normalizeParams(last.from), index: rows.length - 1, at: String(last.at || '') };
+/**
+ * 沿着策略时间线单向往回找一组生效过的参数。
+ * cursor 是下一次回滚的扫描上界（历史里已经走到哪）；只往回走、不写历史，
+ * 所以「回滚过的档位」不会被下一次回滚又装回来。
+ */
+export function rollbackTarget(history = [], current = DEFAULT_PARAMS, cursor = null) {
+  const rows = Array.isArray(history) ? history : [];
+  const start = Number.isInteger(cursor) ? Math.min(Math.max(cursor, 0), rows.length) : rows.length;
+  const now = normalizeParams(current);
+  for (let index = start - 1; index >= 0; index -= 1) {
+    const row = rows[index] && typeof rows[index] === 'object' ? rows[index] : {};
+    const from = row.from && typeof row.from === 'object' ? row.from : row.to;
+    const params = normalizeParams(from || {});
+    if (sameParams(params, now)) continue;
+    return { params, cursor: index, at: String(row.at || '') };
+  }
+  return null;
 }

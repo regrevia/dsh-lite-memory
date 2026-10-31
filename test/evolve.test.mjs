@@ -159,12 +159,16 @@ await test('重复采纳同一组参数返回 no_change，不刷历史', () => {
   assert.equal(evolveStore.readEvolve(scope).lab.history.length, before.history.length + 1);
 });
 
-await test('换了回放集就重置参数与历史，不拿旧成绩背书', () => {
+await test('换了回放集只推进证据集版本：参数与历史都留着，旧成绩改判待重评', () => {
+  const before = evolveStore.readEvolve(scope).lab;
   const next = [{ ...cases[0], query: '封面' }];
   const result = evolveStore.freezeReplay(scope, next);
   assert.equal(result.changed, true);
-  assert.deepEqual(result.lab.params, evolve.DEFAULT_PARAMS);
-  assert.equal(result.lab.history.length, 0);
+  assert.deepEqual(result.lab.params, before.params, '新反馈不能把刚调好的参数打回默认');
+  assert.equal(result.lab.history.length, before.history.length, '新反馈不能清空策略历史');
+  assert.equal(result.lab.replay.evidenceRevision, before.replay.evidenceRevision + 1);
+  assert.equal(result.lab.replay.needsReeval, true, '换了题，旧评测结果不再作数');
+  assert.equal(evolveStore.describeEvolve(scope).canRollback, true);
 });
 
 await test('历史有上限，不会无限增长', () => {

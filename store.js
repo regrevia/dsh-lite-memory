@@ -2834,10 +2834,13 @@ function clearConflictLocked(scope, ref) {
   const id = ref && typeof ref === 'object' && ref.id ? ref.id : '';
   const norm = id ? '' : normalizeText(typeof ref === 'string' ? ref : '', 120);
   const next = rows.filter((row) => (id ? row.id !== id : !(row.title === norm && row.scope === (scope.key === 'global' ? 'global' : 'project'))));
-  if (next.length === rows.length) return rows.length;
-  index.conflicts = next;
-  saveIndex(scope, index);
-  return next.length;
+  const removed = rows.length - next.length;
+  /** 说清删掉了几条：删 0 条却回成功，面板会以为处理完了，下次点还是这行。 */
+  if (removed > 0) {
+    index.conflicts = next;
+    saveIndex(scope, index);
+  }
+  return { removed, left: next.length };
 }
 
 /** 面板待裁决列表：只给可重放草稿与候选，不预写记忆。 */
@@ -2857,7 +2860,7 @@ export function resolveConflict(scope, ref, options = {}) {
   /** 版本检查、另存和出队必须在同一临界区：中间被新反馈改写时，旧面板不能批准新草稿。 */
   return withLocks([scope, globalScope()], () => {
     const row = conflictRowLocked(scope, ref);
-    if (!row) return { ok: false, reason: '这条待裁决已经不在了，刷新面板看看' };
+    if (!row) return { ok: false, reasonCode: 'gone', reason: '这条待裁决已经不在了，刷新面板看看' };
     if (staleDraft(row, ref)) return { ok: false, reasonCode: 'stale_draft', reason: '这条待裁决又更新了，刷新后再处理' };
     const draft = { ...(row.draft || {}), resolution: 'distinct', writeMode: options.writeMode === 'append' ? 'append' : 'patch' };
     if (scope.key === 'global') draft.scope = 'global';
@@ -2869,6 +2872,7 @@ export function resolveConflict(scope, ref, options = {}) {
       const reason = result.reasonCode === 'memory_disabled' ? '这层记忆已关闭' : '这条记忆的适用范围还没定，先说明当前环境';
       return { ok: false, reason, result };
     }
+    /** 存成功时 saveEntry 已经按标题把这条出队，这里再按 id 清一次是兜底，删 0 条也算成功。 */
     clearConflictLocked(scope, { id: row.id });
     return { ok: true, result, record: result && result.record };
   });
@@ -2878,9 +2882,9 @@ export function resolveConflict(scope, ref, options = {}) {
 export function dropConflict(scope, ref) {
   return withLocks([scope, globalScope()], () => {
     const row = conflictRowLocked(scope, ref);
-    if (!row) return { ok: false, reason: '这条待裁决已经不在了，刷新面板看看' };
+    if (!row) return { ok: false, reasonCode: 'gone', reason: '这条待裁决已经不在了，刷新面板看看' };
     if (staleDraft(row, ref)) return { ok: false, reasonCode: 'stale_draft', reason: '这条待裁决又更新了，刷新后再处理' };
-    clearConflictLocked(scope, { id: row.id });
+    if (clearConflictLocked(scope, { id: row.id }).removed === 0) return { ok: false, reasonCode: 'gone', reason: '这条待裁决已经不在了，刷新面板看看' };
     return { ok: true };
   });
 }

@@ -28,7 +28,7 @@ assert.equal(panel.name, 'shell.overlay');
 assert.equal(panel.order, 30);
 
 const EMPTY_CHILDREN = [];
-const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, conflictVisibleRows, conflictFactsOf } = seen;
+const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, conflictVisibleRows, conflictFactsOf, conflictNote } = seen;
 
 // 图谱只按真实数据画：共享标签成枢纽，显式关联成边，位置由 id 决定。
 const graph = graphOf([
@@ -414,3 +414,9 @@ assert.equal(conflictFactsOf({ draft: { body: '' } }).body, '');
 assert.equal(conflictFactsOf({ draft: { body: '' } }).draftMissing, true);
 assert.equal(conflictFactsOf({ title: '只有标题' }).draftMissing, true);
 assert.equal(facts.draftMissing, false);
+
+assert.equal(conflictNote('drop', { ok: true, body: { ok: true } }), '已丢掉，没有写进记忆');
+assert.equal(conflictNote('keep', { ok: true, body: { ok: true } }), '已另存一条');
+assert.equal(conflictNote('drop', { ok: false, status: 409, body: { ok: false, code: 'gone' } }), '这条已经不在了，列表已刷新');
+assert.equal(conflictNote('drop', { ok: false, status: 409, body: { ok: false, reason: '队列里没有这一条' } }), '队列里没有这一条');
+assert.equal(conflictNote('drop', { ok: false, status: 0, body: null }), '待裁决没处理成');

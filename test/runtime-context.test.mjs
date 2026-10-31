@@ -132,7 +132,7 @@ const seedRule = (scope, { title, body, summary, conditions = [], learning = { s
   assert.equal(win.experiment.experimentParts, null);
 }
 
-/* R03：普通卡片与实验规则共用 3 条 / 1200 字节预算，先到先得、不截断。 */
+/* R03：普通卡片、实验规则与「记住我」画像共用 3 条 / 1200 字节预算，按段渲染顺序先到先得、不截断。 */
 {
   const dir = mkdir('budget');
   const scope = store.scopeOf(dir);

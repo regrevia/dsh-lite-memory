@@ -102,11 +102,14 @@ export function detectPreferenceSignal(input) {
   return null;
 }
 
-/** 结构化观察校验：维度、取值、极性、依据、证据编号都必须落在闭集里。 */
+/**
+ * 结构化观察校验：维度、取值、极性、依据、来源片段都必须落在闭集里。
+ * 来源只认一个字段 `snippetId`（提示里那段方括号编号），提示、解析、校验、落盘共用这一份定义。
+ */
 export function validateObservation(observation, options = {}) {
   const errors = [];
   if (!observation || typeof observation !== 'object' || Array.isArray(observation)) return { ok: false, errors: ['observation_not_object'] };
-  const allowed = new Set(Array.isArray(options.allowedKeys) ? options.allowedKeys : ['dimension', 'value', 'polarity', 'evidenceIds', 'basis']);
+  const allowed = new Set(Array.isArray(options.allowedKeys) ? options.allowedKeys : ['snippetId', 'dimension', 'value', 'polarity', 'basis']);
   for (const key of Object.keys(observation)) if (!allowed.has(key)) errors.push(`unexpected_field:${key}`);
   const dimension = observation.dimension;
   if (!DIMENSION_NAMES.includes(dimension)) errors.push('unknown_dimension');
@@ -120,10 +123,43 @@ export function validateObservation(observation, options = {}) {
     errors.push('unknown_polarity');
   }
   if (!BASIS_VALUES.includes(observation.basis)) errors.push('unknown_basis');
-  const ids = observation.evidenceIds;
-  if (!Array.isArray(ids) || ids.length === 0) errors.push('missing_evidence');
-  else if (ids.some((id) => typeof id !== 'string' || !id.trim())) errors.push('bad_evidence_id');
+  const cited = observation.snippetId;
+  if (typeof cited !== 'string' || !cited.trim()) errors.push('missing_evidence');
   return { ok: errors.length === 0, errors };
+}
+
+/**
+ * 模型回执解析：提示里只有一种协议，解析就只认这一种，不再另留一套。
+ * 无变化也是一种回执（`{"snippetId":"...","no_change":true}`），不是空对象。
+ * 返回 {ok, kind:'observation'|'no_change'|'invalid', snippetId, observation, errors}。
+ */
+export function parseLearningReply(payload) {
+  const raw = typeof payload === 'string' ? payload : '';
+  const match = raw.match(/\{[\s\S]*\}/u);
+  if (!match) return { ok: false, kind: 'invalid', snippetId: '', observation: null, errors: ['no_json'] };
+  let parsed = null;
+  try {
+    parsed = JSON.parse(match[0]);
+  } catch {
+    return { ok: false, kind: 'invalid', snippetId: '', observation: null, errors: ['bad_json'] };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, kind: 'invalid', snippetId: '', observation: null, errors: ['not_object'] };
+  }
+  const snippetId = typeof parsed.snippetId === 'string' ? parsed.snippetId.trim().slice(0, 80) : '';
+  if (parsed.no_change === true) return { ok: true, kind: 'no_change', snippetId, observation: null, errors: [] };
+  const observation = {
+    snippetId,
+    dimension: typeof parsed.dimension === 'string' ? parsed.dimension.trim() : '',
+    polarity: parsed.polarity === 'oppose' ? 'oppose' : 'support',
+    value: typeof parsed.value === 'string' ? parsed.value.trim() : null,
+    basis: parsed.basis === 'repeat_choice' ? 'repeat_choice' : 'explicit_feedback',
+  };
+  const valid = validateObservation(observation);
+  return {
+    ok: valid.ok, kind: valid.ok ? 'observation' : 'invalid', snippetId,
+    observation: valid.ok ? observation : null, errors: valid.errors,
+  };
 }
 
 /**
@@ -233,6 +269,30 @@ export function summarizeEvidence(rows, dimension) {
     });
   }
   return state;
+}
+
+/**
+ * 一维偏好的整份重算：新增依据、撤回依据、容量裁剪都走这一条，计数永远是证据的函数。
+ * 人工确认过的取值不被推断覆盖，只刷新「关联了多少条依据」这类计数。
+ */
+export function rebuildPreference(preference, rows, options = {}) {
+  const previous = { ...emptyCounts(), ...(preference || {}) };
+  const summary = summarizeEvidence(rows, options.dimension || previous.dimension);
+  const next = {
+    ...previous,
+    ...summary,
+    lockedByUser: previous.lockedByUser,
+    pausedByUser: previous.pausedByUser,
+  };
+  if (previous.lockedByUser === true || previous.source === 'manual') {
+    next.value = previous.value;
+    next.source = 'manual';
+    next.state = previous.pausedByUser === true ? 'paused' : 'formed';
+  } else {
+    next.state = previous.state;
+    next.source = previous.source;
+  }
+  return next;
 }
 
 /**

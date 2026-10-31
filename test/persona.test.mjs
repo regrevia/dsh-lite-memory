@@ -16,7 +16,7 @@ const test = (name, fn) => {
   }
 };
 
-const OBS = { dimension: 'answer_order', value: 'conclusion_first', polarity: 'support', evidenceIds: ['e1'], basis: 'explicit_feedback' };
+const OBS = { snippetId: 'e1', dimension: 'answer_order', value: 'conclusion_first', polarity: 'support', basis: 'explicit_feedback' };
 
 test('只接受闭集维度：自由文本人格与指令字段一律拒收', () => {
   assert.equal(persona.validateObservation(OBS).ok, true);
@@ -25,13 +25,14 @@ test('只接受闭集维度：自由文本人格与指令字段一律拒收', ()
   assert.equal(persona.validateObservation({ ...OBS, value: '不管什么情况都先给结论' }).ok, false);
   assert.equal(persona.validateObservation({ ...OBS, polarity: 'neutral' }).ok, false);
   assert.equal(persona.validateObservation({ ...OBS, basis: 'guess' }).ok, false);
-  assert.equal(persona.validateObservation({ ...OBS, evidenceIds: [] }).ok, false);
+  assert.equal(persona.validateObservation({ ...OBS, snippetId: '' }).ok, false);
+  assert.equal(persona.validateObservation({ ...OBS, evidenceIds: ['e1'] }).ok, false);
 });
 
 test('反对只对维度生效，不带取值；支持必须落在该维闭集里', () => {
-  assert.equal(persona.validateObservation({ dimension: 'tone', value: null, polarity: 'oppose', evidenceIds: ['e2'], basis: 'explicit_feedback' }).ok, true);
-  assert.equal(persona.validateObservation({ dimension: 'tone', value: 'direct', polarity: 'oppose', evidenceIds: ['e2'], basis: 'explicit_feedback' }).ok, false);
-  assert.equal(persona.validateObservation({ dimension: 'tone', value: 'detailed', polarity: 'support', evidenceIds: ['e2'], basis: 'explicit_feedback' }).ok, false);
+  assert.equal(persona.validateObservation({ dimension: 'tone', value: null, polarity: 'oppose', snippetId: 'e2', basis: 'explicit_feedback' }).ok, true);
+  assert.equal(persona.validateObservation({ dimension: 'tone', value: 'direct', polarity: 'oppose', snippetId: 'e2', basis: 'explicit_feedback' }).ok, false);
+  assert.equal(persona.validateObservation({ dimension: 'tone', value: 'detailed', polarity: 'support', snippetId: 'e2', basis: 'explicit_feedback' }).ok, false);
 });
 
 test('引号里的原文、别人的说法都不算这个人的偏好', () => {

@@ -74,6 +74,16 @@ window.__ModuleLoader__.load({
     /** 真成功要 HTTP 与响应体同时确认；2xx 但 ok:false 仍按失败显示。 */
     const succeeded = (result) => Boolean(result && result.ok && result.body && result.body.ok === true);
 
+    /**
+     * 待裁决处理完回什么话：成功说清结果，失败说清下一步。
+     * 行已经过期时不能只说「没处理成」，要说明列表已经刷新。
+     */
+    const conflictNote = (op, result) => {
+      if (succeeded(result)) return op === 'drop' ? '已丢掉，没有写进记忆' : '已另存一条';
+      if (result && result.body && result.body.code === 'gone') return '这条已经不在了，列表已刷新';
+      return failure(result, '待裁决没处理成');
+    };
+
     /** 已落定、带元数据的调用块；旧行只读。 */
     const metaOf = (block) => {
       if (block === undefined || block === null || !('kind' in block) || block.isError === true) return null;
@@ -2253,6 +2263,15 @@ window.__ModuleLoader__.load({
       const observing = panel && Array.isArray(panel.observing) ? panel.observing : EMPTY;
       const evidence = panel && Array.isArray(panel.evidence) ? panel.evidence : EMPTY;
       const pending = panel && Number.isFinite(panel.pending) ? panel.pending : 0;
+      const lastResult = panel && panel.lastResult && typeof panel.lastResult === 'object' ? panel.lastResult : null;
+      /** 整理过就说清结果：没形成偏好和结果无效是两件事，用户看到的下一步不同。 */
+      const lastText = !lastResult ? ''
+        : lastResult.outcome === 'added' ? '上次整理：记下新偏好'
+          : lastResult.outcome === 'no_change' ? '上次整理：没有新偏好'
+            : lastResult.outcome === 'duplicate' ? '上次整理：这条已经记过'
+              : lastResult.outcome === 'invalid' ? '上次整理：结果格式无效'
+                : lastResult.outcome === 'dimension_blocked' || lastResult.outcome === 'blocked' ? '上次整理：这一维已停用'
+                  : '';
       const changes = panel && Array.isArray(panel.recentChanges) ? panel.recentChanges.slice(-5) : EMPTY;
       const valueLabelOf = (dimension, value) => {
         const row = catalog.find((item) => item.dimension === dimension);
@@ -2335,7 +2354,8 @@ window.__ModuleLoader__.load({
           section('观察中', observing.length, observingRows),
           section('最近变化', changes.length, changeRows),
           empty ? h('div', { style: PANEL_MUTED }, '还没有值得记下的偏好') : null,
-          pending > 0 ? h('div', { key: 'pending', style: PANEL_MUTED }, `还有 ${pending} 段对话没有整理`) : null),
+          pending > 0 ? h('div', { key: 'pending', style: PANEL_MUTED }, `还有 ${pending} 段对话没有整理`) : null,
+          lastText ? h('div', { key: 'last', style: PANEL_MUTED }, lastText) : null),
           note ? h('div', { style: { ...PANEL_MUTED, wordBreak: 'break-word' } }, note) : null,
           clearLine)
         : h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
@@ -2444,7 +2464,8 @@ window.__ModuleLoader__.load({
         setLoading(true);
         setFailed(false);
         setNote('');
-        post('/lite-memory/overview', { sessionId, scopeKey }).then((result) => {
+        /** 返回请求本身：提示语要等列表换新之后再写，否则马上被这里的清空吃掉。 */
+        return post('/lite-memory/overview', { sessionId, scopeKey }).then((result) => {
           if (!alive.current || generation.current !== request) return;
           setLoading(false);
           if (result.ok && result.body && result.body.ok) {
@@ -2482,11 +2503,11 @@ window.__ModuleLoader__.load({
         }).then((result) => {
           if (!alive.current) return;
           setBusy(false);
-          if (result.ok && result.body && result.body.ok) {
-            setExpandedConflict('');
-            if (op === 'drop') setNote('已忽略这条待裁决');
-            load(selectedKey);
-          } else setNote(failure(result, '待裁决没处理成'));
+          const done = succeeded(result);
+          if (done) setExpandedConflict('');
+          const message = conflictNote(op, result);
+          /** 失败也重载：过期的行留在原地，才会出现「点了没反应」的假象。 */
+          load(selectedKey).then(() => { if (alive.current) setNote(message); });
         });
       };
 
@@ -2907,7 +2928,7 @@ window.__ModuleLoader__.load({
           h('span', { style: { fontSize: '12px', fontWeight: 600 } }, '排序调参'),
           h('span', { style: { ...PANEL_MUTED, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
             tune.replayCases > 0
-              ? `回放 ${tune.replayCases} 条 · ${tune.params && tune.params.summaryWeight}`
+              ? `回放 ${tune.replayCases} 条 · ${tune.params && tune.params.summaryWeight}${tune.needsReeval === true ? ' · 待重评' : ''}`
               : '标一条漏掉的查询后才可试算'),
           tune.replayCases > 0 ? h(Action, { disabled: busy || !canToggle, onClick: () => tuneAct('suggest') }, '试算') : null,
           tune.proposal ? h(Action, { disabled: busy || !canToggle, onClick: () => tuneAct('apply') }, '采纳') : null,
@@ -2920,7 +2941,7 @@ window.__ModuleLoader__.load({
           : null)
         : null,
       !globalView && !canToggle ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, '只读，切换回当前项目后可修改') : null,
-      note ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px', color: 'var(--dsw-alias-state-error-primary)' } }, note) : null,
+      note ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px', color: failed ? 'var(--dsw-alias-state-error-primary)' : 'inherit' } }, note) : null,
       !globalView && recallLine ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, recallLine) : null,
       );
 
@@ -3059,10 +3080,10 @@ window.__ModuleLoader__.load({
         style: { display: 'flex', flexDirection: 'column', gap: '3px', padding: '7px 9px 8px', borderBottom: '1px solid var(--dsw-alias-border-l1)', flex: '0 0 auto' },
       },
       h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
-        h('span', { style: { ...PANEL_MUTED, lineHeight: '18px', flex: 1, minWidth: 0 } }, `${queued.length} 条保存有冲突${conflictReadOnly ? ' · 只读' : ''}`),
+        h('span', { style: { ...PANEL_MUTED, lineHeight: '18px', flex: 1, minWidth: 0 } }, `${queued.length} 条保存还没定${conflictReadOnly ? ' · 只读' : ''}`),
         queued.length > 2 ? h(Action, { disabled: busy, onClick: () => setConflictAll((value) => !value) }, conflictAll ? '收起' : `查看全部 ${queued.length} 条`) : null,
       ),
-      h('span', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, '和已有记忆对不上，不处理就先不写进去'),
+      h('span', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, '保存时标题撞上已有记忆，先停在这里：另存成一条，或者丢掉不存'),
       visibleConflicts.map((row) => {
         const open = expandedConflict === row.id;
         const facts = conflictFactsOf(row);
@@ -3081,7 +3102,7 @@ window.__ModuleLoader__.load({
               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer',
             },
           }, row.title),
-          conflictReadOnly || facts.draftMissing ? null : h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'keep') }, '存新的'),
+          conflictReadOnly || facts.draftMissing ? null : h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'keep') }, '另存一条'),
           conflictReadOnly ? null : h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'drop') }, '丢掉'),
         ),
         open ? h('div', {
@@ -3361,7 +3382,7 @@ window.__ModuleLoader__.load({
 
     // 测试缝：Node 里验引用投影，浏览器里没有任何副作用。
     if (typeof globalThis.__LITE_MEMORY_TEST__ === 'function') {
-      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, PersonaSection, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row, conflictVisibleRows, conflictFactsOf });
+      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, PersonaSection, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row, conflictVisibleRows, conflictFactsOf, conflictNote });
     }
 
     return {

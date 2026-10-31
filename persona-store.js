@@ -16,6 +16,9 @@ export const MAX_PENDING = 32;
 export const MAX_CHANGES = 20;
 export const MAX_FORMED_DIMENSIONS = 8;
 export const PENDING_MIN = 6;
+/** 一次真的给模型看几段：结算只认这份名单，控制在 token 预算内。 */
+export const SHOWN_MAX = 12;
+export const SHOWN_PROMPT = 6;
 export const PASS_GAP_HOURS = 24;
 /** 待查片段只在这段时间内有效：太久没人管的旧片段不该继续占着队列。 */
 export const PENDING_TTL_DAYS = 14;
@@ -45,7 +48,7 @@ export function emptyPersona() {
     /** 只随「用户能看到的选择」轮换：开关、人工改/暂停、清空。攒队列、写证据都不动它。 */
     preferenceEpoch: token(),
     evidenceGeneration: token(),
-    learning: { lastPassAt: '', attempts: [] },
+    learning: { lastPassAt: '', attempts: [], lastResult: null },
     preferences: {},
     evidence: [],
     pending: [],
@@ -56,6 +59,27 @@ export function emptyPersona() {
 
 function text(value, max) {
   return typeof value === 'string' ? value.slice(0, max) : '';
+}
+
+/** 最近一次整理的结果是闭集枚举，面板据此说人话，不展示模型原文。 */
+const RESULT_OUTCOMES = ['added', 'no_change', 'duplicate', 'invalid', 'no_observation', 'blocked', 'off', 'stale'];
+
+/** 取值票只保留本维闭集里的键，最多 8 个取值，票上的日期/情境同样有上限。 */
+function normalizeTallies(raw, dimension) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  const allowed = persona.PREFERENCE_DIMENSIONS[dimension] || [];
+  for (const value of allowed.slice(0, 8)) {
+    const row = raw[value];
+    if (!row || typeof row !== 'object' || Array.isArray(row)) continue;
+    out[value] = {
+      support: Math.max(0, Number(row.support) | 0),
+      dayKeys: (Array.isArray(row.dayKeys) ? row.dayKeys : []).slice(-64).map((day) => text(day, 12)),
+      contextKeys: (Array.isArray(row.contextKeys) ? row.contextKeys : []).slice(-16).map((key) => text(key, 80)),
+      firstSeenAt: text(row.firstSeenAt, 40), lastSupportedAt: text(row.lastSupportedAt, 40),
+    };
+  }
+  return out;
 }
 
 /** 读盘后整份收敛到闭集与上限，坏字段丢掉而不是信任。 */
@@ -76,6 +100,12 @@ export function normalizePersona(raw) {
   out.evidenceGeneration = text(raw.evidenceGeneration, 40) || base.evidenceGeneration;
   if (raw.learning && typeof raw.learning === 'object') {
     out.learning.lastPassAt = text(raw.learning.lastPassAt, 40);
+    const last = raw.learning.lastResult;
+    if (last && typeof last === 'object' && RESULT_OUTCOMES.includes(last.outcome)) {
+      out.learning.lastResult = {
+        outcome: last.outcome, dimension: text(last.dimension, 40), reason: text(last.reason, 40), at: text(last.at, 40),
+      };
+    }
     out.learning.attempts = (Array.isArray(raw.learning.attempts) ? raw.learning.attempts : [])
       .filter((item) => item && typeof item.eventId === 'string')
       .slice(-MAX_ATTEMPTS)
@@ -84,6 +114,8 @@ export function normalizePersona(raw) {
         consentEpoch: text(item.consentEpoch, 40), revision: Number.isInteger(item.revision) ? item.revision : 1,
         preferenceEpoch: text(item.preferenceEpoch, 40),
         evidenceGeneration: text(item.evidenceGeneration, 40), snippetIds: (Array.isArray(item.snippetIds) ? item.snippetIds : []).slice(0, PENDING_MIN * 2).map((id) => text(id, 60)),
+        /** 本次真正展示给模型的片段：结算只认这份名单，新入队的片段不会被老批次消费。 */
+        shownIds: (Array.isArray(item.shownIds) ? item.shownIds : []).slice(0, SHOWN_MAX).map((id) => text(id, 60)),
         observation: item.observation && typeof item.observation === 'object' ? item.observation : null,
       }));
   }
@@ -108,6 +140,8 @@ export function normalizePersona(raw) {
         lockedByUser: row.lockedByUser === true, pausedByUser: row.pausedByUser === true,
         dayKeys: (Array.isArray(row.dayKeys) ? row.dayKeys : []).slice(-64).map((day) => text(day, 12)),
         contextKeys: (Array.isArray(row.contextKeys) ? row.contextKeys : []).slice(-16).map((key) => text(key, 80)),
+        /** 每个取值各记一份票：跨批次累计必须落盘，否则每次读回都从头攒。 */
+        valueTallies: normalizeTallies(row.valueTallies, dimension),
       };
     }
   }
@@ -193,7 +227,7 @@ function fitPersona(data) {
   if (!Array.isArray(data.learning.attempts)) data.learning.attempts = [];
   if (Buffer.byteLength(JSON.stringify(data)) <= MAX_FILE_BYTES) return data;
   const steps = [];
-  if (data.evidence.length > PRESSURE.evidence) steps.push(() => { data.evidence = data.evidence.slice(-PRESSURE.evidence); });
+  if (data.evidence.length > PRESSURE.evidence) steps.push(() => { trimEvidence(data, PRESSURE.evidence); });
   if (data.pending.length > PRESSURE.pending) steps.push(() => { data.pending = data.pending.slice(-PRESSURE.pending); });
   if (data.learning.attempts.length > PRESSURE.attempts) steps.push(() => { data.learning.attempts = data.learning.attempts.slice(-PRESSURE.attempts); });
   if (data.recentChanges.length > PRESSURE.changes) steps.push(() => { data.recentChanges = data.recentChanges.slice(-PRESSURE.changes); });
@@ -201,7 +235,7 @@ function fitPersona(data) {
     step();
     if (Buffer.byteLength(JSON.stringify(data)) <= MAX_FILE_BYTES) return data;
   }
-  if (data.evidence.length > 1) { data.evidence = data.evidence.slice(-1); }
+  if (data.evidence.length > 1) { trimEvidence(data, 1); }
   if (data.pending.length > 1) { data.pending = data.pending.slice(-1); }
   return Buffer.byteLength(JSON.stringify(data)) <= MAX_FILE_BYTES ? data : null;
 }
@@ -278,6 +312,22 @@ export function queuePersonaPending(input = {}) {
 }
 
 /**
+ * 项目关掉记忆后，它还没整理完的片段一并撤掉：用户级画像可以跨项目汇总，
+ * 但不该在别的项目里替一个已经关掉的来源继续学习。
+ */
+export function dropPersonaPendingForProject(input = {}) {
+  const projectId = text(input.projectId, 120);
+  if (!projectId) return { ok: false, reason: 'missing_project', dropped: 0 };
+  const read = readPersona({ userId: input.userId });
+  const data = read.persona;
+  const before = data.pending.length;
+  data.pending = data.pending.filter((row) => row && row.projectId !== projectId);
+  if (data.pending.length === before) return { ok: true, changed: false, dropped: 0, persona: data };
+  const written = writePersona(data, { userId: input.userId, revision: data.revision });
+  return { ok: written.ok, changed: true, dropped: before - data.pending.length, persona: written.persona };
+}
+
+/**
  * 开始一次抽取：≥6 条待查、距上次 ≥24h、开关仍开、有预算才允许。
  * 返回的代次/版本/证据代次必须在提交时原样带回，否则结果丢弃。
  */
@@ -291,11 +341,14 @@ export function beginPersonaAttempt(input = {}) {
   if (data.pending.length < PENDING_MIN) return { ok: false, reason: 'not_enough', pending: data.pending.length };
   const last = data.learning.lastPassAt ? new Date(data.learning.lastPassAt).getTime() : 0;
   if (last && new Date(at).getTime() - last < PASS_GAP_HOURS * 3600000) return { ok: false, reason: 'budget' };
+  /** 真给模型看的名单在开工时定死：结算只认它，期间新入队的片段不会被这次消费掉。 */
+  const shownIds = data.pending.slice(-SHOWN_PROMPT).map((row) => row.id);
   const attempt = {
     attemptId: token(), eventId: token(), at,
     consentEpoch: data.control.consentEpoch, revision: data.revision, preferenceEpoch: data.preferenceEpoch,
     evidenceGeneration: data.evidenceGeneration,
-    snippetIds: data.pending.slice(-PENDING_MIN * 2).map((row) => row.id),
+    snippetIds: shownIds,
+    shownIds,
     observation: null,
   };
   data.learning.lastPassAt = at;
@@ -307,10 +360,53 @@ export function beginPersonaAttempt(input = {}) {
     attempt: {
       attemptId: attempt.attemptId, eventId: attempt.eventId,
       consentEpoch: attempt.consentEpoch, revision: written.persona.revision, preferenceEpoch: attempt.preferenceEpoch,
-      evidenceGeneration: attempt.evidenceGeneration, snippetIds: attempt.snippetIds,
+      evidenceGeneration: attempt.evidenceGeneration, snippetIds: attempt.snippetIds, shownIds: attempt.shownIds,
       snippets: data.pending.filter((row) => attempt.snippetIds.includes(row.id)),
     },
   };
+}
+
+/** 证据集合变了，各维度的计数与状态都从证据整份重算；人工确认的取值保留，只刷新关联条数。 */
+function resettleFromEvidence(data) {
+  const evidence = Array.isArray(data.evidence) ? data.evidence : [];
+  const lastFormationAt = lastFormation(data);
+  for (const dimension of Object.keys(data.preferences || {})) {
+    const rows = evidence.filter((row) => row && row.dimension === dimension);
+    const next = persona.rebuildPreference(data.preferences[dimension], rows, { dimension });
+    if (next.lockedByUser === true || next.source === 'manual') {
+      data.preferences[dimension] = next;
+      continue;
+    }
+    const verdict = persona.decideMaturity(next, { now: nowIso(), lastFormationAt });
+    data.preferences[dimension] = { ...next, state: verdict.state };
+  }
+}
+
+/** 证据裁到上限：条数一变，计数/状态跟着重算，同时让正在跑的结果失效。 */
+function trimEvidence(data, limit) {
+  if (!Array.isArray(data.evidence) || data.evidence.length <= limit) return false;
+  data.evidence = data.evidence.slice(-limit);
+  data.evidenceGeneration = token();
+  resettleFromEvidence(data);
+  return true;
+}
+
+/** 最近一次整理的结果留痕：面板据此说「已整理 / 格式无效 / 依据已撤回」，不展示模型原文。 */
+function recordResult(data, input = {}) {
+  if (!data.learning || typeof data.learning !== 'object') data.learning = { lastPassAt: '', attempts: [], lastResult: null };
+  data.learning.lastResult = {
+    outcome: RESULT_OUTCOMES.includes(input.outcome) ? input.outcome : 'stale',
+    dimension: text(input.dimension, 40), reason: text(input.reason, 40), at: nowIso(input.at),
+  };
+}
+
+/** 模型回执不能解析时也留痕：面板要说「结果格式无效」，而不是永远停在上一轮。 */
+export function recordPersonaOutcome(input = {}) {
+  const read = readPersona({ userId: input.userId });
+  const data = read.persona;
+  recordResult(data, input);
+  const written = writePersona(data, { userId: input.userId, revision: data.revision });
+  return { ok: written.ok, lastResult: data.learning.lastResult };
 }
 
 /**
@@ -331,19 +427,21 @@ export function commitPersonaObservation(input = {}) {
   if (data.evidenceGeneration !== attempt.evidenceGeneration) return { ok: false, reason: 'evidence_changed' };
   /** 只认用户改过的选择；期间只是又攒了几条片段，不该把已经跑完的结果作废。 */
   if ((attempt.preferenceEpoch || '') && data.preferenceEpoch !== attempt.preferenceEpoch) return { ok: false, reason: 'revision_changed' };
-  /** 模型点名的是哪一段：只认本次带出去的编号，编出来的编号整条作废。 */
+  /** 模型点名的是哪一段：只认本次真展示过的编号，编出来的编号整条作废。 */
   const citedId = text(input.snippetId || (observations[0] && observations[0].snippetId) || '', 80);
-  const pool = (data.pending || []).filter((row) => (attempt.snippetIds || []).includes(row.id));
+  const shown = (data.pending || []).filter((row) => (attempt.shownIds || []).includes(row.id));
+  const pool = shown.length ? shown : (data.pending || []).filter((row) => (attempt.snippetIds || []).includes(row.id));
   if (citedId && !pool.some((row) => row.id === citedId)) return { ok: false, reason: 'citation_invalid' };
-  /** 这次用到的片段：点名了就只算那一段，没点名（旧通道 / 只看整体）整批算处理过。 */
-  const consumed = citedId ? [citedId] : (attempt.snippetIds || []);
+  /** 已展示的整批都算核验过：有偏好、没偏好、同一条重复，这批都不会明天再被抽到同一次。 */
+  const consumed = pool.map((row) => row.id);
   const outcome = input.outcome === 'no_change' ? 'no_change' : '';
   if (outcome === 'no_change') {
-    /** 有效但没发现偏好：这批看过就算处理完，明天不再重复抽样。 */
+    /** 有效但没发现偏好：这批看过就算处理完，明天不再重复抽样；新入队的片段不在名单里。 */
     data.pending = (data.pending || []).filter((row) => !consumed.includes(row.id));
+    recordResult(data, { outcome: 'no_change', reason: citedId ? 'cited' : 'batch', at: input.now });
     finalizeAttempt(data, attempt, null);
     const written = writePersona(data, { userId: input.userId, revision: data.revision });
-    return { ok: written.ok, reason: 'no_change', persona: written.persona };
+    return { ok: written.ok, reason: 'no_change', persona: written.persona, consumed: consumed.length };
   }
   const accepted = [];
   for (const observation of observations) {
@@ -365,20 +463,22 @@ export function commitPersonaObservation(input = {}) {
   if (deduped.length === data.evidence.length) {
     /** 去重后没有新增：这次反馈只算同一份证据，不改计数，也不消耗下一次预算。 */
     data.pending = (data.pending || []).filter((row) => !consumed.includes(row.id));
+    recordResult(data, { outcome: 'duplicate', dimension: accepted[0].dimension, reason: 'same_evidence', at: input.now });
     finalizeAttempt(data, attempt, null);
     const written = writePersona(data, { userId: input.userId, revision: data.revision });
     return { ok: written.ok, reason: 'duplicate', persona: written.persona };
   }
-  data.evidence = deduped.slice(-MAX_EVIDENCE);
+  data.evidence = deduped;
   data.evidenceGeneration = token();
   const dimension = accepted[0].dimension;
   const blocked = data.blockedDimensions.includes(dimension)
     || (data.preferences[dimension] && data.preferences[dimension].pausedByUser);
   if (blocked) {
     data.pending = (data.pending || []).filter((row) => !consumed.includes(row.id));
+    recordResult(data, { outcome: 'blocked', dimension, reason: 'dimension_blocked', at: input.now });
     finalizeAttempt(data, attempt, accepted[0]);
-    writePersona(data, { userId: input.userId, revision: data.revision });
-    return { ok: false, reason: 'dimension_blocked' };
+    const written = writePersona(data, { userId: input.userId, revision: data.revision });
+    return { ok: written.ok, reason: 'dimension_blocked', persona: written.persona };
   }
   const previous = data.preferences[dimension] || null;
   const updated = persona.updateEvidence(previous, accepted[0], evidenceRow, {
@@ -386,12 +486,7 @@ export function commitPersonaObservation(input = {}) {
     days: previous && previous.dayKeys,
     contexts: previous && previous.contextKeys,
   });
-  const lastFormationAt = (data.recentChanges || [])
-    .filter((row) => row.kind === 'formed' || row.kind === 'changed')
-    .map((row) => row.at)
-    .sort()
-    .pop();
-  const verdict = persona.decideMaturity(updated, { now: nowIso(input.now), lastFormationAt });
+  const verdict = persona.decideMaturity(updated, { now: nowIso(input.now), lastFormationAt: lastFormation(data) });
   data.preferences[dimension] = { ...updated, state: verdict.state };
   if (verdict.state === 'formed' && (!previous || previous.state !== 'formed')) {
     data.recentChanges = pushChange(data.recentChanges, {
@@ -399,9 +494,26 @@ export function commitPersonaObservation(input = {}) {
     });
   }
   data.pending = (data.pending || []).filter((row) => !consumed.includes(row.id));
+  /** 证据到上限后自动裁到 200 条：裁掉的如果是别维的依据，那些维度的计数也要跟着重算。 */
+  if (trimEvidence(data, MAX_EVIDENCE)) {
+    data.preferences[dimension] = {
+      ...data.preferences[dimension],
+      state: persona.decideMaturity(data.preferences[dimension], { now: nowIso(input.now), lastFormationAt: lastFormation(data) }).state,
+    };
+  }
+  recordResult(data, { outcome: 'added', dimension, reason: verdict.state, at: input.now });
   finalizeAttempt(data, attempt, accepted[0]);
   const written = writePersona(data, { userId: input.userId, revision: data.revision });
-  return { ok: written.ok, reason: written.ok ? 'committed' : written.reason, persona: written.persona, verdict, dimension };
+  return { ok: written.ok, reason: written.ok ? 'committed' : written.reason, persona: written.persona, verdict, dimension, consumed: consumed.length };
+}
+
+/** 最近一次「形成 / 改变」的时间：形成速率限制用它，不用别的维度凑。 */
+function lastFormation(data) {
+  return (data.recentChanges || [])
+    .filter((row) => row.kind === 'formed' || row.kind === 'changed')
+    .map((row) => row.at)
+    .sort()
+    .pop();
 }
 
 function finalizeAttempt(data, attempt, observation) {
@@ -455,25 +567,15 @@ export function rejectPersonaPreference(input = {}) {
 function recountDimension(data, dimension) {
   const preference = data.preferences[dimension];
   if (!preference) return;
-  const summary = persona.summarizeEvidence(data.evidence, dimension);
   const previousState = preference.state;
-  preference.value = summary.value || null;
-  preference.valueTallies = summary.valueTallies;
-  preference.support = summary.support;
-  preference.opposition = summary.opposition;
-  preference.distinctDays = summary.distinctDays;
-  preference.contexts = summary.contexts;
-  preference.dayKeys = summary.dayKeys;
-  preference.contextKeys = summary.contextKeys;
-  preference.firstSeenAt = summary.firstSeenAt;
-  preference.lastSupportedAt = summary.lastSupportedAt;
-  /** 手动定的偏好锁着不动；推断出来的偏好按剩下的证据整体重判门槛。 */
-  if (preference.lockedByUser === true || preference.source === 'manual') return;
-  const lastFormationAt = (data.recentChanges || [])
-    .filter((row) => row.kind === 'formed' || row.kind === 'changed')
-    .map((row) => row.at).sort().pop();
-  const verdict = persona.decideMaturity(preference, { now: nowIso(), lastFormationAt });
-  preference.state = verdict.state;
+  const rows = (data.evidence || []).filter((row) => row && row.dimension === dimension);
+  /** 人工确认的取值不被推断覆盖：只把关联依据数刷新，状态与来源保持用户的选择。 */
+  const next = persona.rebuildPreference(preference, rows, { dimension });
+  data.preferences[dimension] = next;
+  if (next.lockedByUser === true || next.source === 'manual') return;
+  const lastFormationAt = lastFormation(data);
+  const verdict = persona.decideMaturity(next, { now: nowIso(), lastFormationAt });
+  next.state = verdict.state;
   if (verdict.state !== 'formed' && previousState === 'formed') {
     data.recentChanges.push({ dimension, at: nowIso(), kind: 'cleared', automatic: false, used: false, reason: 'evidence_removed' });
   }
@@ -498,7 +600,9 @@ export function retractPersonaEvidence(input = {}) {
   }
   if (data.evidence.length + data.pending.length === before) return { ok: false, reason: 'not_found' };
   for (const dimension of touched) recountDimension(data, dimension);
+  trimEvidence(data, MAX_EVIDENCE);
   data.evidenceGeneration = token();
+  recordResult(data, { outcome: 'stale', reason: 'evidence_removed', at: input.now });
   const written = writePersona(data, { userId: input.userId, revision: data.revision });
   return { ok: written.ok, persona: written.persona };
 }
@@ -512,7 +616,7 @@ export function clearPersona(input = {}) {
   data.pending = [];
   data.recentChanges = [];
   data.blockedDimensions = [];
-  data.learning = { lastPassAt: '', attempts: [] };
+  data.learning = { lastPassAt: '', attempts: [], lastResult: null };
   data.evidenceGeneration = token();
   data.preferenceEpoch = token();
   data.control.consentEpoch = token();
@@ -548,5 +652,7 @@ export function describePersona(input = {}) {
     /** 队列长度只给数字：面板用它说明「为什么还没形成」，不暴露片段内容。 */
     pending: Array.isArray(data.pending) ? data.pending.length : 0,
     formed, observing, evidence, recentChanges: data.recentChanges.slice(-5), revision: data.revision,
+    /** 最近一次整理的结果：面板说「已整理，无新偏好 / 结果格式无效」靠它。 */
+    lastResult: data.learning.lastResult || null,
   };
 }

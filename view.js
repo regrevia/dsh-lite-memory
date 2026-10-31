@@ -529,6 +529,11 @@ export function matchScore(record, query, corpus = null, params = {}) {
 }
 
 export const MATCH_FLOOR = 2.4;
+/**
+ * 同一槽位（同 topicKey 的换代条目）里只有最强的一条该占前面：其余降权但不丢弃，
+ * 名额够时仍能召回。没有这一步，同一件事的几个版本会一起挤掉不相干的另一条规则。
+ */
+export const DUPLICATE_PENALTY = 1.2;
 
 /**
  * 按需召回排序：只有真命中才进候选，不凑数；同分按最近使用、再按 id。
@@ -576,6 +581,21 @@ export function rank(records, query, options = {}) {
       return false;
     });
     rows.push({ record, score: matched.score + (sameTask ? sameTaskBonus : 0), hints: matched.hints, status, sameTask, raw: matched.score });
+  }
+  /** 同槽位只留最强的一条在前面；并列时按 id 定谁算最强，结果不随输入顺序漂。 */
+  const slotBest = new Map();
+  for (const row of rows) {
+    const slot = topicSlot(row.record);
+    const best = slotBest.get(slot);
+    if (!best
+      || row.raw > best.raw
+      || (row.raw === best.raw && String(row.record.id).localeCompare(String(best.record.id)) < 0)) slotBest.set(slot, row);
+  }
+  for (const row of rows) {
+    if (slotBest.get(topicSlot(row.record)) === row) continue;
+    row.duplicateOf = String(slotBest.get(topicSlot(row.record)).record.id);
+    row.raw -= DUPLICATE_PENALTY;
+    row.score -= DUPLICATE_PENALTY;
   }
   /**
    * 多路召回后融合：同一条记忆在被越多条独立路径命中，越该排在前面。
@@ -665,6 +685,59 @@ export function cardOf(record, scope) {
 
 export function linksOf(record) {
   return Array.isArray(record && record.links) ? record.links : [];
+}
+
+/** 卡片行格式只有一份：自动注入、面板回放、实验回放都按这一行算字节。 */
+export function renderCard(card) {
+  const tag = card.scope === 'global' ? '[global]' : card.scopeName ? `[${card.scopeName}]` : '';
+  const parts = [`- ${tag ? `${tag} ` : ''}「${card.title}」`];
+  if (card.summary) parts.push(`｜${card.summary}`);
+  if (card.conditions && card.conditions.length) parts.push(`｜前提：${card.conditions.join('、')}`);
+  if (card.selection) parts.push(`｜只适用于 ${card.selection}`);
+  if (card.related) parts.push(`｜关联 ${card.related} 条`);
+  return parts.join('');
+}
+
+/**
+ * 召回排序的唯一入口：生产召回和自进化回放用同一份参数、同一道适用性门槛，
+ * 回放出的名次与字节才代表线上行为；两边各写一份迟早对不上。
+ */
+export function recallRank(records, query, options = {}) {
+  return rank(records, query, {
+    limit: Number.isInteger(options.limit) ? options.limit : 8,
+    requireApplicable: options.requireApplicable !== false,
+    context: options.context || {},
+    runtime: options.runtime || null,
+    task: options.task || null,
+    ...(options.params ? { params: options.params } : {}),
+    ...(Number.isFinite(options.now) ? { now: options.now } : {}),
+  });
+}
+
+/** 按最终渲染文本逐张装卡：装不下就留到下一轮，不截半张、不为了凑满而缩句。 */
+export function recallCards(rows, options = {}) {
+  const max = Number.isInteger(options.max) ? options.max : CARD.max;
+  const bytes = Number.isInteger(options.bytes) ? options.bytes : CARD.bytes;
+  const scopeOfCard = typeof options.scopeOf === 'function' ? options.scopeOf : () => '';
+  const cards = [];
+  const omitted = [];
+  let used = Buffer.byteLength(options.header || '');
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!row || !row.record) continue;
+    if (cards.length >= max) {
+      omitted.push(row.record.id);
+      continue;
+    }
+    const card = cardOf(row.record, scopeOfCard(row.record));
+    const cost = Buffer.byteLength(`\n${renderCard(card)}`);
+    if (used + cost > bytes) {
+      omitted.push(row.record.id);
+      continue;
+    }
+    used += cost;
+    cards.push(card);
+  }
+  return { cards, omitted, bytes: used };
 }
 
 export function bytesOf(value) {

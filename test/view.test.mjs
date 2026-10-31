@@ -368,5 +368,22 @@ test('融合倒数排名：被第二条独立路径命中的条目反超只靠�
   assert.ok(ids.indexOf(linked.id) < ids.indexOf(plain.id));
 });
 
+test('同一话题的换代条目只留最强一条在前面，不挤掉别的话题', () => {
+  const base = { tags: [], triggers: [], when: '', applicability: 'conditional', selection: null, conditions: [], scope: 'project', lastUsed: '2026-01-01T00:00:00.000Z' };
+  const first = { ...base, id: 'mem_000000000061', title: '发布前先跑 lint', summary: '发布检查前先跑 lint 再打包', topicKey: 'publish-check' };
+  const second = { ...base, id: 'mem_000000000062', title: '发布检查顺序', summary: '发布检查先打包再跑 lint 也可以', topicKey: 'publish-check' };
+  const other = { ...base, id: 'mem_000000000063', title: '发布窗口', summary: '发布窗口定在周日晚上，发布检查走清单', topicKey: 'publish-window' };
+  const rows = view.rank([first, second, other], '发布检查', { limit: 3 });
+  const duplicate = rows.find((row) => row.duplicateOf);
+  assert.ok(duplicate, '同一槽位里非最强的那条被标成换代副本');
+  const leader = rows.find((row) => row.record.id === duplicate.duplicateOf);
+  assert.ok(leader, '副本要指回同一槽位的最强条目');
+  assert.equal(duplicate.record.topicKey, leader.record.topicKey);
+  assert.ok(rows.indexOf(leader) < rows.indexOf(duplicate), '最强的那条排在副本前面');
+  assert.ok(duplicate.raw < leader.raw, '副本降权，不是直接丢弃');
+  assert.ok(duplicate.raw > 0);
+  assert.ok(rows.some((row) => row.record.id === other.id), '不相干的另一个话题仍在结果里');
+});
+
 for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
 console.log(`view.test.mjs: ${passed} passed`);
