@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 let seen = null;
 let plugin = null;
@@ -28,7 +29,7 @@ assert.equal(panel.name, 'shell.overlay');
 assert.equal(panel.order, 30);
 
 const EMPTY_CHILDREN = [];
-const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, conflictVisibleRows, conflictFactsOf, conflictNote } = seen;
+const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, conflictVisibleRows, conflictFactsOf, conflictNote } = seen;
 
 // 图谱只按真实数据画：共享标签成枢纽，显式关联成边，位置由 id 决定。
 const graph = graphOf([
@@ -229,6 +230,42 @@ assert.equal(JSON.stringify(nodeTypes(firstPaint)).includes('MemoryGraph'), fals
 assert.equal(nodeTypes(firstPaint).includes(MemoryPalace), false);
 assert.equal(JSON.stringify(nodeTypes(firstPaint)).includes('MemoryPalace'), false);
 
+// 按需挂载：只有当前模式才创建组件，关掉的图谱/宫殿不进树、实例数为 0。
+const paneProbe = () => {
+  const built = { graph: 0, palace: 0, list: 0 };
+  const build = {
+    graph: () => { built.graph += 1; return makeNode(MemoryGraph, {}); },
+    palace: () => { built.palace += 1; return makeNode(MemoryPalace, { key: 'mem_a' }); },
+    list: () => { built.list += 1; return makeNode('div', { 'data-pane': 'list' }); },
+  };
+  return { built, build };
+};
+let probe = paneProbe();
+const listOnly = viewPaneOf(viewModeOf({ graph: false, palace: false }, 'graph'), probe.build);
+assert.equal(probe.built.graph, 0, '列表模式不该创建图谱元素');
+assert.equal(probe.built.palace, 0, '列表模式不该创建宫殿元素');
+assert.equal(probe.built.list, 1);
+assert.equal(nodeTypes(listOnly).includes(MemoryGraph), false);
+assert.equal(nodeTypes(listOnly).includes(MemoryPalace), false);
+probe = paneProbe();
+const graphOnly = viewPaneOf(viewModeOf({ graph: true, palace: false }, 'graph'), probe.build);
+assert.equal(probe.built.graph, 1);
+assert.equal(probe.built.palace, 0, '图谱模式不该创建宫殿元素');
+assert.equal(nodeTypes(graphOnly).filter((type) => type === MemoryGraph).length, 1);
+assert.equal(nodeTypes(graphOnly).includes(MemoryPalace), false);
+probe = paneProbe();
+const palaceOnly = viewPaneOf(viewModeOf({ graph: false, palace: true }, 'palace'), probe.build);
+assert.equal(probe.built.graph, 0, '宫殿模式不该创建图谱元素');
+assert.equal(probe.built.palace, 1);
+assert.equal(nodeTypes(palaceOnly).filter((type) => type === MemoryPalace).length, 1);
+assert.equal(nodeTypes(palaceOnly).includes(MemoryGraph), false);
+assert.equal(palaceOnly.props.key, 'mem_a', '宫殿 key 仍按选中记忆区分，只在宫殿模式下渲染');
+// 自进化侧共用同一条选择：列表/体检不建图谱。
+probe = paneProbe();
+const evolutionListOnly = viewPaneOf('list', probe.build);
+assert.equal(probe.built.graph, 0);
+assert.equal(probe.built.list, 1);
+
 
 // 记忆宫殿：固定四间，空房保留位置，未知类型有归处。
 const palaceRecord = (id, kind, title = id) => ({ id, kind, title });
@@ -270,7 +307,7 @@ assert.equal(palaceMotionOf(false).duration, 180);
 // 展品点开只把 id 交给现有详情入口，不另造详情。
 let palacePicked = '';
 const palaceTree = MemoryPalace({
-  records: [palaceRecord('mem_a', 'preference', 'A')],
+  records: [palaceRecord('mem_a', 'preference', 'A')], openedRoom: 'habits',
   selectedId: '', onPick: (id) => { palacePicked = id; }, emptyText: '这个项目还没有记忆',
 });
 const expandNodes = (node, out = []) => {
@@ -286,6 +323,65 @@ palaceExhibit.props.onClick();
 assert.equal(palacePicked, 'mem_a');
 const palaceEmpty = MemoryPalace({ records: [], selectedId: '', onPick: () => {}, emptyText: '这个项目还没有记忆' });
 assert.equal(expandNodes(palaceEmpty).some((node) => node.children.includes('这个项目还没有记忆')), true);
+
+// 宫殿模式下选中记忆仍走同一条详情入口：点展品把 id 交出去，不另造详情。
+let palaceModePicked = '';
+const palaceModePane = viewPaneOf('palace', {
+  graph: () => makeNode(MemoryGraph, {}),
+  palace: () => makeNode(MemoryPalace, {
+    key: 'mem_a', records: [palaceRecord('mem_a', 'preference', 'A')], openedRoom: 'habits', selectedId: '',
+    onPick: (id) => { palaceModePicked = id; }, emptyText: '这个项目还没有记忆',
+  }),
+  list: () => makeNode('div', null),
+});
+assert.equal(palaceModePane.props.key, 'mem_a');
+const palaceModeExhibit = expandNodes(palaceModePane).find((node) => node.type === 'button' && node.props.title === 'A');
+assert.ok(palaceModeExhibit, '宫殿模式应能点开展品');
+palaceModeExhibit.props.onClick();
+assert.equal(palaceModePicked, 'mem_a');
+
+// 第一视角：走廊只铺门，门位是房间的稳定量，不随条目数漂移；两次进门、换个内容都落在同一格。
+const corridorFull = palaceCorridorOf(palaceMany);
+const corridorSparse = palaceCorridorOf([palaceRecord('mem_z', 'note', 'Z')]);
+assert.equal(corridorFull.length, 4);
+assert.deepEqual(corridorSparse.map((door) => door.id), corridorFull.map((door) => door.id));
+assert.deepEqual(corridorSparse.map((door) => door.slot), corridorFull.map((door) => door.slot), '门位不随条目数变化');
+assert.deepEqual(palaceCorridorOf(palaceMany).map((door) => door.slot), corridorFull.map((door) => door.slot), '再进一次还是同一扇门');
+assert.equal(new Set(corridorFull.map((door) => door.slot)).size, 4, '四扇门各占一个固定槽位');
+assert.equal(palaceDoorSlotOf('habits'), palaceDoorSlotOf('habits'));
+assert.ok(corridorFull.every((door) => door.slot >= 0 && door.slot < PALACE_DOOR_LANES));
+assert.equal(palacePageAtOf({}, 'habits'), 1);
+assert.equal(palacePageAtOf({ habits: 4 }, 'habits'), 4);
+assert.deepEqual(palacePageWithOf({}, 'habits', 3), { habits: 3 }, '每间房各记各的页');
+
+// 走廊层只画门：壁龛要走进房间才有，没小人。
+const collectPalace = (node, out = []) => {
+  if (!node || typeof node !== 'object') return out;
+  out.push(node);
+  for (const child of node.children || []) collectPalace(child, out);
+  return out;
+};
+const corridorTree = collectPalace(MemoryPalace({ records: palaceMany, selectedId: '', onPick: () => {} }));
+assert.equal(corridorTree.filter((node) => node.props['data-palace-door']).length, 4, '走廊里只有四扇门');
+assert.equal(corridorTree.filter((node) => node.props['data-palace-niche']).length, 0, '走廊不画壁龛');
+assert.equal(JSON.stringify(corridorTree).includes('小人'), false);
+
+// 进房间只展开当前层：只见这一间的壁龛，回到走廊又只剩门。
+const habitsTree = collectPalace(MemoryPalace({ records: palaceMany, openedRoom: 'habits', selectedId: '', onPick: () => {} }));
+const habitsNiches = habitsTree.filter((node) => node.type === PalaceNiche);
+assert.equal(habitsNiches.length, 24, '一页只铺当前房间的壁龛');
+assert.equal(habitsNiches.every((node) => node.props.record.kind === 'preference'), true, '别的房间的壁龛不进这一层');
+assert.equal(habitsTree.filter((node) => node.props['data-palace-door']).length, 0, '房间里不再画走廊的门');
+assert.equal(habitsTree.some((node) => node.children.includes('← 走廊')), true, '房间能给一条回走廊的路');
+const methodsTree = collectPalace(MemoryPalace({ records: palaceMany, openedRoom: 'methods', selectedId: '', onPick: () => {} }));
+assert.equal(methodsTree.filter((node) => node.type === PalaceNiche).length, 0, '空房间不铺壁龛');
+
+// 纯展示：宫殿里没有定时器，动画帧在卸载时清掉，只有一套渲染器。
+const palaceSource = readFileSync(new URL('../client.js', import.meta.url), 'utf8');
+const palaceSlice = palaceSource.slice(palaceSource.indexOf('const MemoryPalace ='), palaceSource.indexOf('const PersonaSection ='));
+assert.equal(/setTimeout|setInterval/.test(palaceSlice), false, '宫殿不用定时器');
+assert.equal(/cancelAnimationFrame/.test(palaceSlice), true, '卸载时清掉动画帧');
+assert.equal((palaceSource.match(/const MemoryPalace =/g) || []).length, 1, '只有一套宫殿渲染器');
 
 // 引用行只标层与来源：类型留在数据里给检索用，不上会话界面。
 const typedSearch = citationOf({ title: 'A', scope: 'global', revision: 1, status: 'ok', kind: 'preference' }, 'memory-search');
@@ -379,9 +475,11 @@ assert.equal(recallLineOf({ reason: 'no_overlap', cards: 0, matched: 0 }), '上�
 assert.equal(recallLineOf({ reason: 'expired', cards: 0, matched: 2 }), '上次没提醒，相关内容已经过期');
 assert.equal(recallLineOf({ reason: 'memory_off', cards: 0, matched: 0 }), '上次没提醒，记忆已关闭');
 assert.equal(recallLineOf({ reason: 'tools_only', cards: 0, matched: 0 }), '上次没提醒，只在你问时检索');
+assert.equal(recallLineOf({ reason: 'deadline', cards: 0, matched: 0 }), '上次没提醒，准备超时');
+assert.equal(recallLineOf({ reason: 'aborted', cards: 0, matched: 0 }), '', '用户取消不出声，面板不留一行');
 assert.equal(recallLineOf({ reason: 'made_up', cards: 0, matched: 0 }), '');
 assert.doesNotMatch(recallLineOf({ reason: 'needs_context', cards: 0, matched: 1 }), /needs_context|reasonCode/);
-console.log('client.test.mjs: 22 passed + palace');
+console.log('client.test.mjs: 24 passed + palace');
 
 
 

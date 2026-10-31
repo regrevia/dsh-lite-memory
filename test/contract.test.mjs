@@ -160,6 +160,36 @@ assert.equal(again.title, saved.title);
 assert.equal(again.revision, 3);
 assert.match(render('memory_save', {}, again), /^memory · unchanged \[[^\]]+\] "发布顺序"$/);
 
+// ── 超单条上限：给可执行的拆法，不谎报写成功；软提示只提醒不拦 ──────────────
+const tooBig = await exec('memory_save', {
+  title: '太长的一次性记录',
+  summary: '验证超限回执',
+  body: 'x'.repeat(5000),
+});
+assert.equal(tooBig.needsCompaction, true, '超单条上限要明确说没收下');
+assert.equal(tooBig.stored, false);
+assert.equal(tooBig.maxBytes, 4096);
+assert.match(render('memory_save', {}, tooBig), /拆成多条保存/);
+assert.equal(store.loadIndex(store.scopeOf(cwd)).entries.some((item) => item.title === '太长的一次性记录'), false, '没写进去就不能算存了');
+
+const softHinted = await exec('memory_save', {
+  title: '只在临时目录里跑的脚本',
+  summary: '只在 /tmp/ 下临时跑一次',
+  body: 'cd /tmp/build && node run.sh',
+});
+assert.equal(softHinted.needsCompaction, undefined, '软提示不拦写入');
+assert.match(softHinted.hints || '', /引用临时路径/, '临时路径要提醒换机器失效');
+assert.match(softHinted.hints || '', /建议补适用条件/, '写了「只在」却没给条件要提醒');
+assert.match(render('memory_save', {}, softHinted), /· 提示：/);
+
+const multiTopic = await exec('memory_save', {
+  title: '一次记了三件事',
+  summary: '验证小标题拆分提示',
+  body: '## 发版顺序\n先跑测试\n## 回滚方式\n切回上一版\n## 通知口径\n后端群里说一句',
+});
+assert.equal(multiTopic.needsCompaction, undefined, '混合主题只是提示，不拦写入');
+assert.match(multiTopic.hints || '', /混合多个主题/, '三条互不相干的小标题要提醒拆分');
+
 // ── similar title asks before overwriting ────────────────────────────────────
 const probe = await exec('memory_save', { title: '发布顺序是啥', summary: '发版前要按顺序做的事', body: '另一条' });
 assert.equal(probe.needsResolution, true);
@@ -562,6 +592,7 @@ assert.equal(missReceipt.body.current.recall.cards, 0);
 const hitsAfter = store.loadIndex(store.scopeOf(cwd)).entries.find((item) => item.id === hintedRow.id).hits;
 assert.equal(hitsAfter, hitsBefore + 1, '交付过的卡片在下一轮开头记一次使用');
 
+
 const sig2 = new AbortController().signal;
 await preStep({ agent: recallAgent, signal: sig2, turn: '3' }, pass('周四晚上发版要注意什么', 'h2'));
 assert.equal(recall.text({ agent: recallAgent, signal: sig2 }).includes('发布窗口在周四晚上'), false);
@@ -582,6 +613,21 @@ const sig3 = new AbortController().signal;
 await preStep({ agent: recallAgent, signal: sig3, turn: '4' }, pass('把这个按钮的圆角改小一点', 'h3'));
 assert.equal(recall.text({ agent: recallAgent, signal: sig3 }), '');
 assert.equal(subscriptions.has('agent/disposed'), true);
+
+/* 超时丢掉投影：面板要说清是准备超时，不是没命中；丢掉的卡片也不算使用。 */
+await exec('memory_save', { title: '超时回滚探针', summary: '超时回滚探针怎么用', keywords: ['超时回滚探针'], when: '验证准备超时' }, recallAgent);
+const dlProbeId = store.loadIndex(store.scopeOf(cwd)).entries.find((item) => item.title === '超时回滚探针')?.id;
+const probeHits = () => (store.loadIndex(store.scopeOf(cwd)).entries.find((item) => item.id === dlProbeId)?.hits || 0);
+assert.equal(probeHits(), 0, '刚存下还没被送达');
+globalThis.__liteMemoryRecall?.setDeadlineMs?.(0);
+await preStep({ agent: recallAgent, signal: sig2, turn: '5' }, pass('超时回滚探针怎么用', 'h5'));
+assert.equal(recall.text({ agent: recallAgent, signal: sig2 }), '', '超时不留半旧卡片');
+const deadlineReceipt = await call('/lite-memory/overview', { sessionId: 'session-recall' });
+assert.equal(deadlineReceipt.status, 200);
+assert.equal(deadlineReceipt.body.current.recall.reason, 'deadline', '面板能区分「准备超时」和「没命中」');
+assert.equal(deadlineReceipt.body.current.recall.cards, 0);
+assert.equal(probeHits(), 0, '超时丢掉的卡片不算使用');
+globalThis.__liteMemoryRecall?.setDeadlineMs?.(5000);
 
 // ── 项目实验：宿主事件顺序下由最终人类消息决定读取 ───────────────────────────
 const evoReadCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-evo-read-'));

@@ -61,8 +61,10 @@ async function main() {
   const report = { node: process.version, platform: `${process.platform}/${process.arch}`, limits: store.LIMITS };
   const started = Date.now();
 
-  // 200 project entries and 200 global entries, all with the same shape.
-  for (let i = 0; i < 200; i += 1) {
+  /** 规模可调：默认 200+200 快速回归，LITE_MEMORY_BENCH_N=1000 跑规格要求的 1000+1000。 */
+  const N = Math.max(1, Number(process.env.LITE_MEMORY_BENCH_N || 200) || 200);
+  report.seedSize = N;
+  for (let i = 0; i < N; i += 1) {
     save({
       title: `项目条目 ${i} 发布顺序`,
       summary: `项目条目 ${i} 的前置说明`,
@@ -77,7 +79,7 @@ async function main() {
    * 这里要测的是两层都在时的召回路径，不是降级路径。
    */
   const globalScope = store.globalScope();
-  for (let i = 0; i < 200; i += 1) {
+  for (let i = 0; i < N; i += 1) {
     const saved = store.saveEntry(globalScope, {
       title: `全局条目 ${i} 交付规范`,
       summary: `全局条目 ${i} 的通用说明`,
@@ -103,7 +105,7 @@ async function main() {
   if (!recall) throw new Error('recall context missing');
   const userMessage = (i) => async () => ({
     kind: 'enter',
-    messages: [{ role: 'user', id: `bench-h${i}`, source: { kind: 'user' }, content: [{ type: 'text', text: `项目条目 ${i % 200} 的发布顺序是什么，第 ${i} 次问` }] }],
+    messages: [{ role: 'user', id: `bench-h${i}`, source: { kind: 'user' }, content: [{ type: 'text', text: `项目条目 ${i % N} 的发布顺序是什么，第 ${i} 次问` }] }],
   });
   const timings = [];
   let bytes = 0;
@@ -198,13 +200,19 @@ async function main() {
     files: fs.readdirSync(store.scopeOf(cwd).dir).sort(),
   };
   report.rssEndMB = rss();
+  /**
+   * 归档数至少是这 50 次 forget 产生的；接近硬上限（1000 条）时，
+   * 新增的序列条目会把最旧未读的挤进归档，多出来的归档是容量策略，不是 forget 出错。
+   * 所以核对「所有存档到的条目都还在」而不是「归档刚好 50 条」。
+   */
   const sequenceOk = sequence.save === 150
     && sequence.read === 150 && sequence.readOk === 150
     && sequence.search === 150 && sequence.searchHit === 150
     && sequence.forget === 50 && sequence.forgot === 50
-    && project.archived.length === 50;
+    && project.archived.length >= sequence.forget
+    && project.entries.length + project.archived.length >= N + sequence.save;
   report.ok = project.entries.length <= store.LIMITS.entries + store.LIMITS.hardEntries
-    && report.entries.project >= 200 && report.entries.global >= 200
+    && report.entries.project >= N && report.entries.global >= N
     && report.prepare.avgContextBytes > 0
     && report.positive.bytes > 0 && report.positive.hasGlobalCard && report.positive.underCap
     && sequenceOk;

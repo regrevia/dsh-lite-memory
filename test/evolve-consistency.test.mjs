@@ -298,6 +298,44 @@ await test('摘要里带上参数后，回滚写回的策略摘要仍自洽', ()
   }, { cases: hydrated }).ok, true, '回滚后按最终参数重算的摘要应允许继续采纳');
 });
 
+/* ---------------- 成绩只认最终投递，不认预算前的候选 ---------------- */
+
+await test('预算淘汰的条目不算命中：命中/误触发/位置都只看最终投递', () => {
+  /** 排得上但装不下：卡片字节超 1200，被装箱淘汰。 */
+  const oversized = mk('big', { title: '口播', summary: '口播'.repeat(700) });
+  const small = mk('small', { title: '口播' });
+  const item = { id: 'case-budget', query: '口播', expectIds: ['big'], forbidIds: ['big'], records: [oversized, small] };
+  const result = evolve.runCase(item, evolve.DEFAULT_PARAMS);
+  assert.ok(result.candidateIds.includes('big'), '排进候选才能验预算闸门');
+  assert.ok(!result.deliveredIds.includes('big'), '超预算的卡片不能算投递');
+  assert.ok(result.budgetDropped.includes('big'), 'budgetDropped 要报出被预算淘汰的 id');
+  assert.equal(result.hit, 0, '被预算淘汰的期望项不能算命中');
+  assert.equal(result.position, evolve.LIMITS.topN + 1, '没投递出去的期望项按未进前三记位');
+  assert.equal(result.falseHit, 0, '没投递出去的条目不能算误触发');
+  assert.ok(result.bytes <= view.CARD.bytes, '投递字节不能超预算');
+  assert.deepEqual(result.topIds, result.candidateIds, 'topIds 保留为候选别名');
+  assert.ok(result.deliveredIds.every((id) => result.candidateIds.includes(id)), '投递必然出自候选');
+});
+
+await test('正常用例：投递是候选的子集，成绩与候选口径一致', () => {
+  const item = {
+    id: 'case-normal',
+    query: '口播',
+    expectIds: ['a'],
+    forbidIds: ['b'],
+    records: [mk('a', { title: '口播' }), mk('b', { triggers: ['口播'] })],
+  };
+  const result = evolve.runCase(item, evolve.DEFAULT_PARAMS);
+  assert.deepEqual(result.candidateIds, ['b', 'a'], '两条都该进候选，顺序按生产排序');
+  assert.deepEqual(result.deliveredIds, result.candidateIds, '装得下时投递等于候选');
+  assert.deepEqual(result.budgetDropped, [], '没淘汰就报空');
+  assert.equal(result.hit, 1);
+  assert.equal(result.position, 2, 'a 排在 b 之后');
+  assert.equal(result.falseHit, 1);
+  const prodRows = view.recallRank(item.records, item.query, { limit: 3, params: evolve.DEFAULT_PARAMS });
+  assert.equal(result.bytes, view.recallCards(prodRows, { max: view.CARD.max, bytes: view.CARD.bytes }).bytes, '字节仍按生产同一套渲染计');
+});
+
 /* ---------------- 显示层拿到版本信息 ---------------- */
 
 await test('面板同时给出证据集版本、策略版本与是否待重评', () => {

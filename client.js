@@ -966,6 +966,7 @@ window.__ModuleLoader__.load({
         case 'conflict': return `上次没提醒，${related}存在冲突的结论`;
         case 'no_overlap': return '上次没提醒，没有匹配的记忆';
         case 'expired': return '上次没提醒，相关内容已经过期';
+        case 'deadline': return '上次没提醒，准备超时';
         case 'memory_off': return '上次没提醒，记忆已关闭';
         case 'tools_only': return '上次没提醒，只在你问时检索';
         default: return '';
@@ -990,6 +991,8 @@ window.__ModuleLoader__.load({
       if (view === 'palace' && display && display.palace === true) return 'palace';
       return 'list';
     };
+    /** 只创建当前模式的视图：切走即卸载，不用 display 藏。 */
+    const viewPaneOf = (mode, panes) => (mode === 'graph' ? panes.graph() : mode === 'palace' ? panes.palace() : panes.list());
     const reduceMotionOf = () => {
       try {
         const query = globalThis.matchMedia && globalThis.matchMedia('(prefers-reduced-motion: reduce)');
@@ -1114,6 +1117,40 @@ window.__ModuleLoader__.load({
     };
     const palaceToggleOf = (expanded, roomId) => (expanded === roomId ? '' : roomId);
     const palaceMotionOf = (reduced) => ({ duration: reduced === true ? 0 : 180, easing: 'cubic-bezier(0.2, 0.7, 0.3, 1)' });
+    /** 宫殿是空间不是列表：走廊只看见门，门位由房间 id 定；撞槽按房间顺序往后找空位。 */
+    const PALACE_DOOR_LANES = 4;
+    const palaceHashOf = (text) => {
+      const value = String(text || '');
+      let hash = 0;
+      for (let index = 0; index < value.length; index += 1) hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+      return hash;
+    };
+    const palaceDoorSlotOf = (roomId, taken) => {
+      const base = palaceHashOf(roomId) % PALACE_DOOR_LANES;
+      const used = Array.isArray(taken) ? taken : EMPTY;
+      for (let step = 0; step < PALACE_DOOR_LANES; step += 1) {
+        const slot = (base + step) % PALACE_DOOR_LANES;
+        if (!used.includes(slot)) return slot;
+      }
+      return base;
+    };
+    const palaceCorridorOf = (records) => {
+      const taken = [];
+      return palaceRoomsOf(records).map((room) => {
+        const slot = palaceDoorSlotOf(room.id, taken);
+        taken.push(slot);
+        return { id: room.id, name: room.name, total: room.total, slot };
+      });
+    };
+    /** 每间房各记各的页：走回同一间房还是那一页。 */
+    const palacePageAtOf = (pages, roomId) => {
+      const value = pages && Number.isFinite(pages[roomId]) ? pages[roomId] : 1;
+      return Math.max(1, Math.floor(value));
+    };
+    const palacePageWithOf = (pages, roomId, page) => ({
+      ...(pages || {}),
+      [roomId]: Math.max(1, Math.floor(Number.isFinite(page) ? page : 1)),
+    });
 
     /** 失败回执分「当前」和「过去」：当前失败要修，过去的只说明发生过。 */
     const failureStateOf = (evolution) => {

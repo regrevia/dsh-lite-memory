@@ -52,6 +52,7 @@ import {
   adoptLearningRule,
   editLearningRule,
   expireLearning,
+  maybeExpire,
   LIMITS,
 } from './store.js';
 import path from 'node:path';
@@ -907,6 +908,8 @@ function keepHandler(webServer, cwdForSession) {
               payload: { bytes: request && payloadBytes.has(request) ? payloadBytes.get(request) : null },
             });
           }
+          /** 用户显式管理动作顺带跑一次生命周期：同一项目 24 小时内最多一次，每次最多 8 条。 */
+          maybeExpire(scope, {});
           const id = typeof body.id === 'string' ? body.id : '';
           if (learningAction === 'undo') {
             const result = undoLearningChange(scope, id, {
@@ -1076,6 +1079,36 @@ function saveFailure(message, args) {
     title: String(args && args.title || '').trim(), summary: '', when: '', revision: 0,
     merged: false, changed: false, scope: '', needsResolution: false, needsScope: false,
     archived: '', error: String(message || '').replace(/^memory · /, ''),
+  };
+}
+
+/** 软提示：只提醒怎么写更好，不拦写入、不改正文；命中才给一行。 */
+function qualityHintsOf(draft) {
+  const body = String((draft && draft.body) || '');
+  const summary = String((draft && draft.summary) || '');
+  const when = String((draft && draft.when) || '');
+  const hints = [];
+  const bodyBytes = Buffer.byteLength(body);
+  const lines = body.split('\n').filter((line) => line.trim());
+  if (bodyBytes > 600 || lines.length > 8) hints.push('细节较多，只留判断规则和触发条件');
+  if (/\/tmp\/|[~]\/\.cache\/|\/var\/folders\//.test(body)) hints.push('引用临时路径，换机器就失效');
+  const conditional = /只在|仅当|仅限|只有/.test(`${summary}\n${when}\n${body}`);
+  const hasConditions = Array.isArray(draft && draft.conditions) && draft.conditions.length > 0;
+  if (conditional && !hasConditions) hints.push('建议补适用条件');
+  /** 三个以上小标题通常是几条互不相干的事摞成一条；两条（背景 / 结论）是正常结构，不算。 */
+  const sections = (body.match(/^#{2,3}\s+\S/gm) || []).length;
+  if (sections >= 3) hints.push('混合多个主题，建议拆分');
+  return hints;
+}
+
+/** 硬上限没收下时的统一回执：告诉模型怎么拆，而不是只说失败。 */
+function compactionFailure(message, args, scope) {
+  return {
+    ...saveFailure(message, args),
+    stored: false,
+    needsCompaction: true,
+    maxBytes: state.LIMITS.entryBytes,
+    suggestedAction: `拆成多条保存：每条只写一个判断规则，正文压到 ${state.LIMITS.entryBytes} 字节以内；完整原句留在对话里，不抄进记忆`,
   };
 }
 
@@ -1382,8 +1415,28 @@ function statusLabel(status) {
  */
 export const RECALL_MODES = ['adaptive', 'tool_only', 'off'];
 const RECALL_QUERY_CHARS = 400;
-/** 单轮投影的耗时上限：慢机器上宁可这轮不注入，也不把回合拖住。测试可临时放宽。 */
+/**
+ * 单轮投影的耗时上限：慢机器上宁可这轮不注入，也不把回合拖住。测试可临时放宽。
+ * 条目多了以后，索引解析和指纹计算本身就随条数线性涨；固定 150ms 会在 600 条左右
+ * 随机丢整轮召回（投影已经算完，却被耗时判丢弃）。所以上限按可见条目数放宽，
+ * 每多 8 条加 1ms，最多到 400ms；低于 200 条仍是原来的 150ms。
+ */
 let recallDeadlineMs = 150;
+const RECALL_DEADLINE_MAX = 400;
+const RECALL_DEADLINE_FREE_ENTRIES = 200;
+const RECALL_DEADLINE_ENTRIES_PER_MS = 8;
+/** 本项目的投影耗时上限：条目越多给得越宽，但封顶，避免病态项目无限拖慢首字。 */
+function recallDeadlineFor(scope) {
+  const base = recallDeadlineMs;
+  try {
+    const count = loadIndex(scope).entries.length + loadIndex(globalScope()).entries.length;
+    const extra = Math.max(0, count - RECALL_DEADLINE_FREE_ENTRIES) / RECALL_DEADLINE_ENTRIES_PER_MS;
+    /** 显式放宽（测试/宿主）永远优先：只往上放，不因为封顶反而收紧。 */
+    return Math.max(base, Math.min(RECALL_DEADLINE_MAX, base + Math.floor(extra)));
+  } catch {
+    return base;
+  }
+}
 const RECALL_HEADER = '已有记忆可能相关（需要细节用 memory_read 带标题取正文，别凭标题猜）：';
 
 /** 卡片行格式只在 view.js 定义一份：回放算字节必须和线上注入逐字一致。 */
@@ -1447,6 +1500,13 @@ export function apply(ctx, config) {
   const generations = new WeakMap();
   /** 同一真人请求共用一个额度窗口；provider 只读，不记账。 */
   const windows = new Map();
+  /**
+   * 同一任务里同一条记忆只记一次使用。
+   * 任务内反复读到（续说、重查、换工具）不该把活跃度和有益反馈反复抬高；
+   * 换任务（新的起始消息）才重新算一次。
+   */
+  const usedByTask = new Map();
+  const TASK_USED_MAX = 24;
   const abortCleanups = new Map();
   /** 哪些用户消息已经建立过窗口；工具续步不重复开窗。 */
   const seenHumans = new Map();
@@ -1465,7 +1525,18 @@ export function apply(ctx, config) {
     const ids = [...state.deliveredIds].filter(Boolean);
     state.deliveredIds = new Set();
     if (!ids.length) return;
-    try { markUsed(state.scope, ids); } catch { /* usage is best-effort */ }
+    /** 同一任务内已经记过的条目不再记第二遍；任务变了才重新记账。 */
+    const taskKey = `${state.scope.key}\u0000${state.taskStartId || state.sessionId || ''}`;
+    let seen = usedByTask.get(taskKey);
+    if (!seen) {
+      seen = new Set();
+      usedByTask.set(taskKey, seen);
+      while (usedByTask.size > TASK_USED_MAX) usedByTask.delete(usedByTask.keys().next().value);
+    }
+    const fresh = ids.filter((id) => !seen.has(id));
+    if (!fresh.length) return;
+    for (const id of fresh) seen.add(id);
+    try { markUsed(state.scope, fresh); } catch { /* usage is best-effort */ }
   };
 
   const clearPrepared = (agent) => {
@@ -1661,12 +1732,12 @@ export function apply(ctx, config) {
           normalCards: cards.length + 1,
           experimentCards: auto.experimentCards || 0,
         });
-        if (!admitted.ok) continue;
+
       } else {
         const size = Buffer.byteLength(nextText);
-        if (size > view.CARD.bytes) continue;
+
         const cost = Buffer.byteLength(`\n${line}`) + (headerCharged ? 0 : Buffer.byteLength(RECALL_HEADER));
-        if (win && !affordable(win, cost)) continue;
+
         if (win) win.bytes += cost;
       }
       const revision = card.revision || 1;
@@ -1935,7 +2006,7 @@ export function apply(ctx, config) {
        * 拿它当绑定条件会让一条宽泛规则出现在每个请求里。其余规则照旧过词面门。
        */
       const conditions = Array.isArray(record.conditions) ? record.conditions.filter((row) => row && row.key) : [];
-      const bound = conditions.some((row) => view.TASK_CONDITION_KEYS.includes(row.key));
+      const bound = conditions.some((row) => view.TASK_CONDITION_KEYS.includes(row.key) && !view.isBroadCondition(row));
       if (!bound && score < view.MATCH_FLOOR) continue;
       const topic = record.topicKey || record.id;
       if (byTopic.has(topic) && byTopic.get(topic).body !== record.body) conflict = true;
@@ -2235,7 +2306,7 @@ export function apply(ctx, config) {
       const agent = holder?.agent ?? getService('agents')?.currentInitiator?.();
       if (!agent) return '';
       const state = prepared.get(agent);
-      if (!state) return '';
+
       const signal = holder?.signal;
       if (signal?.aborted) return '';
       if (state.signal && signal && state.signal !== signal) return '';
@@ -2245,7 +2316,7 @@ export function apply(ctx, config) {
       const scope = scopeOf(cwdOf({ agent }));
       if (!memoryEnabled(scope)) return '';
       const epoch = controlStatus(scope).epoch || '';
-      if (state.controlEpoch && epoch && state.controlEpoch !== epoch) return '';
+
       /** 自进化关掉或换过代：关掉前的实验正文不再输出，重开也不复活。 */
       let evolutionText = state.experimentParts ? experimentTextFrom(state.experimentParts) : state.experimentText;
       if (evolutionText) {
@@ -2366,6 +2437,11 @@ export function apply(ctx, config) {
           kind: { type: 'string' },
           summaryShortened: { type: 'boolean' },
           fullTextSaved: { type: 'boolean' },
+          hints: { type: 'string' },
+          stored: { type: 'boolean' },
+          needsCompaction: { type: 'boolean' },
+          maxBytes: { type: 'integer' },
+          suggestedAction: { type: 'string' },
           revision: { type: 'integer' },
           merged: { type: 'boolean' },
           changed: { type: 'boolean' },
@@ -2394,7 +2470,9 @@ export function apply(ctx, config) {
       render: (_args, value) => [{
         type: 'text',
         text: value.error
-          ? `memory · ${value.error}`
+          ? value.needsCompaction
+            ? `memory · ${value.error}\n${value.suggestedAction || ''}`
+            : `memory · ${value.error}`
           : value.needsScope
           ? value.reason === 'memory_disabled'
             ? `memory · ${value.offCopy || '本项目记忆已关闭，先在面板打开'}`
@@ -2407,7 +2485,7 @@ export function apply(ctx, config) {
           ? `memory · 需要确认：「${value.title}」与已有条目相近${value.crossLayer ? '（在另一层）' : ''}${value.sameTopic ? '（同一主题槽位）' : ''}\n${value.similar}\n要更新它：用同一个标题${value.crossScope === 'global' ? '、并带 scope="global"' : ''}再存一次；确实是另一条，加 resolution="distinct"`
           : value.changed === false
             ? `memory · unchanged ${withTag(value, `"${value.title}"`)}`
-            : `memory · ${value.merged ? 'merged' : 'saved'} ${withTag(value, `"${value.title}"`)}${value.when ? `（${value.when}）` : ''}${value.similar ? ` · 相近：${value.similar}` : ''}${value.archived ? ` · 已归档「${value.archived}」腾位` : ''}${value.fullTextSaved ? ' · 完整原句已另存' : ''}${value.supersededTitle ? ` · 已取代「${value.supersededTitle}」` : ''}${value.scopeNote ? ` · ${value.scopeNote}` : ''}`,
+            : `memory · ${value.merged ? 'merged' : 'saved'} ${withTag(value, `"${value.title}"`)}${value.when ? `（${value.when}）` : ''}${value.similar ? ` · 相近：${value.similar}` : ''}${value.archived ? ` · 已归档「${value.archived}」腾位` : ''}${value.fullTextSaved ? ' · 完整原句已另存' : ''}${value.supersededTitle ? ` · 已取代「${value.supersededTitle}」` : ''}${value.scopeNote ? ` · ${value.scopeNote}` : ''}${value.hints ? ` · 提示：${value.hints}` : ''}`,
       }],
     },
     execute: async (args, execution) => {
@@ -2477,7 +2555,15 @@ export function apply(ctx, config) {
         }
         draft.links = resolved;
       }
-      const saved = saveEntry(projectScope, draft);
+      let saved;
+      try {
+        saved = saveEntry(projectScope, draft);
+      } catch (error) {
+        const message = String(error && error.message || '');
+        /** 超单条上限不是「写坏了」：按长度失败给出可执行的拆法，别的错误照旧抛。 */
+        if (/超过单条 \d+ 字节/.test(message)) return compactionFailure(message, args, projectScope);
+        throw error;
+      }
       if (saved.needsScope) {
         return {
           title: saved.draft?.title || '',
@@ -2565,6 +2651,7 @@ export function apply(ctx, config) {
         archived: (saved.archived || []).map((item) => item.title).join('、'),
         pendingConflicts: Number(saved.pendingConflicts) || 0,
         ...(saved.similar ? { similar: `「${saved.similar.title}」` } : {}),
+        ...(() => { const hints = qualityHintsOf(saved.record || draft); return hints.length ? { hints: hints.join('；') } : {}; })(),
       };
     },
   }), 'lite-memory: memory_save');
@@ -3586,9 +3673,16 @@ export function apply(ctx, config) {
         return decision;
       }
       /** 超时或被取消：这一步不留半旧卡片，下一真人请求重新投影。 */
-      if (signal?.aborted || Date.now() - startedAt > recallDeadlineMs) {
+      const deadlineMs = recallDeadlineFor(scope);
+      if (signal?.aborted || Date.now() - startedAt > deadlineMs) {
         rollbackBudget();
-        if (snapshot.cards.length) clearRecall(scope, sessionId);
+        /** 面板要说清这次为什么没有卡片：超时丢的是已经算完的投影，不是没命中。 */
+        noteRecall(scope, sessionId, {
+          reason: signal?.aborted ? 'aborted' : 'deadline',
+          matched: snapshot ? snapshot.matched : 0,
+          cards: 0,
+          chars: 0,
+        });
         clearPrepared(agent);
         return decision;
       }
@@ -3622,6 +3716,8 @@ export function apply(ctx, config) {
         seenIds: Array.isArray(decision.messages) ? decision.messages.map((message) => String(message?.id ?? '')).filter(Boolean).slice(-64) : [],
         actionRetried: false,
         deliveredIds: new Set(),
+        /** 同一任务共用一份使用账本：续说/重查不重复抬高价值。 */
+        taskStartId: taskStartMessageId,
         at: Date.now(),
       };
       prepared.set(agent, state);
@@ -3963,6 +4059,26 @@ export function apply(ctx, config) {
     ].join('\n');
   }
 
+  /**
+   * 项目层还开着，才许读它攒下的片段。枚举不到项目层时保守放行：
+   * 宁可不学，也不要因为一次扫描失败把用户攒的片段当成已关项目删掉。
+   */
+  function openSourceOf() {
+    let listed = [];
+    try { listed = state.knownProjectScopes(200) || []; } catch { return () => true; }
+    if (!listed.length) return () => true;
+    const keyed = new Map();
+    for (const scope of listed) {
+      try { keyed.set(scope.key, controlStatus(scope).enabled !== false); } catch { keyed.set(scope.key, false); }
+    }
+    return (row) => {
+      const key = String((row && row.projectId) || '');
+      if (!key) return false;
+      if (key === 'global') return true;
+      return keyed.get(key) === true;
+    };
+  }
+
   /** 第二阶段：真正花一次模型调用；四道提交核验在 commit 里，过期结果自动丢弃。 */
   async function learnPersonaOnce(session) {
     if (personaLearning.inFlight) return;
@@ -3972,7 +4088,9 @@ export function apply(ctx, config) {
     if (!route || !llm || typeof llm.prepareCall !== 'function') return;
     const scope = scopeOfSession(session);
     if (!scope || !memoryEnabled(scope)) return;
-    const begin = personaStore.beginPersonaAttempt({});
+    /** 来源项目已关的片段不进这次名单：跨项目攒下的片段不该替一个关掉的项目继续学。 */
+    const sourceOpen = openSourceOf();
+    const begin = personaStore.beginPersonaAttempt({ allowSource: sourceOpen });
     if (!begin || begin.ok !== true) return;
     personaLearning.inFlight = true;
     const controller = new AbortController();
@@ -4002,6 +4120,12 @@ export function apply(ctx, config) {
         /** 解析失败也要留痕：面板说「结果格式无效」，下次窗口再来。 */
         const first = reply && Array.isArray(reply.errors) && reply.errors.length ? reply.errors[0] : 'invalid';
         personaStore.recordPersonaOutcome({ outcome: 'invalid', reason: String(first) });
+        return;
+      }
+      /** 来源项目在抽取途中被关掉：这条结果没有任何项目可以归属，不能记成「已整理」。 */
+      const pointed = begin.attempt.snippets.find((row) => row.id === reply.snippetId);
+      if (pointed && !sourceOpen(pointed)) {
+        personaStore.recordPersonaOutcome({ outcome: 'stale', reason: 'source_closed' });
         return;
       }
       if (reply.kind === 'no_change') {
@@ -4048,7 +4172,8 @@ export function apply(ctx, config) {
       preparedOf: (agent) => prepared.get(agent) || null,
       windowOf: (agent) => windowOf(agent),
       /** 测试专用：CI 冷启动偶尔超过 150ms，逻辑测试不该被耗时上限判失败。 */
-      setDeadlineMs: (ms) => { if (Number.isFinite(ms) && ms > 0) recallDeadlineMs = ms; },
+      setDeadlineMs: (ms) => { if (Number.isFinite(ms) && ms >= 0) recallDeadlineMs = ms; },  // 0 表示立刻超时，只给测试用
+      deadlineFor: (scope) => recallDeadlineFor(scope),
       humanAskedGlobal,
     };
     return () => {

@@ -176,6 +176,33 @@ const scopeOf = (dir) => store.scopeOf(dir);
   assert.doesNotMatch(text, /第 .* 版/);
 }
 
+/* L04b：环境条件与宽泛任务类型不构成绑定：一条 taskKind=code 的规则不能贴到每一个请求上。 */
+{
+  const dir = mkdir('broad');
+  const scope = scopeOf(dir);
+  seedRule(scope, { title: '宽泛代码习惯', body: '先读再改。', conditions: [{ key: 'taskKind', value: 'code' }] });
+  enable(scope, { taskKind: 'code' });
+  const runtime = boot();
+  const agent = makeAgent('a-broad', dir);
+  const sig = signal();
+  await runtime.preStep({ agent, signal: sig, turn: 't1' }, enter(human('帮我写一首关于雨的短诗')));
+  const text = runtime.text(agent, sig);
+  assert.doesNotMatch(text, /宽泛代码习惯/, '宽泛任务类型 + 无词面重叠不能注入');
+}
+
+/* L04c：真正绑定的条件（系列号）该继续生效。 */
+{
+  const dir = mkdir('series-bound');
+  const scope = scopeOf(dir);
+  seedRule(scope, { title: '系列固定收尾', body: '结尾只留一个行动。', conditions: [{ key: 'seriesId', value: '口播' }] });
+  enable(scope, { seriesId: '口播' });
+  const runtime = boot();
+  const agent = makeAgent('a-series', dir);
+  const sig = signal();
+  await runtime.preStep({ agent, signal: sig, turn: 't1' }, enter(human('今天随便聊聊天气')));
+  assert.match(runtime.text(agent, sig), /系列固定收尾/, '系列条件成立时规则照旧给');
+}
+
 /* L05：长规则只给用途与 memory_read 指针，不把正文塞进上下文。 */
 {
   const dir = mkdir('long');

@@ -385,5 +385,25 @@ test('同一话题的换代条目只留最强一条在前面，不挤掉别的�
   assert.ok(rows.some((row) => row.record.id === other.id), '不相干的另一个话题仍在结果里');
 });
 
+// 数字按整段比：问「条目 7」时不能把「条目 77」「条目 797」当成同一编号。
+{
+  const make = (n) => ({
+    id: `num-${n}`,
+    title: `全局条目 ${n} 交付规范`,
+    summary: `全局条目 ${n} 的通用说明`,
+    when: `全局场景 ${n}`,
+    body: `全局正文 ${n}：交付前清零告警。`,
+    status: 'active',
+    applicability: 'all_in_scope',
+    scopeConfirmed: true,
+    lastUsed: '2026-10-01T00:00:00.000Z',
+  });
+  const query = '全局条目 7 的交付规范是什么';
+  const rows = [make(797), make(787), make(77), make(7)].map((record, index) => ({ record, index }));
+  const ranked = view.rank(rows.map((row) => row.record), query, { limit: 4 });
+  assert.equal(ranked[0].record.id, 'num-7', '编号完全对上的那条排最前');
+  assert.ok(ranked[0].raw > ranked[1].raw, '整段数字对上是加分，不是并列靠 id');
+  assert.ok(view.matchScore(make(77), query).score > 0, '编号沾边的仍可被搜到，只是不排最前');
+}
 for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
 console.log(`view.test.mjs: ${passed} passed`);

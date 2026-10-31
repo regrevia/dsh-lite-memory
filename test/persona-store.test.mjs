@@ -486,4 +486,33 @@ test('项目关掉记忆后，它没整理完的片段不会再被别的项目�
   assert.equal(again.persona.revision, dropped.persona.revision, '没变化就不升版本');
 });
 
+test('来源项目已关的片段不进名单：撤下、不占预算、不开窗口', () => {
+  reset();
+  store.setPersonaEnabled({ enabled: true, userId: 'u1', now: at(0) });
+  seedPending(6, 0);
+  /** 六个片段全来自 p1；p1 关了就一条都不该展示，也不该花掉这次 24 小时窗口。 */
+  const closed = store.beginPersonaAttempt({ userId: 'u1', now: at(30), allowSource: (row) => row.projectId !== 'p1' });
+  assert.equal(closed.ok, false);
+  assert.equal(closed.reason, 'not_enough');
+  const after = store.readPersona({ userId: 'u1' }).persona;
+  assert.equal(after.pending.length, 0, '关掉来源的片段直接从待整理撤掉');
+  assert.equal(after.learning.lastPassAt, '', '没开窗口就不该记一次尝试');
+  /** 撤下的结果要落盘：下次读回不能又冒出来。 */
+  const onDisk = JSON.parse(fs.readFileSync(path.join(home, 'lite-memory', 'persona.json'), 'utf8'));
+  assert.equal(onDisk.pending.length, 0);
+
+  /** 来源仍然开着时照常开工，名单就是这 6 条。 */
+  reset();
+  store.setPersonaEnabled({ enabled: true, userId: 'u1', now: at(0) });
+  seedPending(6, 0);
+  const opened = store.beginPersonaAttempt({ userId: 'u1', now: at(30), allowSource: (row) => row.projectId === 'p1' });
+  assert.equal(opened.ok, true);
+  assert.equal(opened.attempt.snippets.length, 6);
+  assert.ok(opened.attempt.snippets.every((row) => row.projectId === 'p1'));
+  /** 筛选函数自己抛错时按「不开放」处理，不把整轮整理打断。 */
+  const throws = store.beginPersonaAttempt({ userId: 'u1', now: at(80), allowSource: () => { throw new Error('boom'); } });
+  assert.equal(throws.ok, false);
+  assert.equal(throws.reason, 'not_enough');
+});
+
 console.log(`persona-store.test.mjs: ${passed} passed`);

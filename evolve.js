@@ -113,24 +113,31 @@ export function runCase(item, params) {
     task,
   });
   const top = rows.slice(0, LIMITS.topN);
-  const topIds = top.map((row) => String(row.record.id));
+  /** 候选=排进前三的；真正给到模型的还要过装箱这一道闸。 */
+  const candidateIds = top.map((row) => String(row.record.id));
   const expectIds = (Array.isArray(item && item.expectIds) ? item.expectIds : []).map(String);
   const forbidIds = (Array.isArray(item && item.forbidIds) ? item.forbidIds : []).map(String);
   /** 卡片字节也走生产那套「按最终渲染行计费」，不再拿内存对象估个近似值。 */
   const cards = recallCards(top, { max: CARD.max, bytes: CARD.bytes });
-  /** 位置分：期望项排第几就记几，没进前三记 topN+1；越小越好。 */
+  const delivered = new Set(cards.cards.map((card) => String(card.id)));
+  const deliveredIds = candidateIds.filter((id) => delivered.has(id));
+  const budgetDropped = candidateIds.filter((id) => !delivered.has(id));
+  /** 成绩只认最终投递：被预算淘汰的条目模型看不到，不能算命中。 */
   let position = 0;
   for (const id of expectIds) {
-    const index = topIds.indexOf(id);
+    const index = deliveredIds.indexOf(id);
     position += index === -1 ? LIMITS.topN + 1 : index + 1;
   }
   return {
-    hit: expectIds.filter((id) => topIds.includes(id)).length,
+    hit: expectIds.filter((id) => deliveredIds.includes(id)).length,
     expect: expectIds.length,
     position,
-    falseHit: forbidIds.filter((id) => topIds.includes(id)).length,
+    falseHit: forbidIds.filter((id) => deliveredIds.includes(id)).length,
     bytes: cards.bytes,
-    topIds,
+    topIds: candidateIds,
+    candidateIds,
+    deliveredIds,
+    budgetDropped,
   };
 }
 

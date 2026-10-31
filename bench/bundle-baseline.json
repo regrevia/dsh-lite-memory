@@ -1,0 +1,9 @@
+{
+  "note": "client.js 棘轮基线：raw 与 gzip 只许下降；改大必须同步说明原因。40 KiB 目标差额单列。",
+  "method": "raw = Buffer.length; gzip = zlib.gzipSync(raw, { level: 9 }).length",
+  "rawBytes": 186590,
+  "gzipBytes": 46309,
+  "measuredAt": "2026-10-31",
+  "targetBytes": 40960,
+  "targetGap": 5349
+}

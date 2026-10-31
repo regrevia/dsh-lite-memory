@@ -380,7 +380,7 @@ function contentWordsOf(text) {
 export const asciiWordsOf = (text) => plain(text, 400).toLowerCase().match(/[a-z][a-z0-9_-]{1,}/g) || [];
 export const wordIn = (pool, word) => new RegExp(`(^|[^a-z0-9])${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^a-z0-9])`).test(pool);
 
-const WEIGHT = { title: 3, keywords: 4, summary: 1.5, when: 1, coverage: 1.6 };
+const WEIGHT = { title: 3, keywords: 4, summary: 1.5, when: 1, coverage: 1.6, number: 2 };
 
 /** 最长公共连续片段：四个字以上连着重合，是「在说同一件事」的强证据。 */
 function longestRun(text, raw) {
@@ -517,6 +517,16 @@ export function matchScore(record, query, corpus = null, params = {}) {
     score += summaryScore;
     hints.push('summary');
   }
+  /**
+   * 换了说法的查询常常只剩摘要对得上：查询里两个以上实词都出现在摘要里，
+   * 标题、标签、触发词一个都没沾，词面分却到不了阈值（「夜里那套颜色要不要另做变量」）。
+   * 这是「只换了说法、实词还在」，按阈值提起；只沾一个实词的仍不放行。
+   */
+  if (score < floor && enoughContent && matchedContent >= 2 && summaryScore > 0
+    && !titleWordHit && !keywordWordHit && !triggerHit) {
+    score = floor;
+    hints.push('summary_cover');
+  }
   const whenScore = hit(record.when, WEIGHT.when);
   if (whenScore > 0) score += whenScore;
   /** 纯英文查询必须整词命中，别让语料里的字面巧合把不相关的记忆带进自动提示。 */
@@ -524,6 +534,26 @@ export function matchScore(record, query, corpus = null, params = {}) {
     const pool = [record.title, (record.aliases || []).join(' '), ...(record.tags || []), ...(record.triggers || []), record.summary, record.when]
       .filter(Boolean).join('\n').toLowerCase();
     if (!ascii.some((word) => wordIn(pool, word))) return { score: 0, hints: [] };
+  }
+  /**
+   * 数字要按整段数字比：「条目 7」不该把「条目 77」「条目 797」当成同一条。
+   * 切词会把分隔符去掉，这些条目的字面分完全并列，谁在前面只看 id，
+   * 问哪条都可能想起别的编号。标题里数字对得上才算强证据，正文里对上只补一半。
+   */
+  const numbers = [...new Set(raw.match(/\d+/g) || [])].slice(0, 4);
+  if (numbers.length) {
+    const hasNumber = (text) => {
+      const pool = plain(text, 400);
+      if (!pool) return false;
+      return numbers.some((number) => new RegExp(`(^|\\D)${number}(\\D|$)`).test(pool));
+    };
+    if (hasNumber(record.title) || (record.aliases || []).some((name) => hasNumber(name))) {
+      score += WEIGHT.number;
+      hints.push('number');
+    } else if (hasNumber(record.summary) || hasNumber(record.when) || hasNumber(record.body)) {
+      score += WEIGHT.number / 2;
+      hints.push('number');
+    }
   }
   return { score, hints: [...new Set(hints)] };
 }
@@ -903,7 +933,8 @@ export function textOfMessage(message) {
 export function isContinuationQuery(text) {
   const raw = plain(text, 40).trim().toLowerCase().replace(/[\s\u3002\uff01\uff1f?!\uff0c,\u3001\u2026~\uff5e]+/gu, '');
   if (!raw || [...raw].length > 8) return false;
-  return /^(继续|接着|然后|然后呢|还有|还有呢|往下|说下去|goon|continue|next|more)$/.test(raw);
+  /** 「接着往下」是两个续说标记连用，「再试试」是一个标记加一个通用动作：都还没点名新对象，仍算续说。 */
+  return /^(?:(?:继续|接着|然后|还有|往下|说下去|再|试|goon|continue|next|more)+(?:呢|吧|啊)?)$/.test(raw);
 }
 
 /**

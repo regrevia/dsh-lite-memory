@@ -1342,6 +1342,77 @@ test('项目层未绑作品的候选也能开始整理并提交成规则', () =>
   assert.match(foreign.reason, /缺少作品标识/);
 });
 
+/** 整理提案的最小形状；preparedTargets 由调用方按「整理前看到的版本」构造。 */
+const evolutionChange = (extra = {}) => ({
+  target: 'new', feedbackType: 'spec_change', topicKey: '口播开头',
+  currentText: '开头三句内给结论。', applicability: 'conditional',
+  conditions: [{ key: 'seriesId', value: '口播' }], evidence: ['u0'], persistence: 'project_candidate',
+  ...extra,
+});
+
+/** 跑一次整理并提交：第一次建规则，之后用同主题但换了措辞的提案试合并。 */
+const evolutionHarness = (label) => {
+  const scope = fresh(label);
+  assert.equal(setEvolution(scope, true, { operationId: `evo-${label}` }).ok, true);
+  const started = store.beginLearningAttempt(scope, { episodeId: '', operationId: `start-${label}` });
+  assert.equal(started.ok, true, started.reason);
+  const commit = (operationId, prepared, extra = {}) => store.commitLearning(scope, {
+    operationId, epoch: started.epoch, episodeId: '', projectId: scope.key,
+    sessionId: `s-${label}`, messageIds: ['m2'], changes: [evolutionChange(extra)], preparedTargets: prepared,
+  });
+  const first = commit(`${label}-1`, []);
+  assert.equal(first.ok, true, first.reason);
+  const rule = () => loadIndex(scope).entries.find((entry) => entry.origin === 'project_evolution');
+  const preparedOf = (flat) => [{ id: flat.id, revision: flat.revision, specDigest: flat.learning.specDigest }];
+  return { scope, commit, rule, preparedOf };
+};
+
+/**
+ * 同主题合并不是「新建」：整理器读到的版本被用户改过之后，这份提案不许再覆盖。
+ * 和显式目标同一套判定（版本 + 摘要），这是 learning.test 里 preparedTargets: [] 老路径之外的硬约束。
+ */
+test('同主题合并：整理前看的是当前版本就照旧并进已有条目', () => {
+  const env = evolutionHarness('merge-current');
+  const before = env.rule();
+  assert.ok(before.learning.specDigest, '整理前快照要带摘要');
+  const merged = env.commit('merge-current-2', env.preparedOf(before), { currentText: '开头两句内给结论。' });
+  assert.equal(merged.ok, true, merged.reason);
+  const rules = stateOf(env.scope).entries.filter((entry) => entry.origin === 'project_evolution');
+  assert.equal(rules.length, 1, '同主题不该长第二条');
+  assert.equal(rules[0].revision, before.revision + 1);
+  assert.match(rules[0].current.body, /两句/);
+});
+
+test('同主题合并：整理前的版本过期就作废，不覆盖用户刚改的规则', () => {
+  const env = evolutionHarness('merge-stale');
+  const before = env.rule();
+  const prepared = env.preparedOf(before);
+  const edited = upsert(env.scope, {
+    id: before.id, title: '口播开头', summary: '开头三句内给结论', body: '开头三句内给结论，别铺垫太长。',
+  });
+  assert.equal(edited.record.id, before.id);
+  const now = stateOf(env.scope).entries.find((entry) => entry.id === before.id);
+  assert.ok(now.revision > prepared[0].revision, '用户改一次，版本必须往前走');
+  const blocked = env.commit('merge-stale-2', prepared, { currentText: '开头两句内给结论。' });
+  assert.equal(blocked.ok, false, '过期提案不许落盘');
+  assert.match(blocked.reason, /刚被改过|已经变过/);
+  const after = stateOf(env.scope).entries.find((entry) => entry.id === before.id);
+  assert.equal(after.revision, now.revision, '作废的整理不写新版本');
+  assert.match(after.current.body, /别铺垫/);
+});
+
+test('显式目标：整理前的版本过期同样作废', () => {
+  const env = evolutionHarness('explicit-stale');
+  const before = env.rule();
+  const prepared = env.preparedOf(before);
+  upsert(env.scope, {
+    id: before.id, title: '口播开头', summary: '开头三句内给结论', body: '开头三句内给结论，别铺垫太长。',
+  });
+  const explicit = env.commit('explicit-stale-2', prepared, { target: before.id, id: before.id, currentText: '开头两句内给结论。' });
+  assert.equal(explicit.ok, false, '显式目标同样不许覆盖');
+  assert.match(explicit.reason, /刚被改过|已经变过/);
+});
+
 test('整理回执的 evidence 带上用户原句，优先本次改动其次整批', () => {
   const changeFor = (extra = {}) => ({
     target: 'new', feedbackType: 'spec_change', topicKey: '口播开头',

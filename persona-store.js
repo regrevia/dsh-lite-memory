@@ -338,6 +338,20 @@ export function beginPersonaAttempt(input = {}) {
   const at = nowIso(input.now);
   const fresh = freshPending(data.pending, at);
   if (fresh.length !== data.pending.length) data.pending = fresh;
+  /**
+   * 来源项目已经关掉的片段不再展示：不占名单、不花这次窗口。
+   * 来源不明或当前不开放的片段顺手从待整理里撤掉，下一次也不会带进来。
+   */
+  if (typeof input.allowSource === 'function') {
+    const opened = data.pending.filter((row) => {
+      try { return input.allowSource(row) === true; } catch { return false; }
+    });
+    if (opened.length !== data.pending.length) {
+      data.pending = opened;
+      const pruned = writePersona(data, { userId: input.userId, revision: data.revision });
+      if (!pruned.ok) return { ok: false, reason: pruned.reason };
+    }
+  }
   if (data.pending.length < PENDING_MIN) return { ok: false, reason: 'not_enough', pending: data.pending.length };
   const last = data.learning.lastPassAt ? new Date(data.learning.lastPassAt).getTime() : 0;
   if (last && new Date(at).getTime() - last < PASS_GAP_HOURS * 3600000) return { ok: false, reason: 'budget' };

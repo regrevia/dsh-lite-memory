@@ -1037,3 +1037,88 @@ console.log('recall.test.mjs: ok');
   assert.equal(hitsOf(), 2, '再次记账继续累加，不受 lastUsed 防抖影响');
   assert.equal(store.locateByTitle(scope, '量子纠缠咖啡机').record.id, probe.id);
 }
+
+// A33：同一任务里反复读到同一条，只记一次使用；换了任务才重新记。
+{
+  const cwd = mkdir('usage-task');
+  const scope = store.scopeOf(cwd);
+  save(scope, { title: '发布前文案检查要怎么过', tags: ['记账'], summary: '同一任务内重复读到只记一次' });
+  const hitsOf = () => store.locateByTitle(scope, '发布前文案检查要怎么过').record.hits;
+  const runtime = boot();
+  const agent = makeAgent('agent-usage-task', cwd);
+  const first = await prepare(runtime, agent, '发布前文案检查要怎么过', 'u1');
+  assert.match(runtime.provider.text({ agent, signal: first }), /发布前文案检查/);
+  runtime.handlers.get('agent/turn-stopping').at(-1)({ signal: first });
+  assert.equal(hitsOf(), 1, '第一次送达记一次');
+  /** 同一任务接着说「继续」：卡片还是那条，但价值不该被再抬高一次。 */
+  const second = await prepare(runtime, agent, '继续', 'u2');
+  assert.match(runtime.provider.text({ agent, signal: second }), /发布前文案检查/);
+  runtime.handlers.get('agent/turn-stopping').at(-1)({ signal: second });
+  assert.equal(hitsOf(), 1, '同一任务内重复读到不重复记账');
+  /** 明确换任务后重新想起同一条，才算新的一次使用。 */
+  const third = await prepare(runtime, agent, '换个话题：怎么配置日志级别', 'u3');
+  runtime.handlers.get('agent/turn-stopping').at(-1)({ signal: third });
+  const back = await prepare(runtime, agent, '发布前文案检查要怎么过', 'u4');
+  assert.match(runtime.provider.text({ agent, signal: back }), /发布前文案检查/);
+  runtime.handlers.get('agent/turn-stopping').at(-1)({ signal: back });
+  assert.equal(hitsOf(), 2, '换了任务再想起，才算又一次使用');
+}
+
+// A34：用户改要求后，同一条记忆只留新版本：旧正文不再出现在召回里。
+{
+  const cwd = mkdir('usage-revise');
+  const scope = store.scopeOf(cwd);
+  save(scope, { title: '发布前文案检查', tags: ['记账'], summary: '先跑旧检查' });
+  const runtime = boot();
+  const agent = makeAgent('agent-revise', cwd);
+  const before = await prepare(runtime, agent, '发布前文案检查', 'v1');
+  assert.match(runtime.provider.text({ agent, signal: before }), /先跑旧检查/);
+  runtime.handlers.get('agent/turn-stopping').at(-1)({ signal: before });
+  const revised = save(scope, { title: '发布前文案检查', tags: ['记账'], summary: '先跑 lint 和中文排版检查' });
+  assert.ok(revised.id, '改要求写的是同一条记忆的新版本');
+  const after = await prepare(runtime, agent, '发布前文案检查', 'v2');
+  const text = runtime.provider.text({ agent, signal: after });
+  assert.match(text, /中文排版检查/, '改完之后召回的是新版本');
+  assert.doesNotMatch(text, /先跑旧检查/, '旧版本自动停用，不再被投递');
+  const live = store.loadIndex(scope).entries.filter((item) => !item.supersededBy && item.title === '发布前文案检查');
+  assert.equal(live.length, 1, '同一条记忆只有一份在生效');
+}
+
+// A35：召回耗时上限随条目量放宽。固定 150ms 在 600 条左右会整轮丢弃已算完的投影。
+{
+  const cwd = mkdir('deadline-scale');
+  const scope = store.scopeOf(cwd);
+  const runtime = boot();
+  runtime.debug.setDeadlineMs(150);
+  assert.equal(runtime.debug.deadlineFor(scope), 150, '不到 200 条时仍是 150ms');
+  for (let i = 0; i < 216; i += 1) save(scope, { title: `条目 ${i} 交付规范`, when: `场景 ${i}` });
+  const count = store.loadIndex(scope).entries.length + store.loadIndex(store.globalScope()).entries.length;
+  const expected = Math.max(150, Math.min(400, 150 + Math.floor(Math.max(0, count - 200) / 8)));
+  assert.equal(runtime.debug.deadlineFor(scope), expected, `${count} 条的上限应为 ${expected}ms`);
+  runtime.debug.setDeadlineMs(5000);
+  assert.equal(runtime.debug.deadlineFor(scope), 5000, '显式放宽优先，不被封顶收紧');
+  runtime.debug.setDeadlineMs(150);
+}
+
+// A36：超时丢掉已经算完的投影时，额度要还回去，而且没进模型眼里的条目一条都不算使用。
+{
+  const cwd = mkdir('deadline-rollback');
+  const scope = store.scopeOf(cwd);
+  save(scope, { title: '超时回滚探针', keywords: ['超时回滚探针'], when: '验证额度退还' });
+  for (let i = 0; i < 60; i += 1) save(scope, { title: `超时回滚陪跑 ${i}`, when: `场景 ${i}` });
+  const runtime = boot();
+  const agent = makeAgent('agent-deadline', cwd);
+  runtime.debug.setDeadlineMs(0);
+  await runtime.preStep({ agent, signal: signal(), turn: 't1' }, enter(human('超时回滚探针怎么用')));
+  assert.equal(runtime.debug.preparedOf(agent), null, '超时不留半旧卡片，下一步重新投影');
+  const win = runtime.debug.windowOf(agent);
+  assert.ok(win, '窗口还在，下一真人请求能接着用');
+  assert.equal(win.bytes, 0, '丢掉的正文不占本轮额度');
+  assert.equal(win.bodies, 0, '丢掉的正文不占正文名额');
+  assert.equal(win.reads, 0, '丢掉的正文不占处理次数');
+  assert.equal(store.locateByTitle(scope, '超时回滚探针').record.hits || 0, 0, '没送到就不记账');
+  runtime.debug.setDeadlineMs(150);
+  await runtime.preStep({ agent, signal: signal(), turn: 't1' }, enter(human('超时回滚探针怎么用')));
+  const ok = runtime.debug.preparedOf(agent);
+  assert.ok(ok && ok.cards.length >= 1, '下一真人请求照常拿到卡片');
+}

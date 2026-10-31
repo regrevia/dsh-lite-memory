@@ -2913,7 +2913,8 @@ function saveTargetOf(projectScope, source) {
 
 export function saveEntry(projectScope, source) {
   /** 只锁真正要写的那一层：别的项目写它自己的条目时，不会因为共享全局锁互相等待。 */
-  return withLocks([saveTargetOf(projectScope, source)], () => {
+  let swept = projectScope;
+  const outcome = withLocks([saveTargetOf(projectScope, source)], () => {
     const control = loadIndex(projectScope).__control || state.controlOf(null);
     if (!control.enabled) {
       return { needsScope: true, chosenScope: '', reasonCode: 'memory_disabled', requiredConditions: [], needsResolution: false, similarList: [], draft: null };
@@ -2954,6 +2955,7 @@ export function saveEntry(projectScope, source) {
       }
     }
     /** 更新已有项目条目也必须落在确认过的根目录里。 */
+    swept = targetScope;
     if (targetScope.key !== 'global' && targetScope.confirmed === false) {
       return {
         needsScope: true, chosenScope: '', reasonCode: 'unconfirmed_project',
@@ -2992,6 +2994,9 @@ export function saveEntry(projectScope, source) {
     }
     return { ...result, chosenScope: targetScope.key === 'global' ? 'global' : 'project', needsScope: false, reasonCode: routed.reasonCode };
   });
+  /** 写过一次才顺带跑生命周期：读路径不调用，保证面板与快照零写。 */
+  if (outcome && outcome.needsScope !== true && outcome.needsResolution !== true && outcome.ok !== false) maybeExpire(swept, {});
+  return outcome;
 }
 
 /** 两层合并后的现行规范：同槽位只给胜出的那条；冲突或条件未知的不进自动召回。 */
@@ -3472,7 +3477,7 @@ export function commitLearning(scope, batch = {}) {
   if (!episodeId && String(batch.projectId || '') !== scope.key) return { ok: false, reason: '缺少作品标识' };
   if (!operationId) return { ok: false, reason: '缺少提交标识' };
   if (changes.length > learning.LIMITS.maxChanges) return { ok: false, reason: '一次改动太多' };
-  return withLock(scope, () => {
+  const outcome = withLock(scope, () => {
     if (!(loadIndex(scope).__control || state.controlOf(null)).enabled) return { ok: false, reason: '本项目记忆已关闭' };
     let receipt = null;
     try {
@@ -3638,7 +3643,8 @@ export function commitLearning(scope, batch = {}) {
               continue;
             }
             if (currentRules.length + 1 > learning.LIMITS.rules) throw new Error('项目实验规则已经到上限');
-            const pending = currentRules.filter((entry) => toFlat(entry).learning?.state === 'pending').length;
+            /** 过期候选不占名额：计数用 learning.pendingCount，不用 raw pending 条数。 */
+            const pending = learning.pendingCount(currentRules.map((entry) => toFlat(entry)), now);
             if (pending >= learning.LIMITS.pending) throw new Error('待确认候选已经到上限');
             merged.learning = {
               ...learning.nextLearningState({
@@ -3715,6 +3721,9 @@ export function commitLearning(scope, batch = {}) {
       return { ok: false, reason: error instanceof Error ? error.message : '整理结果没有写入' };
     }
   });
+  /** 整理提交成功也顺带跑一次生命周期；同一项目 24 小时内最多一次。 */
+  if (outcome && outcome.ok === true && outcome.replayed !== true) maybeExpire(scope, {});
+  return outcome;
 }
 
 /** 用一次未通过校验或失败的调用留回执：不写正文，但保留真实用量。 */
@@ -4044,32 +4053,126 @@ export function resumeLearningRule(scope, id, options = {}) {
   });
 }
 
-/** 到期的试用转暂停、过期候选清掉；只在已有管理边界的写事务里调用。 */
+/** ── 学习生命周期：只在写入口顺带跑，没有后台定时器 ───────────────── */
+
+/** 同一项目两次自动清理的最小间隔；以及单轮最多处理的条目数。 */
+const LIFECYCLE_SWEEP_MS = 24 * 60 * 60 * 1000;
+const LIFECYCLE_SWEEP_MAX = 8;
+const LIFECYCLE_MARK_FILE = '.lifecycle.json';
+
+/** 上次清理时间记在项目目录的旁路文件里：不动记忆状态结构，也不占条目预算。 */
+export function lifecycleMarkPath(scope) {
+  return path.join(scope.dir, LIFECYCLE_MARK_FILE);
+}
+
+function lastLifecycleRunAt(scope) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(lifecycleMarkPath(scope), 'utf8'));
+    const at = Date.parse((parsed && parsed.lastRunAt) || '');
+    return Number.isFinite(at) ? at : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function noteLifecycleRun(scope, now) {
+  const target = lifecycleMarkPath(scope);
+  const temp = `${target}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+  try {
+    fs.mkdirSync(scope.dir, { recursive: true });
+    fs.writeFileSync(temp, JSON.stringify({ version: 1, lastRunAt: new Date(now).toISOString() }));
+    fs.renameSync(temp, target);
+    return true;
+  } catch {
+    try { fs.unlinkSync(temp); } catch { /* 临时文件没写出来 */ }
+    return false;
+  }
+}
+
+/**
+ * 生命周期入口：只在「合法写入 / 学习提交 / 用户显式管理动作」之后调用。
+ * 同一项目 24 小时内最多跑一次，每轮最多处理 LIFECYCLE_SWEEP_MAX 条；
+ * 先落时间标记再清理，异常时宁可这轮不清理，也不会反复重跑。
+ * 读路径（面板、快照、搜索、召回）不调用它，保证只读不落盘。
+ */
+export function maybeExpire(scope, options = {}) {
+  const now = Number(options.now) || Date.now();
+  if (!scope || scope.confirmed === false) return null;
+  const last = lastLifecycleRunAt(scope);
+  if (last && now - last < LIFECYCLE_SWEEP_MS) return null;
+  try {
+    const index = loadIndex(scope);
+    const control = index.__control || state.controlOf(null);
+    if (!control.enabled) return null;
+    const evolution = index.__evolution;
+    if (!evolution || evolution.enabled !== true) return null;
+    noteLifecycleRun(scope, now);
+    return expireLearning(scope, { ...options, now });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 到期的试用转暂停、过期候选转可恢复的暂停、暂停超期的才清理。
+ * 只在已有管理边界的写事务里调用；每次最多处理 cap 条，避免一次写太多。
+ * active 与用户固定（pinned）的条目绝不走 TTL；过期候选暂停后也不自动删除。
+ */
 export function expireLearning(scope, options = {}) {
   const now = options.now || Date.now();
   const at = new Date(now).toISOString();
+  const cap = Number.isInteger(options.cap) && options.cap > 0 ? options.cap : LIFECYCLE_SWEEP_MAX;
   return withLock(scope, () => {
     if (managementClosed(scope)) return { ok: false, code: 'memory_disabled', reason: '本项目记忆已关闭' };
     try {
       const result = state.transact(scope, { operationId: options.operationId || '' }, (draft) => {
         const evolution = draft.experimental && draft.experimental.projectEvolution;
         if (!evolution || evolution.enabled !== true) return { changed: false };
-        const flat = draft.entries.filter((entry) => entry.status === 'active').map(toFlat);
+        const active = draft.entries.filter((entry) => entry.status === 'active');
+        const flat = active.map(toFlat);
+        const byId = new Map(flat.map((entry) => [entry.id, entry]));
         const plan = learning.lifecycle(flat, now);
+        let left = cap;
         let changed = 0;
-        draft.entries = draft.entries.filter((entry) => !(entry.status === 'active' && plan.purge.includes(entry.id)));
-        changed += plan.purge.length;
-        for (const entry of draft.entries) {
-          if (entry.status !== 'active' || !plan.paused.includes(entry.id)) continue;
-          const current = toFlat(entry);
+        const entryOf = (id) => draft.entries.find((entry) => entry.id === id && entry.status === 'active');
+        /** 过期候选只转成可恢复的暂停，不销毁内容，名额随即释放。 */
+        for (const id of plan.recoverable) {
+          if (left <= 0) break;
+          const current = byId.get(id);
+          const entry = entryOf(id);
+          if (!current || !entry) continue;
+          entry.maintenance = {
+            ...(entry.maintenance || {}),
+            learning: learning.pauseLearning(current.learning, { by: 'ttl', reason: 'candidate_expired', now }),
+          };
+          entry.updatedAt = at;
+          left -= 1;
+          changed += 1;
+        }
+        /** 暂停超期的按生命周期语义清理；过期候选暂停的不在此列（内容留着让用户恢复）。 */
+        const purge = plan.purge.filter((id) => {
+          const current = byId.get(id);
+          return !(current && current.learning && current.learning.blockedReason === 'candidate_expired');
+        }).slice(0, Math.max(left, 0));
+        const doomed = new Set(purge);
+        if (doomed.size) draft.entries = draft.entries.filter((entry) => !(entry.status === 'active' && doomed.has(entry.id)));
+        left -= doomed.size;
+        changed += doomed.size;
+        for (const id of plan.paused) {
+          if (left <= 0) break;
+          if (doomed.has(id)) continue;
+          const current = byId.get(id);
+          const entry = entryOf(id);
+          if (!current || !entry) continue;
           entry.maintenance = {
             ...(entry.maintenance || {}),
             learning: learning.pauseLearning(current.learning, { by: 'ttl', reason: 'trial_expired', now }),
           };
           entry.updatedAt = at;
+          left -= 1;
           changed += 1;
         }
-        return changed ? { changed: true, kind: 'learning_expire' } : { changed: false };
+        return changed ? { changed: true, kind: 'learning_expire', expired: changed } : { changed: false };
       });
       return { ok: true, changed: result.changed === true, replayed: result.replayed === true };
     } catch (error) {

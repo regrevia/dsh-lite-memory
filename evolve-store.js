@@ -324,6 +324,10 @@ export function applyProposal(scope, proposal, { cases, now = Date.now() } = {})
   if (!proposal || !proposal.params) return { ok: false, reason: 'no_change' };
   const params = evolve.normalizeParams(proposal.params);
   if (evolve.sameParams(params, lab.params)) return { ok: false, reason: 'no_change' };
+  /** 采纳前按服务端最终证据重跑一遍：指标与「哪条变好」以重跑为准，不信调用方带进来的数字。 */
+  const rerun = Array.isArray(cases) && cases.length ? evolve.replay(cases, params) : null;
+  const baseline = rerun ? evolve.replay(cases, lab.params) : null;
+  const verdict = rerun ? evolve.compareReplay(baseline, rerun) : null;
   const at = new Date(now).toISOString();
   const history = [
     ...lab.history,
@@ -332,8 +336,10 @@ export function applyProposal(scope, proposal, { cases, now = Date.now() } = {})
       key: String(proposal.key || ''),
       from: { ...lab.params },
       to: params,
-      metrics: proposal.metrics || null,
-      improved: Array.isArray(proposal.improved) ? proposal.improved.slice(0, evolve.LIMITS.maxCases) : [],
+      metrics: rerun
+        ? { hit: rerun.hit, expect: rerun.expect, position: rerun.position, falseHit: rerun.falseHit, bytes: rerun.bytes }
+        : proposal.metrics || null,
+      improved: (verdict ? verdict.improved : (Array.isArray(proposal.improved) ? proposal.improved : [])).slice(0, evolve.LIMITS.maxCases),
       digest: lab.replay.digest,
     },
   ].slice(-MAX_HISTORY);
