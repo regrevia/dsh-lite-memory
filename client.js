@@ -2079,24 +2079,18 @@ window.__ModuleLoader__.load({
     };
 
 
-    const PalaceSlot = (props) => {
+    const PalaceNiche = (props) => {
       const record = props.record;
-      if (!record) {
-        return h('div', {
-          'aria-hidden': 'true',
-          style: { height: '46px', border: '1px dashed var(--dsw-alias-border-l1)', borderRadius: '8px', opacity: 0.28 },
-        });
-      }
       const title = String(record.title || '记忆');
       return h('button', {
-        type: 'button', title, 'aria-label': title,
+        type: 'button', title, 'aria-label': title, 'data-palace-niche': record.id,
         onClick: () => props.onPick(record.id),
         style: {
           height: '46px', minWidth: 0, display: 'flex', flexDirection: 'column', justifyContent: 'center',
-          padding: '4px 7px', textAlign: 'left', cursor: 'pointer',
-          border: `1px solid ${props.active ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-border-l1)'}`,
-          borderRadius: '8px', color: 'inherit',
+          padding: '4px 7px', textAlign: 'left', cursor: 'pointer', color: 'inherit',
+          border: 'none', borderRadius: '8px',
           background: props.active ? 'var(--dsw-alias-bg-layer-2)' : 'var(--dsw-alias-bg-base)',
+          outline: props.active ? '1px solid var(--dsw-alias-brand-primary)' : 'none',
         },
       },
       h('span', {
@@ -2108,76 +2102,65 @@ window.__ModuleLoader__.load({
       );
     };
 
-    const PalaceRoomCard = (props) => {
-      const room = props.room;
-      const empty = room.total === 0;
-      const preview = room.items.slice(0, palaceSlotCountOf(room.total));
-      const slots = Array.from({ length: palaceSlotCountOf(room.total) }, (_, index) => preview[index] || null);
-      return h('div', {
-        role: 'listitem',
-        style: { ...PANEL_CARD, padding: 0, position: 'relative', overflow: 'hidden', display: 'flex', width: '100%', flexDirection: 'column' },
-      },
-      h('div', { style: { position: 'relative', display: 'flex', flexDirection: 'column', gap: '8px', padding: '9px 10px 10px', boxSizing: 'border-box' } },
-        h('button', {
-          type: 'button', 'aria-expanded': empty ? undefined : props.expanded, 'aria-controls': empty ? undefined : `lite-palace-room-${room.id}`,
-          disabled: empty,
-          onClick: () => { if (!empty) props.onToggle(room.id); },
-          style: { ...PANEL_LINK, width: '100%', display: 'flex', alignItems: 'center', gap: '7px', textAlign: 'left', opacity: 1 },
-        },
-        h('span', { style: { fontSize: '12px', lineHeight: '18px', fontWeight: 600, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, room.name),
-        h('span', { style: { ...PANEL_MUTED, flex: '0 0 auto', fontVariantNumeric: 'tabular-nums' } }, `${room.total} 条`),
-        empty ? null : h('span', { style: { ...PANEL_MUTED, flex: '0 0 auto', marginLeft: 'auto', opacity: 0.6 } }, props.expanded ? '收起' : '展开'),
-        ),
-        empty
-          ? h('span', { style: { ...PANEL_MUTED, padding: '2px 0 4px' } }, '还没有记录')
-          : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(96px, 1fr))', gap: '6px' } },
-            slots.map((record, index) => h(PalaceSlot, {
-              key: record ? record.id : `slot-${room.id}-${index}`,
-              record, active: Boolean(record && record.id === props.selectedId), onPick: props.onPick,
-            }))),
-      ),
-      );
-    };
-
+    /**
+     * 第一视角宫殿：走廊→房间→壁龛，一次只展开当前层。
+     * 纯展示已加载的 snapshot，不发请求、不写记忆。
+     */
     const MemoryPalace = (props) => {
       const rows = Array.isArray(props.records) ? props.records : EMPTY;
-      const [expanded, setExpanded] = React.useState('');
-      const [page, setPage] = React.useState(1);
-      const panelRef = React.useRef(null);
+      const [roomId, setRoomId] = React.useState(props.openedRoom ? String(props.openedRoom) : '');
+      const [pages, setPages] = React.useState({});
+      const doorRefs = React.useRef({});
+      const floorRef = React.useRef(null);
+      const frameRef = React.useRef(0);
+      const lastRoom = React.useRef('');
       const reduced = useReducedMotion();
-      const motion = palaceMotionOf(reduced);
       const rooms = React.useMemo(() => palaceRoomsOf(rows), [rows]);
-      const activeRoom = rooms.find((room) => room.id === expanded) || null;
-      const pageInfo = activeRoom ? palaceRoomPageOf(rows, activeRoom.id, page) : null;
+      const corridor = React.useMemo(() => palaceCorridorOf(rows), [rows]);
+      const room = rooms.find((item) => item.id === roomId) || null;
+      const pageInfo = room ? palaceRoomPageOf(rows, room.id, palacePageAtOf(pages, room.id)) : null;
 
       React.useEffect(() => {
-        if (expanded && !rooms.some((room) => room.id === expanded)) setExpanded('');
-      }, [rooms, expanded]);
+        if (roomId && !room) setRoomId('');
+      }, [roomId, room]);
+      // 走廊的一线灯光只改像素、不进状态；离开走廊或卸载时停掉，不留下常驻动画。
       React.useEffect(() => {
-        const node = panelRef.current;
-        if (!expanded || !node || motion.duration === 0 || typeof node.animate !== 'function') return;
-        node.animate([
-          { opacity: 0, transform: 'translateY(-6px)' },
-          { opacity: 1, transform: 'translateY(0)' },
-        ], { duration: motion.duration, easing: motion.easing });
-      }, [expanded, page, motion.duration, motion.easing]);
+        if (roomId || reduced || typeof globalThis.requestAnimationFrame !== 'function') return undefined;
+        const started = Date.now();
+        const tick = () => {
+          const node = floorRef.current;
+          if (node) node.style.opacity = String(0.72 + Math.sin((Date.now() - started) / 900) * 0.1);
+          frameRef.current = globalThis.requestAnimationFrame(tick);
+        };
+        frameRef.current = globalThis.requestAnimationFrame(tick);
+        return () => {
+          if (frameRef.current) globalThis.cancelAnimationFrame(frameRef.current);
+          frameRef.current = 0;
+        };
+      }, [roomId, reduced]);
+      // 回到走廊时把焦点还给刚进过的那扇门，不跳回走廊开头。
+      React.useEffect(() => {
+        if (roomId) return;
+        const node = doorRefs.current[lastRoom.current];
+        if (node && typeof node.focus === 'function') node.focus();
+      }, [roomId]);
 
       if (rows.length === 0) {
         return h('div', { style: { ...PANEL_CARD, padding: '14px', minHeight: 0 } },
           h('div', { style: PANEL_MUTED }, props.emptyText || '这个项目还没有记忆'));
       }
-      const toggle = (roomId) => {
-        setExpanded((current) => palaceToggleOf(current, roomId));
-        setPage(1);
+      const openRoom = (target) => {
+        lastRoom.current = target;
+        setRoomId(target);
       };
-      const goPage = (target) => {
-        if (!pageInfo) return;
-        setPage(Math.min(pageInfo.pages, Math.max(1, target)));
+      const changePage = (target) => {
+        if (!room || !pageInfo) return;
+        setPages((current) => palacePageWithOf(current, room.id, Math.min(pageInfo.pages, Math.max(1, target))));
       };
       const pageButton = (label, target, disabled, current) => h('button', {
         key: `page-${target}-${label}`, type: 'button', disabled,
         'aria-current': current ? 'page' : undefined, 'aria-label': `第 ${target} 页`,
-        onClick: () => goPage(target),
+        onClick: () => changePage(target),
         style: {
           ...PANEL_LINK, minWidth: '22px', height: '22px', padding: '0 5px', borderRadius: '6px',
           border: 'none', opacity: disabled ? 0.28 : current ? 0.85 : 0.5,
@@ -2185,68 +2168,80 @@ window.__ModuleLoader__.load({
           fontVariantNumeric: 'tabular-nums', cursor: disabled ? 'default' : 'pointer',
         },
       }, label);
+      const onKeyDown = (event) => {
+        if (!pageInfo || pageInfo.pages <= 1) return;
+        if (event.key === 'ArrowRight' && pageInfo.page < pageInfo.pages) {
+          event.preventDefault();
+          changePage(pageInfo.page + 1);
+        }
+        if (event.key === 'ArrowLeft' && pageInfo.page > 1) {
+          event.preventDefault();
+          changePage(pageInfo.page - 1);
+        }
+        if (event.key === 'Home' && pageInfo.page > 1) {
+          event.preventDefault();
+          changePage(1);
+        }
+        if (event.key === 'End' && pageInfo.page < pageInfo.pages) {
+          event.preventDefault();
+          changePage(pageInfo.pages);
+        }
+      };
       const pageSlots = pageInfo
         ? Array.from({ length: pageInfo.items.length ? Math.ceil(pageInfo.items.length / 6) * 6 : 0 }, (_, index) => pageInfo.items[index] || null)
         : EMPTY;
-      return h('div', {
-        role: 'group', 'aria-label': '记忆宫殿',
-        onKeyDown: (event) => {
-          if (!pageInfo || pageInfo.pages <= 1) return;
-          if (event.key === 'ArrowRight' && pageInfo.page < pageInfo.pages) {
-            event.preventDefault();
-            goPage(pageInfo.page + 1);
-          }
-          if (event.key === 'ArrowLeft' && pageInfo.page > 1) {
-            event.preventDefault();
-            goPage(pageInfo.page - 1);
-          }
-          if (event.key === 'Home' && pageInfo.page > 1) {
-            event.preventDefault();
-            goPage(1);
-          }
-          if (event.key === 'End' && pageInfo.page < pageInfo.pages) {
-            event.preventDefault();
-            goPage(pageInfo.pages);
-          }
-        },
-        style: { ...PANEL_CARD, padding: '10px', minHeight: 0, flex: '0 0 auto', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '10px' },
-      },
-      h('div', {
-        role: 'list',
-        'aria-label': '记忆房间',
-        style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(232px, 1fr))', gap: '9px' },
-      },
-        rooms.map((room) => h(PalaceRoomCard, {
-          key: room.id, room, expanded: room.id === expanded, selectedId: props.selectedId,
-          onPick: props.onPick, onToggle: toggle,
-        }))),
-      h('div', { 'aria-live': 'polite', style: { ...PANEL_MUTED, marginTop: '-2px' } }, `${rooms.length} 个房间 · ${rows.length} 条`),
-      activeRoom && activeRoom.total > 0 && pageInfo
-        ? h('section', {
-          id: `lite-palace-room-${activeRoom.id}`, 'aria-label': activeRoom.name, ref: panelRef,
-          style: { borderTop: '1px solid var(--dsw-alias-border-l1)', paddingTop: '9px', display: 'flex', flexDirection: 'column', gap: '8px' },
-        },
-        h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
-          h('span', { style: { fontSize: '12px', lineHeight: '1.4', fontWeight: 600 } }, activeRoom.name),
-          h('span', { style: PANEL_MUTED, 'aria-live': 'polite', 'aria-atomic': 'true' }, `${pageInfo.total} 条${pageInfo.pages > 1 ? ` · 第 ${pageInfo.page} / ${pageInfo.pages} 页` : ''}`),
+
+      if (!room) {
+        return h('div', { role: 'group', 'aria-label': '记忆宫殿', style: { ...PANEL_CARD, padding: 0, overflow: 'hidden', minHeight: 0, flex: '0 0 auto' }, onKeyDown },
+          h('div', { role: 'region', 'aria-label': '走廊', style: { position: 'relative', height: '240px', background: 'var(--dsw-alias-bg-layer-1)', overflow: 'hidden' } },
+            h('div', { 'aria-hidden': 'true', style: { position: 'absolute', left: 0, right: 0, top: 0, height: '18%', background: 'var(--dsw-alias-bg-layer-2)', clipPath: 'polygon(0 0, 100% 0, 82% 100%, 18% 100%)' } }),
+            h('div', { ref: floorRef, 'aria-hidden': 'true', style: { position: 'absolute', left: 0, right: 0, bottom: 0, height: '26%', background: 'var(--dsw-alias-bg-layer-2)', clipPath: 'polygon(18% 0, 82% 0, 100% 100%, 0 100%)' } }),
+            h('div', { role: 'list', 'aria-label': '房间门', style: { position: 'absolute', left: '4%', right: '4%', bottom: '26%', height: '56%' } },
+              corridor.map((door) => h('button', {
+                key: door.id, type: 'button', disabled: door.total === 0,
+                'aria-label': `${door.name}，${door.total} 条`, 'data-palace-door': door.id,
+                ref: (node) => { doorRefs.current[door.id] = node; },
+                onClick: () => { if (door.total > 0) openRoom(door.id); },
+                style: {
+                  position: 'absolute', bottom: 0, left: `${(door.slot * 100) / PALACE_DOOR_LANES}%`,
+                  width: '19%', height: '100%', boxSizing: 'border-box', padding: '6px 4px',
+                  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', gap: '2px',
+                  border: '1px solid var(--dsw-alias-border-l1)', borderBottom: 'none', borderRadius: '7px 7px 0 0',
+                  background: door.total === 0 ? 'transparent' : 'var(--dsw-alias-bg-base)', color: 'inherit',
+                  cursor: door.total === 0 ? 'default' : 'pointer', opacity: door.total === 0 ? 0.42 : 1,
+                },
+              },
+              h('span', { style: { fontSize: '11px', lineHeight: '15px', fontWeight: 600, textAlign: 'center', wordBreak: 'break-word' } }, door.name),
+              h('span', { style: { ...PANEL_MUTED, fontVariantNumeric: 'tabular-nums' } }, `${door.total} 条`),
+              )),
+            ),
+          ),
+          h('div', { style: { ...PANEL_MUTED, padding: '8px 10px 10px' } }, `${rooms.length} 个房间 · ${rows.length} 条`),
+        );
+      }
+      return h('div', { role: 'group', 'aria-label': '记忆宫殿', style: { ...PANEL_CARD, padding: 0, overflow: 'hidden', minHeight: 0, flex: '0 0 auto' }, onKeyDown },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 10px 6px' } },
           h('button', {
-            type: 'button', onClick: () => toggle(activeRoom.id),
-            style: { ...PANEL_LINK, marginLeft: 'auto', height: '24px', padding: '0 7px', borderRadius: '6px', border: '1px solid var(--dsw-alias-border-l1)' },
-          }, '收起'),
+            type: 'button', onClick: () => setRoomId(''),
+            style: { ...PANEL_LINK, opacity: 1, padding: '0 4px', height: '22px', borderRadius: '6px' },
+          }, '← 走廊'),
+          h('span', { style: { fontSize: '12px', lineHeight: '18px', fontWeight: 600 } }, room.name),
+          h('span', { style: { ...PANEL_MUTED, marginLeft: 'auto', fontVariantNumeric: 'tabular-nums' } }, `${pageInfo.total} 条${pageInfo.pages > 1 ? ` · 第 ${pageInfo.page} / ${pageInfo.pages} 页` : ''}`),
         ),
-        h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(96px, 1fr))', gap: '6px' } },
-          pageSlots.map((record, index) => h(PalaceSlot, {
-            key: record ? record.id : `page-${pageInfo.page}-slot-${index}`,
-            record, active: Boolean(record && record.id === props.selectedId), onPick: props.onPick,
-          }))),
+        h('div', {
+          role: 'list', 'aria-label': `${room.name}的壁龛`,
+          style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(84px, 1fr))', gap: '6px', padding: '8px 10px 10px', background: 'var(--dsw-alias-bg-layer-1)', borderTop: '1px solid var(--dsw-alias-border-l1)' },
+        },
+        pageSlots.map((record, index) => record
+          ? h(PalaceNiche, { key: record.id, record, active: record.id === props.selectedId, onPick: props.onPick })
+          : h('div', { key: `niche-${room.id}-${pageInfo.page}-${index}`, 'aria-hidden': 'true', style: { height: '46px' } }))),
         pageInfo.pages > 1
-          ? h('div', { role: 'navigation', 'aria-label': '分页', style: { display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' } },
+          ? h('div', { role: 'navigation', 'aria-label': '分页', style: { display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap', padding: '0 10px 6px' } },
             pageButton('上一页', pageInfo.page - 1, pageInfo.page <= 1, false),
             palacePageWindow(pageInfo.page, pageInfo.pages).map((number) => pageButton(String(number), number, false, number === pageInfo.page)),
             pageButton('下一页', pageInfo.page + 1, pageInfo.page >= pageInfo.pages, false))
           : null,
-        )
-        : null,
+        h('div', { style: { ...PANEL_MUTED, padding: '0 10px 10px' } }, '点壁龛看这条记忆的正文'),
       );
     };
 
@@ -3162,21 +3157,6 @@ window.__ModuleLoader__.load({
           display: 'flex', flexDirection: 'column', gap: 0,
         },
       }, conflictBar, memoryList);
-      const memoryGraphPane = h('div', {
-        style: { ...PANEL_CARD, padding: 0, minHeight: 0, overflow: 'hidden', display: 'flex' },
-      },
-      h(MemoryGraph, {
-        records: graphFiltered, total: hubFilter ? graphFiltered.length : total,
-        selectedId: selectedMemory, onPick: onPickNode,
-        onPickHub,
-        emptyText: query || hubFilter ? '没有匹配的记忆' : '还没有记忆', ariaLabel: '记忆关系图',
-        legend: '实心 记忆 · 空心 标签/主题 · 虚线 归类 · 点标签筛选，点记忆看正文',
-      }));
-      const memoryPalacePane = h(MemoryPalace, {
-        key: selectedKey, records: filtered, selectedId: selectedMemory,
-        onPick: (id) => { setSelectedMemory(id); setSelectedRule(''); },
-        emptyText: query ? '没有匹配的记忆' : '这个项目还没有记忆',
-      });
       const memoryTab = h('div', { role: 'tabpanel', 'aria-label': '记忆', style: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: '9px' } },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flex: '0 0 auto' } },
           hubFilter && memoryViewActive === 'graph' ? h('button', {
@@ -3205,9 +3185,26 @@ window.__ModuleLoader__.load({
           },
         },
         h('div', { style: { position: 'relative', minWidth: 0, minHeight: 0, display: 'flex' } },
-          h('div', { style: { display: memoryViewActive === 'graph' ? 'flex' : 'none', minWidth: 0, minHeight: 0, width: '100%' } }, memoryGraphPane),
-          h('div', { style: { display: memoryViewActive === 'palace' ? 'flex' : 'none', minWidth: 0, minHeight: 0, width: '100%' } }, memoryPalacePane),
-          h('div', { style: { display: memoryViewActive === 'list' ? 'flex' : 'none', minWidth: 0, minHeight: 0, width: '100%', flexDirection: 'column' } }, memoryListPane)),
+          viewPaneOf(memoryViewActive, {
+            graph: () => h('div', { style: { display: 'flex', minWidth: 0, minHeight: 0, width: '100%' } },
+              h('div', {
+                style: { ...PANEL_CARD, padding: 0, minHeight: 0, overflow: 'hidden', display: 'flex' },
+              },
+              h(MemoryGraph, {
+                records: graphFiltered, total: hubFilter ? graphFiltered.length : total,
+                selectedId: selectedMemory, onPick: onPickNode,
+                onPickHub,
+                emptyText: query || hubFilter ? '没有匹配的记忆' : '还没有记忆', ariaLabel: '记忆关系图',
+                legend: '实心 记忆 · 空心 标签/主题 · 虚线 归类 · 点标签筛选，点记忆看正文',
+              }))),
+            palace: () => h('div', { style: { display: 'flex', minWidth: 0, minHeight: 0, width: '100%' } },
+              h(MemoryPalace, {
+                key: selectedKey, records: filtered, selectedId: selectedMemory,
+                onPick: (id) => { setSelectedMemory(id); setSelectedRule(''); },
+                emptyText: query ? '没有匹配的记忆' : '这个项目还没有记忆',
+              })),
+            list: () => h('div', { style: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, width: '100%' } }, memoryListPane),
+          })),
         h(PersonaSection, { key: 'persona', sessionId, personaOn }),
         memoryDetail),
       );
@@ -3284,15 +3281,6 @@ window.__ModuleLoader__.load({
           display: 'flex', flexDirection: 'column', gap: '2px',
         },
       }, evolutionList);
-      const evolutionGraphPane = h('div', {
-        style: { ...PANEL_CARD, padding: 0, minHeight: 0, overflow: 'hidden', display: 'flex' },
-      },
-      h(MemoryGraph, {
-        records: filteredRules, total: filteredRules.length, graphOf: ruleGraphOf, primaryKind: 'rule',
-        selectedId: selectedRule, onPick: onPickRuleNode,
-        emptyText: evolutionEmptyText, ariaLabel: '经验关系图',
-        legend: '实心 经验 · 空心 条件 · 虚线 共用条件 · 点经验查看',
-      }));
       const evolutionCheckupPane = h('div', {
         style: {
           ...PANEL_CARD, padding: '4px', flex: '0 0 auto', minHeight: 0, overflowY: 'auto',
@@ -3325,7 +3313,17 @@ window.__ModuleLoader__.load({
             gridTemplateColumns: !checkup && selectedRuleRow ? 'minmax(0, 1fr) minmax(280px, 340px)' : 'minmax(0, 1fr)',
           },
         },
-        checkup ? evolutionCheckupPane : (evolutionViewActive === 'graph' ? evolutionGraphPane : evolutionListPane),
+        checkup ? evolutionCheckupPane : viewPaneOf(evolutionViewActive, {
+          graph: () => h('div', { style: { ...PANEL_CARD, padding: 0, minHeight: 0, overflow: 'hidden', display: 'flex' } },
+            h(MemoryGraph, {
+              records: filteredRules, total: filteredRules.length, graphOf: ruleGraphOf, primaryKind: 'rule',
+              selectedId: selectedRule, onPick: onPickRuleNode,
+              emptyText: evolutionEmptyText, ariaLabel: '经验关系图',
+              legend: '实心 经验 · 空心 条件 · 虚线 共用条件 · 点经验查看',
+            })),
+          palace: () => evolutionListPane,
+          list: () => evolutionListPane,
+        }),
         checkup ? null : evolutionDetailPane),
       );
 
@@ -3419,7 +3417,7 @@ window.__ModuleLoader__.load({
 
     // 测试缝：Node 里验引用投影，浏览器里没有任何副作用。
     if (typeof globalThis.__LITE_MEMORY_TEST__ === 'function') {
-      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, PersonaSection, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row, conflictVisibleRows, conflictFactsOf, conflictNote });
+      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, PersonaSection, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceHashOf, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row, conflictVisibleRows, conflictFactsOf, conflictNote });
     }
 
     return {

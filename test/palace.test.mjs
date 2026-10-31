@@ -79,6 +79,7 @@ assert.equal(palaceMotionOf(false).duration, 180);
 let picked = '';
 const tree = MemoryPalace({
   records: [record('mem_a', 'preference', 'A')],
+  openedRoom: 'habits',
   selectedId: '', onPick: (id) => { picked = id; }, emptyText: '这个项目还没有记忆',
 });
 const walk = (node, out = [], expand = false) => {
@@ -94,6 +95,35 @@ const beforeClick = JSON.stringify(tree);
 exhibit.props.onClick();
 assert.equal(picked, 'mem_a');
 assert.equal(JSON.stringify(tree), beforeClick, '点开展品只换详情，不改宫殿里的记录');
+
+// 按需挂载：没展开的房间不把展品塞进树里，展开哪间只画哪间。
+const mountRecords = [record('mem_m1', 'preference', 'M1'), record('mem_m2', 'procedure', 'M2')];
+const shutTree = MemoryPalace({ records: mountRecords, openedRoom: '', selectedId: '', onPick: () => {}, emptyText: '' });
+const shutButtons = walk(shutTree, [], true).filter((node) => node.type === 'button' && /^M[12]$/.test(node.props.title || ''));
+assert.equal(shutButtons.length, 0, '走廊层不预挂房间里的展品');
+const openTree = MemoryPalace({ records: mountRecords, openedRoom: 'habits', selectedId: '', onPick: () => {}, emptyText: '' });
+const openTitles = walk(openTree, [], true).filter((node) => node.type === 'button').map((node) => node.props.title);
+assert.equal(openTitles.includes('M1'), true, '展开习惯房间才挂 M1');
+assert.equal(openTitles.includes('M2'), false, '别的房间的展品不跟着挂');
+
+// 逛宫殿是纯读：遍历所有房间和页，不点展品就一次也不交 id，也不改记录。
+const wanderRecords = [
+  record('mem_w1', 'preference', 'W1'), record('mem_w2', 'procedure', 'W2'),
+  record('mem_w3', 'pointer', 'W3'), record('mem_w4', 'unknown_kind', 'W4'),
+];
+const wanderSnapshot = JSON.stringify(wanderRecords);
+let wandered = 0;
+for (const room of palaceRoomsOf(wanderRecords)) {
+  const treeOfRoom = MemoryPalace({
+    records: wanderRecords, openedRoom: room.id, selectedId: '', onPick: () => { wandered += 1; }, emptyText: '',
+  });
+  assert.ok(walk(treeOfRoom, [], true).length > 0, `房间 ${room.name} 能画出来`);
+}
+for (const id of ['habits', 'methods', 'materials', 'notes']) {
+  for (let page = 1; page <= 3; page += 1) palaceRoomPageOf(wanderRecords, id, page);
+}
+assert.equal(wandered, 0, '浏览宫殿不等于选中展品，不往详情/模型方向递东西');
+assert.equal(JSON.stringify(wanderRecords), wanderSnapshot, '浏览不改记录本身');
 
 // 首帧列表视图不挂载宫殿；空数据时给下一步提示。
 const firstPaint = MemoryPanel({ sessionId: 'demo', onClose: () => {} });
