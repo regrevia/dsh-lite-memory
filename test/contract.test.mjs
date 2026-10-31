@@ -970,11 +970,12 @@ const slotRow = [...resolvedSlots.values()].find((row) => row.key === '发版检
 assert.ok(slotRow);
 assert.equal(slotRow.status, 'conflict');
 
-/** 工具参数里的 links / selection.items / topicKey:null 是合法输入，不能被 schema 挡掉或被校验器拒绝。 */
+/** 工具参数里的 links / selection.items 是合法输入，不能被 schema 挡掉；空值清空走显式开关（宿主不收 type 数组）。 */
 assert.equal(saveParams.links.items.type, 'object');
 assert.deepEqual(saveParams.links.items.required, ['title']);
 assert.equal(saveParams.selection.properties.items.type, 'array');
-assert.deepEqual(saveParams.topicKey.type, ['string', 'null']);
+assert.equal(saveParams.topicKey.type, 'string');
+assert.equal(saveParams.clearSelection.type, 'boolean');
 const linkedA = await exec2('memory_save', { title: '关联目标甲', summary: '用来当关联目标', body: '甲', scope: 'project' });
 const linkedB = await exec2('memory_save', {
   title: '关联目标乙',

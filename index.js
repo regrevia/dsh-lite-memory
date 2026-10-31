@@ -1188,7 +1188,7 @@ const SAVE_PARAMS = {
       },
     },
     selection: {
-      type: ['object', 'null'],
+      type: 'object',
       description: '只对某产物成立：complete 清单完整（须 artifactKey），examples 仅举例；null 清空',
       properties: {
         mode: { type: 'string', enum: view.SELECTION_MODES },
@@ -1216,7 +1216,8 @@ const SAVE_PARAMS = {
       items: { type: 'string' },
       description: '自动召回触发词，最多 4 个；空数组清空',
     },
-    topicKey: { type: ['string', 'null'], description: '主题槽位，去重用；null 清空' },
+    topicKey: { type: 'string', description: '主题槽位，去重用；空串清空' },
+    clearSelection: { type: 'boolean', description: 'true 清掉 selection' },
   },
   required: ['title', 'summary'],
   additionalProperties: false,
@@ -2412,7 +2413,7 @@ export function apply(ctx, config) {
 
   ctx.effect(() => tools.register({
     name: 'memory_save',
-    description: `保存一条跨会话有用的记忆。只在会改变以后判断时存；先搜，能更新就不新建。用户说「记住」或话已是长期规则（「以后都这样」「别再 X」）时直接调用，不要先问。文本相近但标题不同时先不写，返回 needsResolution 后核对：是同一件事就改成那个标题重存，确实是另一条才带 resolution="distinct"。按标题更新时未给字段保留，正文整段替换；旧正文只留作内部撤回，不展示不检索。前置条件不同同一标题可存两条。${NOTES}`,
+    description: `保存一条跨会话有用的记忆。只在会改变以后判断时存；先搜，能更新就不新建。用户说「记住」或话已是长期规则（「以后都这样」「别再 X」）时直接调用，不要先问。文本相近但标题不同时先不写，返回 needsResolution 后核对：是同一件事就改成那个标题重存，确实是另一条才带 resolution="distinct"。按标题更新时未给字段保留，正文整段替换；旧正文留作撤回。前置条件不同同一标题可存两条。${NOTES}`,
     parameters: SAVE_PARAMS,
     output: {
       presentationMeta: (_args, value) => ({
@@ -2518,6 +2519,9 @@ export function apply(ctx, config) {
         scopeConfirmed: humanGlobal,
         requestedScope: args.scope,
       };
+      if (args.clearSelection) draft.selection = null;
+      if (typeof args.topicKey === 'string' && args.topicKey.trim() === '') draft.topicKey = null;
+      delete draft.clearSelection;
       if (humanGlobal) draft.scope = 'global'; else delete draft.scope;
       if (supersedes) { if (supersedesId) draft.supersedes = supersedesId; else delete draft.supersedes; }
       /** 更新句柄也用标题：id 只是底层实现，模型抄标题就行。 */
@@ -3224,7 +3228,7 @@ export function apply(ctx, config) {
           defaults: { type: 'object', additionalProperties: true },
           corrupt: { type: 'boolean' },
           revision: { type: 'number' },
-          proposal: { type: ['object', 'null'], additionalProperties: true },
+          proposal: { type: 'object', additionalProperties: true },
           baseline: { type: 'object', additionalProperties: true },
           applied: { type: 'object', additionalProperties: true },
           lastChange: { type: 'object', additionalProperties: true },
