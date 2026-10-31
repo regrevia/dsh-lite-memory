@@ -25,7 +25,6 @@ window.__ModuleLoader__.load({
     const DOCK = { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0, fontSize: '12px', lineHeight: '1.6' };
     const TAIL = { ...DOCK, margin: '4px 0 2px' };
     const CHIP = { alignSelf: 'flex-start', border: 'none', background: 'transparent', color: 'inherit', padding: 0, fontSize: '12px', lineHeight: '1.6', opacity: 0.6, cursor: 'pointer', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
-    const ITEM = { alignSelf: 'flex-start', border: 'none', background: 'transparent', color: 'inherit', padding: 0, fontSize: '12px', lineHeight: '1.6', opacity: 0.75, cursor: 'pointer', textAlign: 'left', width: '100%', minWidth: 0, maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
     const BODY = { margin: '2px 0 4px', padding: '4px 0 4px 8px', borderLeft: '1px solid currentColor', opacity: 0.7, whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '180px', overflowY: 'auto' };
 
     const settledText = (block) => {
@@ -392,7 +391,6 @@ window.__ModuleLoader__.load({
       return h('div', { 'data-tool': props.toolName, style: ROW }, h('span', { style: DOT }, '·'), h('span', { style: LABEL }, label), button);
     };
 
-    const scopeTag = (scope) => (scope === 'global' ? '[全局]' : '[项目]');
 
     /** 处理状态只认服务端枚举，绝不从中文 reason 反推。 */
     const PROCESSING = ['applied', 'unchanged', 'superseded', 'failed'];
@@ -808,7 +806,6 @@ window.__ModuleLoader__.load({
       'aria-hidden': 'true', focusable: 'false',
     }, h('path', { d: 'M6 6l12 12M18 6L6 18' }));
 
-    const EVO_STATE = { pending: '候选', trial: '试用', active: '生效', paused: '暂停' };
     const KIND_LABEL = {
       preference: '偏好', convention: '约定', procedure: '流程', pointer: '位置',
       pitfall: '坑', credential_hint: '凭据位置', note: '笔记',
@@ -2535,10 +2532,16 @@ window.__ModuleLoader__.load({
         }).then((result) => {
           if (!alive.current) return;
           setBusy(false);
-          const done = succeeded(result);
-          if (done) setExpandedConflict('');
+          if (succeeded(result)) setExpandedConflict('');
           const message = conflictNote(op, result);
-          /** 失败也重载：过期的行留在原地，才会出现「点了没反应」的假象。 */
+          /** 成功且回执给了余量：只摘掉本地这一行，不整块重读。 */
+          if (succeeded(result) && Number.isInteger(result && result.body && result.body.remaining)) {
+            const remaining = result.body.remaining;
+            setData((prev) => (!prev || !prev.selected || !Array.isArray(prev.selected.conflicts) ? prev
+              : { ...prev, selected: { ...prev.selected, conflicts: prev.selected.conflicts.filter((item) => item.id !== row.id) } }));
+            setNote(remaining > 0 ? `${message}，还剩 ${remaining} 条` : message);
+            return;
+          }
           load(selectedKey).then(() => { if (alive.current) setNote(message); });
         });
       };
