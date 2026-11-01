@@ -2420,7 +2420,6 @@ window.__ModuleLoader__.load({
       const [editNote, setEditNote] = React.useState('');
       const [busy, setBusy] = React.useState(false);
       const [showReason, setShowReason] = React.useState(false);
-      const [showSettings, setShowSettings] = React.useState(false);
       const [tune, setTune] = React.useState(null);
       const [explainOn, setExplainOn] = React.useState(explainModeOf(sessionId));
       const [display, setDisplay] = React.useState({ ...DISPLAY_DEFAULTS });
@@ -2616,7 +2615,7 @@ window.__ModuleLoader__.load({
       const canToggle = Boolean(selectedKey) && selectedKey === currentKey;
       const canManage = canToggle && memoryOn;
       const globalView = Boolean(selected && selected.kind === 'global');
-      const activeTab = globalView ? 'memory' : tab;
+      const activeTab = globalView && tab !== 'settings' ? 'memory' : tab;
       React.useEffect(() => { if (globalView) setTab('memory'); }, [globalView]);
 
       const activity = evolution && evolution.activity ? evolution.activity : null;
@@ -2896,16 +2895,6 @@ window.__ModuleLoader__.load({
           style: { height: '30px', maxWidth: '190px', padding: '0 8px', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '8px', background: 'var(--dsw-alias-bg-layer-2)', color: 'inherit', fontSize: '12px' },
         },
         data && Array.isArray(data.scopes) ? data.scopes.map((scope) => h('option', { key: scope.key, value: scope.key }, scope.kind === 'global' ? '全局' : scope.label)) : null) : null,
-        h('button', {
-          type: 'button', 'aria-expanded': showSettings, 'aria-label': '显示设置',
-          onClick: () => setShowSettings((value) => !value),
-          style: {
-            ...PANEL_LINK, height: '30px', padding: '0 9px', borderRadius: '8px',
-            border: '1px solid var(--dsw-alias-border-l1)',
-            background: showSettings ? 'var(--dsw-alias-bg-layer-2)' : 'transparent',
-            opacity: showSettings ? 0.92 : 0.68,
-          },
-        }, '显示设置'),
         closeButton,
       ),
       );
@@ -2941,44 +2930,44 @@ window.__ModuleLoader__.load({
       hint ? h('span', { style: { ...PANEL_MUTED, lineHeight: '16px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, hint) : null);
       const evolutionOn = Boolean(memoryOn && evolution && evolution.enabled === true);
       const recallLine = recallLineOf(current && current.recall);
-      const switchBar = h('div', {
-        style: { display: 'flex', flexDirection: 'column', gap: '3px', padding: '7px 18px 8px', borderBottom: '1px solid var(--dsw-alias-border-l1)', flex: '0 0 auto' },
-      },
-      globalView
-        ? h('div', { style: { ...PANEL_MUTED, lineHeight: '20px' } }, '全局记忆只读，可移回项目')
-        : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+      const settingsTab = h('div', { role: 'tabpanel', 'aria-label': '设置', style: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: '14px', overflowY: 'auto' } },
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
           h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: '20px', flexWrap: 'wrap' } },
-            modeSwitches(),
+            globalView ? h('div', { style: { ...PANEL_MUTED, lineHeight: '20px' } }, '全局记忆只读，可移回项目') : modeSwitches(),
             switchItem('自进化', evolutionOn ? '实验功能，会增加 token 消耗' : '从反馈里整理经验', evolutionOn, busy || !evolution || !canToggle || !memoryOn, toggleEvolution), // ui-copy-ignore 用户指定文案
-            switchItem('记住我', personaOn === true ? '用户级，关掉后不再了解你' : '用户级，默认关闭', personaOn === true, busy || !canToggle, togglePersona)),
-          showSettings ? displayToggle('启用图谱', 'graph') : null,
-          showSettings ? displayToggle('启用记忆宫殿', 'palace') : null,
-          showSettings ? explainToggle() : null,
-        ),
-      showSettings && !globalView && tune
-        ? h('div', {
-          style: { display: 'flex', flexDirection: 'column', gap: '4px', padding: '7px 18px 8px', borderTop: '1px solid var(--dsw-alias-border-l1)' },
-        },
-        h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
-          h('span', { style: { fontSize: '12px', fontWeight: 600 } }, '排序调参'),
-          h('span', { style: { ...PANEL_MUTED, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
-            tune.replayCases > 0
-              ? `回放 ${tune.replayCases} 条 · ${tune.params && tune.params.summaryWeight}${tune.needsReeval === true ? ' · 待重评' : ''}`
-              : '标一条漏掉的查询后才可试算'),
-          tune.replayCases > 0 ? h(Action, { disabled: busy || !canToggle, onClick: () => tuneAct('suggest') }, '试算') : null,
-          tune.proposal ? h(Action, { disabled: busy || !canToggle, onClick: () => tuneAct('apply') }, '采纳') : null,
-          tune.canRollback === true ? h(Action, { disabled: busy || !canToggle, onClick: () => tuneAct('rollback') }, '回滚') : null),
-        tune.proposal
-          ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, `${tune.proposal.key} ${tune.proposal.from} → ${tune.proposal.to}，${tune.proposal.improved > 0 ? `改善 ${tune.proposal.improved} 条、` : ''}其余不变差`)
+            switchItem('记住我', personaOn === true ? '用户级，关掉后不再了解你' : '用户级，默认关闭', personaOn === true, busy || !canToggle, togglePersona))),
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+          h('span', { style: { fontSize: '12px', fontWeight: 600 } }, '显示'),
+          displayToggle('启用图谱', 'graph'),
+          displayToggle('启用记忆宫殿', 'palace'),
+          explainToggle()),
+        !globalView && tune
+          ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
+              h('span', { style: { fontSize: '12px', fontWeight: 600 } }, '排序调参'),
+              h('span', { style: { ...PANEL_MUTED, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                tune.replayCases > 0
+                  ? `回放 ${tune.replayCases} 条 · ${tune.params && tune.params.summaryWeight}${tune.needsReeval === true ? ' · 待重评' : ''}`
+                  : '标一条漏掉的查询后才可试算'),
+              tune.replayCases > 0 ? h(Action, { disabled: busy || !canToggle, onClick: () => tuneAct('suggest') }, '试算') : null,
+              tune.proposal ? h(Action, { disabled: busy || !canToggle, onClick: () => tuneAct('apply') }, '采纳') : null,
+              tune.canRollback === true ? h(Action, { disabled: busy || !canToggle, onClick: () => tuneAct('rollback') }, '回滚') : null),
+            tune.proposal
+              ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, `${tune.proposal.key} ${tune.proposal.from} → ${tune.proposal.to}，${tune.proposal.improved > 0 ? `改善 ${tune.proposal.improved} 条、` : ''}其余不变差`)
+              : null,
+            tune.lastChange
+              ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, `上次采纳 ${tune.lastChange.key} ${tune.lastChange.from} → ${tune.lastChange.to}`)
+              : null)
           : null,
-        tune.lastChange
-          ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, `上次采纳 ${tune.lastChange.key} ${tune.lastChange.from} → ${tune.lastChange.to}`)
-          : null)
-        : null,
-      !globalView && !canToggle ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, '只读，切换回当前项目后可修改') : null,
+      );
+
+      /** 有话才占一行。 */
+      const statusLine = note || (!globalView && recallLine) ? h('div', {
+        style: { display: 'flex', flexDirection: 'column', gap: '1px', padding: '6px 18px 8px', borderTop: '1px solid var(--dsw-alias-border-l1)', flex: '0 0 auto' },
+      },
       note ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px', color: failed ? 'var(--dsw-alias-state-error-primary)' : 'inherit' } }, note) : null,
       !globalView && recallLine ? h('div', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, recallLine) : null,
-      );
+      ) : null;
 
       const switchTab = (key) => {
         if (key === 'evolution' && selectedKey !== currentKey) load(currentKey);
@@ -2999,6 +2988,7 @@ window.__ModuleLoader__.load({
       const tabBar = h('div', { role: 'tablist', 'aria-label': '记忆内容', style: { display: 'flex', alignItems: 'center', gap: '2px', flex: '0 0 auto', borderBottom: '1px solid var(--dsw-alias-border-l1)' } },
         tabButton('memory', '记忆'),
         globalView ? null : tabButton('evolution', '自进化'),
+        tabButton('settings', '设置'),
       );
 
       const filteredNow = Boolean(query);
@@ -3338,7 +3328,7 @@ window.__ModuleLoader__.load({
         },
       },
         tabBar,
-        activeTab === 'memory' ? memoryTab : evolutionTab,
+        activeTab === 'memory' ? memoryTab : activeTab === 'evolution' ? evolutionTab : settingsTab,
       );
 
       const shell = (children) => h('div', {
@@ -3365,7 +3355,7 @@ window.__ModuleLoader__.load({
         ]);
       }
 
-      return shell([header, switchBar, content]);
+      return shell([header, content, statusLine]);
     };
 
     /** 面板浮层。 */
