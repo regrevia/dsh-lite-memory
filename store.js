@@ -255,10 +255,44 @@ function applyFlat(scope, draft, index) {
 }
 
 /**
+ * 同层同名只留一条：标题是唯一句柄，两条同名会让按标题读、改、忘全卡在歧义上。
+ * 保留内容最全的那条（更新时间最晚），它缺的 when 和别名从多余那条补；多余整条归档。
+ */
+function mergeSameTitles(scope, index) {
+  const groups = new Map();
+  for (const item of index.entries) {
+    const key = String(item.title || '').trim().toLowerCase();
+    if (!key) continue;
+    const rows = groups.get(key) || [];
+    rows.push(item);
+    groups.set(key, rows);
+  }
+  const merged = [];
+  for (const rows of groups.values()) {
+    if (rows.length < 2) continue;
+    rows.sort((a, b) => String(a.updated || a.created || '').localeCompare(String(b.updated || b.created || '')));
+    const keep = rows.pop();
+    for (const extra of rows) {
+      if (!String(keep.when || '') && String(extra.when || '')) keep.when = extra.when;
+      for (const name of extra.aliases || []) {
+        const names = [...(keep.aliases || []), keep.title].map((item) => String(item || '').trim());
+        if (name && !names.includes(String(name).trim())) keep.aliases = [...(keep.aliases || []), name].slice(-5);
+      }
+      archiveEntry(scope, index, extra);
+      merged.push(extra.title || extra.id);
+    }
+  }
+  return merged;
+}
+
+/**
  * 写一层：一个事务发布整份状态。容量在事务里裁决，腾位结果回填到 index.archived，
  * 调用方据此在结果里点名。
  */
 export function saveIndex(scope, index) {
+  /** 任何一次写入都顺手收掉同层同名：旧数据里已经分叉的两条不会被继续当成两条。 */
+  const mergedTitles = mergeSameTitles(scope, index);
+  index.__mergedTitles = mergedTitles;
   const meta = index.__meta || { exists: false };
   const expected = meta.exists ? { generation: meta.generation, epoch: meta.epoch } : null;
   const result = state.transact(scope, { expected, expectCreate: !meta.exists }, (draft) => {
@@ -809,7 +843,8 @@ function applicabilityOf(row) {
 
 /**
  * 身份 = 标题/旧标题 + 前置条件 + 这次真正给出的适用范围字段。
- * 不同机器、不同运行时的规则即使同名也是两条；没给的字段保持兼容，不误判成另一条。
+ * 同一层里标题就是唯一句柄：同名即同一条，前置条件不同也更新这一条；
+ * 跨层同名（项目层覆盖全局层）是合法的两行。
  */
 export function resolveTarget(entries, draft, whenArg) {
   const source = typeof draft === 'string' ? { title: draft, when: whenArg } : draft || {};
@@ -1025,24 +1060,25 @@ function applyDraft(scope, index, source, now, options = {}) {
   let similarList = [];
   /**
    * 同名就是同一条：标题是唯一句柄，重复存同一个标题必须是更新，不能悄悄另建一条
-   * （否则按标题读、按标题忘都会撞上两条）。前置条件明确不同的同名才允许是另一条。
+   * （否则按标题读、按标题忘都会撞上两条）。跨层同名才是合法的两行。
    */
   if (!record && !distinct) {
-    const wantedConditions = view.conditionsKey(draft.conditions || []);
-    /** 只改摘要/正文时没重写适用条件，别因此把有条件的那条挤成另一条。 */
-    const statedConditions = Boolean(draft.has.when || draft.has.conditions || draft.has.applicability);
+    /** 同层同名就是同一条：曾经按 when 不同另起一条，结果两条同名谁也改不动、忘不掉。 */
     const named = live.find((item) => [item.title, ...(item.aliases || [])]
-      .some((name) => String(name || '').trim().toLowerCase() === String(draft.title || '').trim().toLowerCase())
-      && (!statedConditions || view.conditionsKey(item.conditions || []) === wantedConditions)
-      /** 同名但两边都明确写了不同的 when，是用户表达的另一种情况，算另一条。 */
-      && !(draft.has.when && String(item.when || '') && String(item.when || '') !== String(draft.when || '')));
+      .some((name) => String(name || '').trim().toLowerCase() === String(draft.title || '').trim().toLowerCase()));
     if (named) {
       record = named;
       mergedFrom = named.title === draft.title ? null : named.title;
     }
   }
+  /** distinct 也不能靠同名分叉：标题是唯一句柄，另存要换个能区分的标题。 */
+  if (!record && distinct) {
+    const clash = live.find((item) => [item.title, ...(item.aliases || [])]
+      .some((name) => String(name || '').trim().toLowerCase() === String(draft.title || '').trim().toLowerCase()));
+    if (clash) throw new Error(`已经有同名记忆「${clash.title}」，另存一条请换一个能区分的标题`);
+  }
   if (!record) {
-    /** distinct 是用户明确说的「这是另一条」：同名也另起一条，不被规范化后的精确同名吞掉。 */
+    /** distinct 是用户明确说的「这是另一条」：不改同名的，按不同标题另起一条。 */
     const hit = distinct ? null : resolveTarget(live, draft);
     if (hit) {
       record = hit.target;
@@ -1276,6 +1312,7 @@ function upsertLocked(scope, source, options = {}) {
     }
     const evicted = index.__archived || [];
     if (evicted.length) result.archived = [...(result.archived || []), ...evicted];
+    if (index.__mergedTitles && index.__mergedTitles.length) result.mergedTitles = index.__mergedTitles;
     return result;
   }
 }

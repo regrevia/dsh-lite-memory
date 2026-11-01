@@ -131,15 +131,31 @@ test('similar title without id returns resolution and writes nothing', () => {
   assert.equal(countOf(scope), before + 1);
 });
 
-test('same title with a different when is a second entry', () => {
+test('same title with a different when updates the one entry', () => {
   const scope = fresh('when');
   const a = upsert(scope, { title: '跑测试', summary: '提交前跑哪条命令', when: '本地', body: 'node test' });
   const b = upsert(scope, { title: '跑测试', summary: '提交前跑哪条命令', when: 'CI', body: 'pnpm test' });
-  assert.notEqual(a.record.id, b.record.id);
-  assert.equal(countOf(scope), 2);
-  const again = upsert(scope, { title: '跑测试', summary: '提交前跑哪条命令', when: 'CI', body: 'pnpm test --watch' });
-  assert.equal(again.merged, true);
-  assert.equal(again.record.id, b.record.id);
+  assert.equal(b.record.id, a.record.id);
+  assert.equal(countOf(scope), 1);
+  assert.equal(b.record.when, 'CI');
+});
+
+test('legacy same-title duplicates fold into one on the next write', () => {
+  const scope = fresh('when-dup');
+  const first = upsert(scope, { title: '跑测试', summary: '提交前跑哪条命令', when: '本地', body: 'node test' });
+  /** 旧版本按 when 分叉会留下两条同名：直接构造这种状态，模拟已有数据。 */
+  const index = loadIndex(scope);
+  const clone = { ...index.entries[0], id: 'mem_legacydup1', when: 'CI', updated: '2999-01-01T00:00:00.000Z' };
+  index.entries = [...index.entries, clone];
+  const write = saveIndex(scope, index);
+  assert.deepEqual(write.__mergedTitles, ['跑测试'], '收并了哪条同名要能回给写入方');
+  const after = loadIndex(scope);
+  const same = after.entries.filter((row) => row.title === '跑测试');
+  assert.equal(same.length, 1);
+  assert.equal(same[0].id, 'mem_legacydup1');
+  assert.equal(same[0].when, 'CI');
+  assert.equal(after.archived.filter((row) => row.title === '跑测试').length, 1);
+  assert.equal(first.record.id !== same[0].id, true);
 });
 
 test('expired or superseded records do not block a new same-title save', () => {
@@ -668,9 +684,9 @@ test('distinct keeps two entries whose titles normalize to the same name', () =>
   assert.equal(countOf(scope), 2);
   assert.equal(search(scope, '菜单').length, 2);
 
-  const sameAgain = upsert(scope, { title: '菜单｜工作日', summary: '工作日菜单另存一份', resolution: 'distinct' });
-  assert.notEqual(sameAgain.record.id, first.record.id);
-  assert.equal(countOf(scope), 3);
+  /** 同名不能再分叉：另存要换个标题。 */
+  assert.throws(() => upsert(scope, { title: '菜单｜工作日', summary: '工作日菜单另存一份', resolution: 'distinct' }), /已经有同名记忆/);
+  assert.equal(countOf(scope), 2);
 });
 
 test('multi-word search keeps only entries the query really hits (no single-common-word noise)', () => {

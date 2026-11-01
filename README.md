@@ -19,7 +19,7 @@ Lightweight memory for the DeepSeek Harness. Nothing resident: no standing promp
 | **L1** 它发现有跨会话价值的经验 | 一行灰字 `memory · suggested "X"` + 一个「保留」按钮；标题加一句话，看得懂才点，不点就永远不写，48 小时内不重复 |
 | **L2** 常识、一次性参数、凭据的值 | 永不写入 |
 
-这些行只属于产生它的那一轮：每轮按那轮自己的工具结果重建，重进会话还能看见，别的轮不会混进来。再记一次时插件自己判是更新还是新增：同层、同前置条件下，标题（或这条用过的旧标题）完全一致就更新原条目，换过说法而标题变了的旧标题记成别名以后也认得。像但不同名的不写：先在结果里回「相近：X」，确认要更新就用那个标题重存，确认是另一条才加 `resolution="distinct"`。更新时没给的字段保持原值，正文整段替换——旧正文只作内部撤回依据，不展示、不参与检索；前置条件不同的同一主题是两条。
+这些行只属于产生它的那一轮：每轮按那轮自己的工具结果重建，重进会话还能看见，别的轮不会混进来。再记一次时插件自己判是更新还是新增：同一层里标题（或这条用过的旧标题）完全一致就更新原条目，前置条件不同也更新这一条，不并存两条同名；换过说法而标题变了的旧标题记成别名以后也认得。像但不同名的不写：先在结果里回「相近：X」，确认要更新就用那个标题重存，确认是另一条才加 `resolution="distinct"`——另存要换个能区分的标题。更新时没给的字段保持原值，正文整段替换——旧正文只作内部撤回依据，不展示、不参与检索。旧数据里已经分叉的同名条目，下一次写入这一层时自动收并成一条，另一条进可恢复归档。
 
 写入时分两层：默认只在这个项目生效；用户说「以后所有项目都这样」才进全局层（200 条起提示，硬上限 1000 条），检索时一起查。同一主题在不同前提下用 `when` 区分，各存一条。
 
@@ -39,7 +39,7 @@ Lightweight memory for the DeepSeek Harness. Nothing resident: no standing promp
 
 The automatic hint carries titles and summaries, never bodies. Normal cards and experimental rules share one budget: at most 3 cards / 1200 bytes per request, admitted as whole cards, first come first served. An experimental rule with a body of at most 240 characters and 4 lines is inlined; a longer one gives only its title and purpose, and the body still requires `memory_read`.
 
-Those lines belong to the turn that made them: each turn is rebuilt from its own tool results, so reopening the session shows them again and no other turn leaks in. Saving again updates an entry only when the title (or one of its earlier titles) matches exactly under the same precondition. A merely similar title writes nothing first: the result names the closest entry, so the caller either re-saves with that title or adds `resolution="distinct"`. An update keeps every field it was not given and replaces the body wholesale; the previous body is kept only for internal undo and never shown or searched. The same subject under different preconditions stays two entries.
+Those lines belong to the turn that made them: each turn is rebuilt from its own tool results, so reopening the session shows them again and no other turn leaks in. Saving again updates an entry whenever the title (or one of its earlier titles) matches exactly inside the same layer — different preconditions still update that one entry, never a second entry with the same title. A merely similar title writes nothing first: the result names the closest entry, so the caller either re-saves with that title or adds `resolution="distinct"`, which requires a genuinely different title. An update keeps every field it was not given and replaces the body wholesale; the previous body is kept only for internal undo and never shown or searched. Legacy duplicate titles already on disk fold into one row on the next write to that layer, and the extra row moves to recoverable archive.
 
 Writes land in one of two layers: the current project by default, or the global layer (warns past 200, hard ceiling 1000) when the user says the rule holds for every project. Both layers are searched together, and a `when` field separates the same subject under different preconditions.
 

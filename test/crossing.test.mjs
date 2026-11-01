@@ -32,6 +32,13 @@ const fresh = (label) => {
   dirs.push(dir);
   return scopeOf(dir);
 };
+/** 全局层跨用例共享：同名先收掉，避免上一轮残留和这一份撞名。 */
+const seedGlobal = (extra) => {
+  for (const row of loadIndex(globalScope()).entries.filter((item) => item.title === extra.title)) {
+    forget(globalScope(), row.id, { mode: 'archive' });
+  }
+  return saveEntry(globalScope(), { resolution: 'distinct', ...extra });
+};
 const stateOf = (scope) => {
   const file = path.join(scope.dir, 'state.json');
   if (!fs.existsSync(file)) return { entries: [] };
@@ -127,7 +134,7 @@ await test('S03 一次性任务参数不落盘；显式范围压过类别提案'
 // ── S06 两层去重 ────────────────────────────────────────────────────────────
 await test('S06 两层完全相同只返回已有引用，不写第二条', () => {
   const scope = fresh('dedupe-exact');
-  const globalSaved = saveEntry(globalScope(), {
+  const globalSaved = seedGlobal({
     title: '统一时区', summary: '日志都写 UTC', body: 'UTC', scope: 'global', resolution: 'distinct',
   });
   assert.equal(globalSaved.chosenScope, 'global');
@@ -140,7 +147,7 @@ await test('S06 两层完全相同只返回已有引用，不写第二条', () =
 
 await test('S06 两层只是相近只给候选或确认，不直接新增', () => {
   const scope = fresh('dedupe-near');
-  saveEntry(globalScope(), { title: '发布前检查清单', summary: '发版前逐项确认', body: '清单', scope: 'global', resolution: 'distinct' });
+  seedGlobal({ title: '发布前检查清单', summary: '发版前逐项确认', body: '清单', scope: 'global', resolution: 'distinct' });
   const near = saveEntry(scope, { title: '发布前检查清单', summary: '发版前逐项确认（项目补充）', body: '项目清单' });
   assert.equal(near.needsResolution, true);
   assert.equal(near.crossLayer, true);
@@ -149,10 +156,16 @@ await test('S06 两层只是相近只给候选或确认，不直接新增', () =
 });
 
 // ── S07 槽位：项目覆盖 / 回落 / 条件未知 ────────────────────────────────────
-const seedSlot = (scope, layer, extra) => saveEntry(layer === 'global' ? globalScope() : scope, {
-  title: extra.title, summary: extra.summary, body: extra.body || '正文',
-  topicKey: 'tooling.pm', resolution: 'distinct', ...extra,
-});
+const seedSlot = (scope, layer, extra) => {
+  const target = layer === 'global' ? globalScope() : scope;
+  for (const row of loadIndex(target).entries.filter((item) => item.title === extra.title)) {
+    forget(target, row.id, { mode: 'archive' });
+  }
+  return saveEntry(target, {
+    title: extra.title, summary: extra.summary, body: extra.body || '正文',
+    topicKey: 'tooling.pm', resolution: 'distinct', ...extra,
+  });
+};
 
 await test('S07 项目层命中时只给项目规范，全局同名槽位被压住', () => {
   const scope = fresh('slot-match');
@@ -296,7 +309,7 @@ await test('S09 收尾会重建 prev；两侧状态对不上就保留协调文�
 
 await test('S09 全局搬回项目走同一套协议', () => {
   const scope = fresh('move-down');
-  const saved = saveEntry(globalScope(), { title: '回滚命令', summary: '回滚用 rollback', body: 'rollback', scope: 'global', resolution: 'distinct' });
+  const saved = seedGlobal({ title: '回滚命令', summary: '回滚用 rollback', body: 'rollback', scope: 'global', resolution: 'distinct' });
   const done = move(scope, saved.record.id, { target: 'project' });
   assert.equal(done.status, 'moved');
   assert.equal(done.from, 'global');
@@ -308,7 +321,7 @@ await test('S09 全局搬回项目走同一套协议', () => {
 await test('D09 目标层已有相同内容就拒绝搬移，不落协调文件', () => {
   const scope = fresh('move-dup');
   const source = saveEntry(scope, { title: '日志目录', summary: '日志在 logs', body: 'logs/', scope: 'project', resolution: 'distinct' });
-  saveEntry(globalScope(), { title: '日志目录', summary: '日志在 logs', body: 'logs/', scope: 'global', resolution: 'distinct' });
+  seedGlobal({ title: '日志目录', summary: '日志在 logs', body: 'logs/', scope: 'global', resolution: 'distinct' });
   assert.throws(() => move(scope, source.record.id, { target: 'global' }), /目标层已有相同内容/);
   assert.equal(movePending(), null);
   assert.equal(idsOf(scope).includes(source.record.id), true);
@@ -369,7 +382,7 @@ await test('L03 关联最多 3 条', () => {
 
 await test('L04 项目条目可以关联全局条目，全局条目不能关联项目条目', () => {
   const scope = fresh('link-layers');
-  const globalSaved = saveEntry(globalScope(), { title: '全局约定', summary: '全局层的约定', body: 'x', scope: 'global', resolution: 'distinct' });
+  const globalSaved = seedGlobal({ title: '全局约定', summary: '全局层的约定', body: 'x', scope: 'global', resolution: 'distinct' });
   const projectLinked = saveEntry(scope, {
     title: '项目条目', summary: '关联全局', body: 'x', scope: 'project', resolution: 'distinct', links: [{ type: 'related', id: globalSaved.record.id }],
   });
@@ -408,7 +421,7 @@ for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
 // ── S12 冲突队列：相近只记待办，确认后才进库 ───────────────────────────────
 await test('S12 相近保存进待办队列，确认 distinct 后出队', () => {
   const scope = fresh('conflict-queue');
-  saveEntry(globalScope(), { title: '发布前检查清单', summary: '发版前逐项确认', body: '清单', scope: 'global', resolution: 'distinct' });
+  seedGlobal({ title: '发布前检查清单', summary: '发版前逐项确认', body: '清单', scope: 'global', resolution: 'distinct' });
   assert.equal(pendingConflictsOf(globalScope()), 0);
   const near = saveEntry(scope, { title: '发布前检查清单', summary: '发版前逐项确认（项目补充）', body: '项目清单' });
   assert.equal(near.needsResolution, true);
@@ -427,7 +440,7 @@ await test('S12 相近保存进待办队列，确认 distinct 后出队', () => 
 
 await test('S12 待裁决留可重放草稿，面板确认另存后才落库', () => {
   const scope = fresh('conflict-replay');
-  saveEntry(globalScope(), { title: '提交信息格式', summary: '用一句话说清做了什么', body: '全局约定', resolution: 'distinct' });
+  seedGlobal({ title: '提交信息格式', summary: '用一句话说清做了什么', body: '全局约定', resolution: 'distinct' });
   const near = saveEntry(scope, { title: '提交信息格式', summary: '本项目用中文写提交信息', body: '项目补充', when: '本仓库' });
   assert.equal(near.needsResolution, true);
   assert.equal(loadIndex(scope).entries.length, 0, '没确认前不能预写正文');
@@ -446,8 +459,8 @@ await test('S12 待裁决留可重放草稿，面板确认另存后才落库', (
 
 await test('S12 经过待裁决另存不改变适用范围、触发词和关联', () => {
   const scope = fresh('conflict-semantics');
-  const globalOne = saveEntry(globalScope(), { title: '发票抬头规则', summary: '开票信息固定', body: '全局版本', resolution: 'distinct' });
-  const linked = saveEntry(globalScope(), { title: '生效核验顺序', summary: '先验规则再验页面', body: '先验规则', resolution: 'distinct' });
+  const globalOne = seedGlobal({ title: '发票抬头规则', summary: '开票信息固定', body: '全局版本', resolution: 'distinct' });
+  const linked = seedGlobal({ title: '生效核验顺序', summary: '先验规则再验页面', body: '先验规则', resolution: 'distinct' });
   const near = saveEntry(scope, {
     title: '发票抬头规则', summary: '本项目发票只认这套抬头', body: '项目版本',
     selection: { mode: 'complete', artifactKey: 'artifact-invoice-v1' },

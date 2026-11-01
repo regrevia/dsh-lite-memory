@@ -1268,7 +1268,7 @@ const FORGET_PARAMS = {
 
 /**
  * 按标题解析内部身份。对外仍只显示标题，但解析必须能说明「唯一 / 同层歧义 / 不存在」：
- * 同层同名是正常情况（不同前置条件各一条），静默取第一条会读错、写错。
+ * 同层同名只应剩一条（旧数据残留才会撞上歧义），跨层同名才是常态。
  */
 function titleHitsIn(target, title, { includeArchived = false } = {}) {
   let index;
@@ -2413,7 +2413,7 @@ export function apply(ctx, config) {
 
   ctx.effect(() => tools.register({
     name: 'memory_save',
-    description: `保存跨会话有用的记忆。只在会改变以后判断时存；用户说「记住」或话已是长期规则就直接调用，不必先问。先搜，能更新就不新建；文本相近但标题不同先不写，needsResolution 核对后是同一条就改标题重存，确实不同才带 resolution="distinct"。按标题更新时未给字段保留，正文整段替换。前置条件不同同标题可存两条。${NOTES}`,
+    description: `保存跨会话有用的记忆。只在会改变以后判断时存；用户说「记住」或话已是长期规则就直接调用，不必先问。先搜，能更新就不新建；文本相近但标题不同先不写，needsResolution 核对后是同一条就改标题重存，确实不同才带 resolution="distinct"。按标题更新时未给字段保留，正文整段替换。同层同名只有一条：同时存在两个标题再另存一条，不要靠同名加前置条件分开。${NOTES}`,
     parameters: SAVE_PARAMS,
     output: {
       presentationMeta: (_args, value) => ({
@@ -2486,7 +2486,7 @@ export function apply(ctx, config) {
           ? `memory · 需要确认：「${value.title}」与已有条目相近${value.crossLayer ? '（在另一层）' : ''}${value.sameTopic ? '（同一主题槽位）' : ''}\n${value.similar}\n要更新它：用同一个标题${value.crossScope === 'global' ? '、并带 scope="global"' : ''}再存一次；确实是另一条，加 resolution="distinct"`
           : value.changed === false
             ? `memory · unchanged ${withTag(value, `"${value.title}"`)}`
-            : `memory · ${value.merged ? 'merged' : 'saved'} ${withTag(value, `"${value.title}"`)}${value.when ? `（${value.when}）` : ''}${value.similar ? ` · 相近：${value.similar}` : ''}${value.archived ? ` · 已归档「${value.archived}」腾位` : ''}${value.fullTextSaved ? ' · 完整原句已另存' : ''}${value.supersededTitle ? ` · 已取代「${value.supersededTitle}」` : ''}${value.scopeNote ? ` · ${value.scopeNote}` : ''}${value.hints ? ` · 提示：${value.hints}` : ''}`,
+            : `memory · ${value.merged ? 'merged' : 'saved'} ${withTag(value, `"${value.title}"`)}${value.when ? `（${value.when}）` : ''}${value.similar ? ` · 相近：${value.similar}` : ''}${value.archived ? ` · 已归档「${value.archived}」腾位` : ''}${value.fullTextSaved ? ' · 完整原句已另存' : ''}${value.supersededTitle ? ` · 已取代「${value.supersededTitle}」` : ''}${value.scopeNote ? ` · ${value.scopeNote}` : ''}${value.hints ? ` · 提示：${value.hints}` : ''}${value.mergedTitles ? ` · 已收并同名「${[].concat(value.mergedTitles).join('、')}」` : ''}`,
       }],
     },
     execute: async (args, execution) => {

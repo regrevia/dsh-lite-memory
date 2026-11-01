@@ -301,21 +301,16 @@ assert.ok(ambiguousSave.error, '跨层同名要报改哪一层');
 assertSchema('memory_save', ambiguousSave);
 assert.match(render('memory_save', {}, ambiguousSave), /^memory · /);
 assert.doesNotMatch(render('memory_save', {}, ambiguousSave), /undefined|saved|merged/);
-/** 同层同名不是「取第一条」：读、忘、更新都必须报歧义，按 id 仍能精确到条。 */
+/** 同层同名只有一条：后一次写是更新，不再按 when 分叉出两条谁也改不动的同名。 */
 const twinScope = store.scopeOf(cwd);
 const twinA = store.saveEntry(twinScope, { title: '同层重名探针', summary: '第一条', body: '正文甲', when: '机器甲', writeMode: 'patch' });
 const twinB = store.saveEntry(twinScope, { title: '同层重名探针', summary: '第二条', body: '正文乙', when: '机器乙', writeMode: 'patch' });
 const twinAId = twinA.record?.id ?? twinA.id;
 const twinBId = twinB.record?.id ?? twinB.id;
-assert.notEqual(twinAId, twinBId);
-await assert.rejects(() => exec('memory_read', { title: '同层重名探针' }), /有 2 条同名/);
-await assert.rejects(() => exec('memory_forget', { title: '同层重名探针', mode: 'archive' }), /有 2 条同名/);
-const twinUpdate = await exec('memory_save', { title: '换个标题', summary: '尝试更新同名条目', updateTitle: '同层重名探针' });
-assert.ok(twinUpdate.error, '同层同名更新要报歧义');
-assert.match(twinUpdate.error, /有 2 条同名/);
-assertSchema('memory_save', twinUpdate);
-assert.equal(store.readEntry(twinScope, twinAId).body, '正文甲', '按 id 读不能被同名条目串走');
-assert.equal(store.readEntry(twinScope, twinBId).body, '正文乙');
+assert.equal(twinBId, twinAId);
+assert.equal(store.loadIndex(twinScope).entries.filter((row) => row.title === '同层重名探针').length, 1);
+assert.equal(store.readEntry(twinScope, twinAId).body, '正文乙', '按 id 读到手的是更新后的正文');
+assert.throws(() => store.saveEntry(twinScope, { title: '同层重名探针', summary: '另存', resolution: 'distinct' }), /已经有同名记忆/);
 
 /** 上下文里常只剩缩短的标题：精确匹配失败时要把完整标题就地报出来，不让模型再猜一轮。 */
 store.saveEntry(twinScope, { title: '生效验证顺序（含：桌面端没有 Cmd+R）', summary: '缩短标题的探针', body: '正文', writeMode: 'patch' });
@@ -937,11 +932,11 @@ const boxB = await exec2('memory_save', {
   conditions: [{ key: 'machine', value: 'box-b' }],
 });
 assert.equal(boxB.changed, true);
+/** 同名就是同一条：换条件再存是更新那一条，不再按 conditions 分叉出两条同名。 */
 const bothBoxes = projectEntries().filter((item) => item.title === '冒烟顺序' && item.status === 'active');
-assert.equal(bothBoxes.length, 2);
-assert.deepEqual(bothBoxes.map((item) => item.conditions[0].value).sort(), ['box-a', 'box-b']);
-assert.equal(bothBoxes.find((item) => item.conditions[0].value === 'box-a').body, '先登录再下单');
-assert.equal(bothBoxes.find((item) => item.conditions[0].value === 'box-b').body, '先建号再登录');
+assert.equal(bothBoxes.length, 1);
+assert.equal(bothBoxes[0].body, '先建号再登录');
+assert.deepEqual(bothBoxes[0].conditions.map((item) => item.value), ['box-b']);
 
 /** 同一主题、条件一致但正文不同：读取要报冲突，不能悄悄挑一条当现行规范。 */
 const slotA = await exec2('memory_save', {
@@ -954,7 +949,7 @@ const slotA = await exec2('memory_save', {
   resolution: 'distinct',
 });
 const slotB = await exec2('memory_save', {
-  title: '发版检查项',
+  title: '发版检查项乙',
   summary: '发版前检查的固定清单',
   body: '第一步：跑单测',
   scope: 'project',
@@ -962,7 +957,8 @@ const slotB = await exec2('memory_save', {
   topicKey: '发版检查',
   resolution: 'distinct',
 });
-const slotEntries = projectEntries().filter((item) => item.title === '发版检查项');
+/** 同一主题槽位同一条件、正文不同：两条都留，读取报冲突而不是挑一条。 */
+const slotEntries = projectEntries().filter((item) => (item.topicKey || '') === '发版检查' && item.status === 'active');
 assert.equal(slotEntries.length, 2);
 assert.notEqual(slotEntries[0].id, slotEntries[1].id);
 const resolvedSlots = store.visibleRules(projectScope, {}).resolved;
