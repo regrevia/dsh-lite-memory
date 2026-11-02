@@ -312,18 +312,37 @@ assert.equal(store.loadIndex(twinScope).entries.filter((row) => row.title === '�
 assert.equal(store.readEntry(twinScope, twinAId).body, '正文乙', '按 id 读到手的是更新后的正文');
 assert.throws(() => store.saveEntry(twinScope, { title: '同层重名探针', summary: '另存', resolution: 'distinct' }), /已经有同名记忆/);
 
-/** 上下文里常只剩缩短的标题：精确匹配失败时要把完整标题就地报出来，不让模型再猜一轮。 */
+/**
+ * 上下文里常只剩缩短的标题：读只命中唯一一条前缀匹配，就地命中；
+ * 写仍严厉（改错条目代价大），把完整标题报出来让模型再试一次；
+ * 前缀能对上两条时谁都不猜，仍报歧义候选。
+ */
 store.saveEntry(twinScope, { title: '生效验证顺序（含：桌面端没有 Cmd+R）', summary: '缩短标题的探针', body: '正文', writeMode: 'patch' });
-await assert.rejects(
-  () => exec('memory_read', { title: '生效验证顺序' }),
-  /相近的里有：「生效验证顺序（含：桌面端没有 Cmd\+R）」/,
-);
+const adopted = await exec('memory_read', { title: '生效验证顺序' });
+assert.equal(adopted.body, '正文', '唯一一条前缀匹配的读取要就地命中');
+assert.equal(adopted.title, '生效验证顺序（含：桌面端没有 Cmd+R）', '回执给完整标题，模型才能改对');
 const hintedRead = await exec('memory_read', { title: '生效验证顺序（含：桌面端没有 Cmd+R）' });
 assert.equal(hintedRead.body, '正文');
 const hintedUpdate = await exec('memory_save', { title: '缩短标题的探针', summary: '改正文', body: '新正文', updateTitle: '生效验证顺序' });
 assert.ok(hintedUpdate.error);
 assert.match(hintedUpdate.error, /相近的里有：「生效验证顺序（含：桌面端没有 Cmd\+R）」/);
 assert.doesNotMatch(hintedUpdate.error, /undefined/);
+const prefixTwin = store.saveEntry(twinScope, { title: '生效验证顺序（备用机器）', summary: '第二条前缀候选', body: '正文乙', writeMode: 'patch', resolution: 'distinct' });
+assert.equal(store.loadIndex(twinScope).entries.filter((row) => row.title.startsWith('生效验证顺序')).length, 2);
+await assert.rejects(
+  () => exec('memory_read', { title: '生效验证顺序' }),
+  /相近的里有：/,
+  '前缀能对上两条时读取不许猜',
+);
+
+/** 截图里的原样：上下文只留到逗号，读取要命中，不能再让人重打一遍长标题。 */
+const npmSaved = store.saveEntry(twinScope, { title: 'npm 发布一律走 dsh-npm，ENEEDAUTH 不是缺凭据', summary: '发布命令走本机 helpers', body: '发布命令照抄', writeMode: 'patch' });
+const npmShort = await exec('memory_read', { title: 'npm 发布一律走 dsh-npm' });
+assert.equal(npmShort.title, 'npm 发布一律走 dsh-npm，ENEEDAUTH 不是缺凭据');
+assert.equal(npmShort.body, '发布命令照抄');
+assert.match(render('memory_read', { title: 'npm 发布一律走 dsh-npm' }, npmShort), /^memory · /);
+/** 探针用完就归档：它会和后面「发布前跑文案检查」的召回撞词。 */
+store.forget(twinScope, npmSaved.record?.id ?? npmSaved.id, { mode: 'archive' });
 
 
 /** 重命名后仍按原 id 定位到同一条；归档后重建同名条目也不能冒领旧 id。 */

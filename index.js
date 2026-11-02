@@ -1318,10 +1318,37 @@ function nearTitleHints(targets, title) {
 }
 
 /**
+ * 只读路径的兜底：上下文里常只剩缩短的标题（「npm 发布一律走 dsh-npm」对
+ * 「npm 发布一律走 dsh-npm，ENEEDAUTH 不是缺凭据」），精确匹配失败时只有一条
+ * 前缀关系成立且缩写本身够长，就直接认这条；能对上两条以上仍报接近候选，不猜。
+ * 写和忘不走这条：认错条目的代价比多问一轮大。
+ */
+function nearTitleMatches(targets, title) {
+  const wanted = String(title || '').trim().toLowerCase();
+  if (wanted.length < 6) return [];
+  const out = [];
+  const seen = new Set();
+  for (const target of targets) {
+    let index;
+    try { index = loadIndex(target); } catch { continue; }
+    for (const entry of [...(index.entries || []), ...(index.archived || [])]) {
+      const plain = String(entry && entry.title || '').trim().toLowerCase();
+      if (!plain || plain === wanted || !entry.id || seen.has(entry.id)) continue;
+      /** 前缀关系（不是随便包含）才算同一个标题的缩写：「发布」「顺序」这类碎片不进来。 */
+      if (!plain.startsWith(wanted) && !wanted.startsWith(plain)) continue;
+      seen.add(entry.id);
+      out.push(entry);
+    }
+  }
+  return out;
+}
+
+/**
  * 返回 { id } 或抛出：显式层只查那一层；默认先项目后全局（别的项目不参与解析）。
  * 同一层出现多条同名一律报歧义，绝不取第一条。
+ * adoptNear 只在读的时候开：唯一一条前缀匹配就地命中，读工具不该因为标题少几个字空转。
  */
-function refIdOf(scope, args, label = '记忆') {
+function refIdOf(scope, args, label = '记忆', options = {}) {
   const id = typeof args.id === 'string' ? args.id.trim() : '';
   if (id) return id;
   const title = typeof args.title === 'string' ? args.title.trim() : '';
@@ -1344,6 +1371,10 @@ function refIdOf(scope, args, label = '记忆') {
   }
   const near = nearTitleHints(sources, title);
   if (near.length) {
+    if (options.adoptNear) {
+      const matches = nearTitleMatches(sources, title);
+      if (matches.length === 1) return matches[0].id;
+    }
     throw new Error(`没有「${title}」这条${label}。相近的里有：${near.map((item) => `「${item}」`).join('、')}；用完整标题或 id 再试`);
   }
   throw new Error(`没有「${title}」这条${label}；先用 memory_search 对一下标题`);
@@ -2918,7 +2949,7 @@ export function apply(ctx, config) {
       const gateRuntime = resolved.held || win?.runtime
         || { projectId: scope.key, context, experimental: resolved.experimental === true };
       if (args.view === 'links') {
-        const refId = refIdOf(readScope, args);
+        const refId = refIdOf(readScope, args, '记忆', { adoptNear: true });
         const source = locate(readScope, refId);
         const gateOk = !source || view.eligibility(source.record, gateRuntime, 'read').ok;
         if (!gateOk) return { scope: '', status: 'needs_context', links: '' };
@@ -2950,7 +2981,7 @@ export function apply(ctx, config) {
         }
         return value;
       }
-      const record = readEntry(readScope, refIdOf(readScope, args), {
+      const record = readEntry(readScope, refIdOf(readScope, args, '记忆', { adoptNear: true }), {
         layers: args.scope ? [readScope] : undefined,
         context,
         allowExperimental,
