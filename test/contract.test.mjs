@@ -335,6 +335,22 @@ await assert.rejects(
   '前缀能对上两条时读取不许猜',
 );
 
+/**
+ * 收并后旧副本会留在归档里：同名前缀的活条目和归档副本并存时，读要落在活条目上，
+ * 不能把「唯一答案 + 归档残留」拖成歧义；只有归档候选时才认归档。
+ */
+const liveCopy = store.saveEntry(twinScope, { title: '归档副本探针（新）', summary: '活副本', body: '活正文', writeMode: 'patch' });
+const oldCopy = store.saveEntry(twinScope, { title: '归档副本探针（旧）', summary: '旧副本', body: '旧正文', writeMode: 'patch', resolution: 'distinct' });
+store.forget(twinScope, oldCopy.record?.id ?? oldCopy.id, { mode: 'archive' });
+const liveAdopted = await exec('memory_read', { title: '归档副本探针' });
+assert.equal(liveAdopted.title, '归档副本探针（新）', '活条目优先，归档副本不算第二条候选');
+assert.equal(liveAdopted.body, '活正文');
+const onlyArchived = store.saveEntry(twinScope, { title: '只剩归档探针（唯一）', summary: '归档副本', body: '归档正文', writeMode: 'patch' });
+store.forget(twinScope, onlyArchived.record?.id ?? onlyArchived.id, { mode: 'archive' });
+const archivedRead = await exec('memory_read', { title: '只剩归档探针' });
+assert.equal(archivedRead.title, '只剩归档探针（唯一）', '没有活候选时，唯一的归档候选也可以按缩写读到');
+assert.equal(archivedRead.status, 'archived');
+
 /** 截图里的原样：上下文只留到逗号，读取要命中，不能再让人重打一遍长标题。 */
 const npmSaved = store.saveEntry(twinScope, { title: 'npm 发布一律走 dsh-npm，ENEEDAUTH 不是缺凭据', summary: '发布命令走本机 helpers', body: '发布命令照抄', writeMode: 'patch' });
 const npmShort = await exec('memory_read', { title: 'npm 发布一律走 dsh-npm' });

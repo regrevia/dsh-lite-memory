@@ -1373,7 +1373,10 @@ function refIdOf(scope, args, label = '记忆', options = {}) {
   if (near.length) {
     if (options.adoptNear) {
       const matches = nearTitleMatches(sources, title);
-      if (matches.length === 1) return matches[0].id;
+      /** 收并后的旧副本会留在归档里：它和活条目同名前缀，不该把唯一答案拖成歧义。 */
+      const live = matches.filter((entry) => entry.status !== 'archived' && entry.archived !== true);
+      const pick = live.length ? live : matches;
+      if (pick.length === 1) return pick[0].id;
     }
     throw new Error(`没有「${title}」这条${label}。相近的里有：${near.map((item) => `「${item}」`).join('、')}；用完整标题或 id 再试`);
   }
