@@ -29,7 +29,27 @@ assert.equal(panel.name, 'shell.overlay');
 assert.equal(panel.order, 30);
 
 const EMPTY_CHILDREN = [];
-const { metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, conflictVisibleRows, conflictFactsOf, conflictNote } = seen;
+const { panelUi, updatePanel, ProjectEvolution, MemoryOverlay, PANEL_BACKDROP, PANEL_DIALOG, metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, conflictVisibleRows, conflictFactsOf, conflictNote } = seen;
+
+// 点会话头那颗图标必须真把浮层打开，浮层里必须是面板本体。
+updatePanel({ open: false, sessionId: '' });
+const headerButton = ProjectEvolution({ sessionId: 'session-1' });
+assert.ok(headerButton && headerButton.type === 'button', '会话头没有图标按钮');
+headerButton.props.onClick();
+assert.equal(panelUi.open, true, '点了图标浮层没开');
+assert.equal(panelUi.sessionId, 'session-1');
+const overlay = MemoryOverlay();
+assert.ok(overlay, '浮层状态开了却没渲染');
+assert.equal(overlay.type, MemoryPanel, '浮层里不是记忆面板');
+assert.equal(overlay.props.sessionId, 'session-1');
+updatePanel({ open: false });
+assert.equal(MemoryOverlay(), null, '关掉后浮层还挂着');
+
+// 尺寸只按视口算：宿主容器高度为 0 也不能把面板压成一条。
+assert.equal(PANEL_BACKDROP.height, '100vh');
+assert.equal(PANEL_BACKDROP.width, '100vw');
+assert.match(PANEL_DIALOG.height, /calc\(100vh - 48px\)/);
+assert.match(PANEL_DIALOG.width, /calc\(100vw - 48px\)/);
 
 // 图谱只按真实数据画：共享标签成枢纽，显式关联成边，位置由 id 决定。
 const graph = graphOf([

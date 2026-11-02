@@ -1,9 +1,9 @@
 {
-  "note": "client.js 棘轮基线：raw 与 gzip 只许下降；改大必须同步说明原因。40 KiB 目标差额单列。",
+  "note": "client.js 棘轮基线：raw 与 gzip 只许下降；改大必须同步说明原因。40 KiB 目标差额单列。0.18.77 上调 592 B：面板浮层改挂 body 并按视口定尺寸，差额记为待还的债。",
   "method": "raw = Buffer.length; gzip = zlib.gzipSync(raw, { level: 9 }).length",
-  "rawBytes": 186253,
-  "gzipBytes": 46268,
-  "measuredAt": "2026-10-31",
+  "rawBytes": 186845,
+  "gzipBytes": 46517,
+  "measuredAt": "2026-11-02",
   "targetBytes": 40960,
-  "targetGap": 5308
+  "targetGap": 5557
 }

@@ -3,6 +3,14 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react');
     const h = React.createElement;
+    /** 浮层挂到 body：宿主容器的定位/裁切不该决定面板活不活。 */
+    const portal = (node) => {
+      try {
+        return require('react-dom').createPortal(node, document.body);
+      } catch {
+        return node;
+      }
+    };
 
     /** One muted line per memory call: a summary, never the payload. */
     const RUNNING = {
@@ -1217,13 +1225,15 @@ window.__ModuleLoader__.load({
       background: 'var(--dsw-alias-bg-base)', color: 'var(--dsw-alias-label-primary)',
       fontSize: '12px', outline: 'none',
     };
+    /** 尺寸只按视口算：浮层挂在谁家容器里都不会塌成一条。 */
     const PANEL_BACKDROP = {
-      position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center',
+      position: 'fixed', inset: 0, zIndex: 1000, width: '100vw', height: '100vh',
+      boxSizing: 'border-box', display: 'flex', alignItems: 'center',
       justifyContent: 'center', padding: '24px', pointerEvents: 'auto',
       background: 'color-mix(in srgb, var(--dsw-alias-bg-base) 58%, transparent)',
     };
     const PANEL_DIALOG = {
-      width: 'min(1240px, 100%)', height: 'min(780px, 100%)', display: 'flex',
+      width: 'min(1240px, calc(100vw - 48px))', height: 'min(780px, calc(100vh - 48px))', display: 'flex',
       flexDirection: 'column', background: 'var(--dsw-alias-bg-base)',
       color: 'var(--dsw-alias-label-primary)', border: '1px solid var(--dsw-alias-border-l1)',
       borderRadius: '16px', boxShadow: '0 24px 70px rgba(0, 0, 0, 0.28)', overflow: 'hidden',
@@ -3338,8 +3348,9 @@ window.__ModuleLoader__.load({
       h('div', {
         role: 'dialog', 'aria-modal': 'true', 'aria-label': '记忆面板',
         style: {
-          ...PANEL_DIALOG, width: 'min(1120px, 100%)', boxSizing: 'border-box',
-          height: palaceLoose ? 'auto' : 'min(760px, 100%)', maxHeight: 'min(760px, 100%)',
+          ...PANEL_DIALOG, width: 'min(1120px, calc(100vw - 48px))', boxSizing: 'border-box',
+          height: palaceLoose ? 'auto' : 'min(760px, calc(100vh - 48px))',
+          maxHeight: 'min(760px, calc(100vh - 48px))',
         },
       }, ...children));
 
@@ -3362,11 +3373,11 @@ window.__ModuleLoader__.load({
     const MemoryOverlay = () => {
       const ui = usePanelUi();
       if (!ui.open || !ui.sessionId) return null;
-      return h(MemoryPanel, {
+      return portal(h(MemoryPanel, {
         key: ui.sessionId,
         sessionId: ui.sessionId,
         onClose: () => updatePanel({ open: false }),
-      });
+      }));
     };
 
     /** 输出末尾那几条：只算本轮的。 */
@@ -3410,7 +3421,7 @@ window.__ModuleLoader__.load({
 
     // 测试缝：Node 里验引用投影，浏览器里没有任何副作用。
     if (typeof globalThis.__LITE_MEMORY_TEST__ === 'function') {
-      globalThis.__LITE_MEMORY_TEST__({ metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, PersonaSection, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceHashOf, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row, conflictVisibleRows, conflictFactsOf, conflictNote });
+      globalThis.__LITE_MEMORY_TEST__({ panelUi, updatePanel, usePanelUi, ProjectEvolution, MemoryOverlay, PANEL_BACKDROP, PANEL_DIALOG, metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, PersonaSection, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceHashOf, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row, conflictVisibleRows, conflictFactsOf, conflictNote });
     }
 
     return {
