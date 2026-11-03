@@ -2558,7 +2558,6 @@ window.__ModuleLoader__.load({
       /** 显示设置跟着当前项目走；换项目或换范围时重新读。 */
       React.useEffect(() => {
         setDisplay(readDisplaySettings(selectedKey));
-        setShowSettings(false);
         setHubFilter(null);
         setExpandedConflict('');
         setConflictAll(false);
@@ -3369,15 +3368,63 @@ window.__ModuleLoader__.load({
       return shell([header, content, statusLine]);
     };
 
+    /**
+     * 面板自己出错就在原地显示原因：抛到 slot 层会被记成坏 entry 并永久摘掉，
+     * 之后每次点击都静默无反应，用户和我们都看不到第一现场。
+     */
+    const BoundaryBase = React.Component || class { constructor(props) { this.props = props; this.state = {}; } };
+
+    class PanelBoundary extends BoundaryBase {
+      constructor(props) {
+        super(props);
+        this.state = { error: null };
+      }
+
+      static getDerivedStateFromError(error) {
+        return { error };
+      }
+
+      componentDidCatch(error) {
+        try {
+          console.error('[lite-memory] 记忆面板渲染失败', error);
+        } catch {
+          /* 控制台不可用时只靠界面上的提示 */
+        }
+      }
+
+      render() {
+        if (!this.state.error) return this.props.children;
+        const error = this.state.error || {};
+        const message = String(error.message || error || '');
+        const close = this.props.onClose;
+        return h('div', { style: { ...PANEL_BACKDROP, display: 'flex', alignItems: 'center', justifyContent: 'center' } },
+          h('div', {
+            style: {
+              ...PANEL_DIALOG,
+              display: 'flex', flexDirection: 'column', gap: '10px',
+              width: 'min(560px, calc(100vw - 48px))', height: 'auto', padding: '16px 18px',
+            },
+          },
+          h('div', { style: { fontSize: '13px', lineHeight: '1.6' } }, '这次没打开记忆面板'),
+          h('div', { style: { ...PANEL_MUTED, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, message),
+          h('button', {
+            type: 'button',
+            onClick: () => close(),
+            style: { ...PANEL_LINK, alignSelf: 'flex-start', padding: 0, border: 'none', background: 'transparent', cursor: 'pointer', font: 'inherit' },
+          }, '关闭')));
+      }
+    }
+
     /** 面板浮层。 */
     const MemoryOverlay = () => {
       const ui = usePanelUi();
       if (!ui.open || !ui.sessionId) return null;
-      return portal(h(MemoryPanel, {
-        key: ui.sessionId,
-        sessionId: ui.sessionId,
-        onClose: () => updatePanel({ open: false }),
-      }));
+      return portal(h(PanelBoundary, { onClose: () => updatePanel({ open: false }) },
+        h(MemoryPanel, {
+          key: ui.sessionId,
+          sessionId: ui.sessionId,
+          onClose: () => updatePanel({ open: false }),
+        })));
     };
 
     /** 输出末尾那几条：只算本轮的。 */
@@ -3421,7 +3468,7 @@ window.__ModuleLoader__.load({
 
     // 测试缝：Node 里验引用投影，浏览器里没有任何副作用。
     if (typeof globalThis.__LITE_MEMORY_TEST__ === 'function') {
-      globalThis.__LITE_MEMORY_TEST__({ panelUi, updatePanel, usePanelUi, ProjectEvolution, MemoryOverlay, PANEL_BACKDROP, PANEL_DIALOG, metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, PersonaSection, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceHashOf, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row, conflictVisibleRows, conflictFactsOf, conflictNote });
+      globalThis.__LITE_MEMORY_TEST__({ panelUi, updatePanel, usePanelUi, ProjectEvolution, MemoryOverlay, PANEL_BACKDROP, PANEL_DIALOG, metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, PanelBoundary, PersonaSection, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceHashOf, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row, conflictVisibleRows, conflictFactsOf, conflictNote });
     }
 
     return {

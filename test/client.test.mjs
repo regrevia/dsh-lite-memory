@@ -29,7 +29,7 @@ assert.equal(panel.name, 'shell.overlay');
 assert.equal(panel.order, 30);
 
 const EMPTY_CHILDREN = [];
-const { panelUi, updatePanel, ProjectEvolution, MemoryOverlay, PANEL_BACKDROP, PANEL_DIALOG, metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, conflictVisibleRows, conflictFactsOf, conflictNote } = seen;
+const { panelUi, updatePanel, ProjectEvolution, MemoryOverlay, PANEL_BACKDROP, PANEL_DIALOG, metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, PanelBoundary, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, conflictVisibleRows, conflictFactsOf, conflictNote } = seen;
 
 // 点会话头那颗图标必须真把浮层打开，浮层里必须是面板本体。
 updatePanel({ open: false, sessionId: '' });
@@ -40,8 +40,9 @@ assert.equal(panelUi.open, true, '点了图标浮层没开');
 assert.equal(panelUi.sessionId, 'session-1');
 const overlay = MemoryOverlay();
 assert.ok(overlay, '浮层状态开了却没渲染');
-assert.equal(overlay.type, MemoryPanel, '浮层里不是记忆面板');
-assert.equal(overlay.props.sessionId, 'session-1');
+assert.equal(overlay.type, PanelBoundary, '浮层没有错误边界，一次抛错就会把面板摘掉');
+assert.equal(overlay.children[0].type, MemoryPanel, '浮层里不是记忆面板');
+assert.equal(overlay.children[0].props.sessionId, 'session-1');
 updatePanel({ open: false });
 assert.equal(MemoryOverlay(), null, '关掉后浮层还挂着');
 

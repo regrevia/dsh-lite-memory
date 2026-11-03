@@ -1,9 +1,9 @@
 {
-  "note": "client.js 棘轮基线：raw 与 gzip 只许下降；改大必须同步说明原因。40 KiB 目标差额单列。0.18.77 上调 592 B：面板浮层改挂 body 并按视口定尺寸，差额记为待还的债。",
+  "note": "client.js 棘轮基线：raw 与 gzip 只许下降；改大必须同步说明原因。40 KiB 目标差额单列。0.18.78 上调 1947 B：面板加本地错误边界（抛错就在浮层里显示原因，不再被 slot 层永久摘掉）；顺带修掉重渲染时引用已删状态 setShowSettings 的 ReferenceError——它就是 0.18.77 点不开面板的原因。差额 6173 B 记为待还的债。",
   "method": "raw = Buffer.length; gzip = zlib.gzipSync(raw, { level: 9 }).length",
-  "rawBytes": 186845,
-  "gzipBytes": 46517,
-  "measuredAt": "2026-11-02",
+  "rawBytes": 188792,
+  "gzipBytes": 47133,
+  "measuredAt": "2026-11-03",
   "targetBytes": 40960,
-  "targetGap": 5557
+  "targetGap": 6173
 }
