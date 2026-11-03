@@ -2691,7 +2691,12 @@ export function apply(ctx, config) {
         archived: (saved.archived || []).map((item) => item.title).join('、'),
         pendingConflicts: Number(saved.pendingConflicts) || 0,
         ...(saved.similar ? { similar: `「${saved.similar.title}」` } : {}),
-        ...(() => { const hints = qualityHintsOf(saved.record || draft); return hints.length ? { hints: hints.join('；') } : {}; })(),
+        ...(() => {
+          const hints = qualityHintsOf(saved.record || draft);
+          /** 撞标题时已经并进已有那条：明确说出来，避免模型以为又新加了一条。 */
+          if (saved.autoMerged) hints.unshift('正文和已有的一条几乎相同，已并进那条（旧正文留在版本里）');
+          return hints.length ? { hints: hints.join('；') } : {};
+        })(),
       };
     },
   }), 'lite-memory: memory_save');

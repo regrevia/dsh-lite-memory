@@ -1591,4 +1591,30 @@ test('冷存坏了且热状态也没有正文：仍然明确报 cold_corrupt，�
   assert.equal(index.entries.length, 1, '失败时不能悄悄丢掉别的条目');
 });
 
+test('同一段知识存两次：正文几乎相同时并进已有那条，不再排进待裁决', () => {
+  const scope = fresh('auto-merge');
+  const when = '改 ~/.dsh/profiles 里 link 的本地 DSH 插件、要让改动生效时';
+  const body = '客户端改动走 unlag reload：POST http://127.0.0.1:49692/dsh-unlag/reload 带 x-dsh-unlag: 1。宿主侧改动要重启桌面应用。';
+  const first = store.saveEntry(scope, { title: 'DSH 插件改动的生效验证顺序（桌面端 ⌘R 会走 unlag reload）', summary: '改完插件验证生效的顺序', when, kind: 'procedure', body });
+  assert.equal(first.needsResolution, false);
+  const second = store.saveEntry(scope, { title: 'DSH 插件改动的生效验证顺序（含：桌面端没有 Cmd+R）', summary: '改完插件验证生效的顺序', when, kind: 'procedure', body: `${body}\n桌面端其实也有 Cmd+R：确认过能触发 unlag reload，旧说法作废。` });
+  assert.equal(second.needsResolution, false, '几乎相同的正文不该再留给用户裁决');
+  assert.equal(second.autoMerged, true);
+  const index = loadIndex(scope);
+  assert.equal(index.entries.length, 1, '并进去之后仍然只有一条');
+  assert.equal((index.conflicts || []).length, 0, '没有新增待裁决');
+  assert.match(String(index.entries[0].body || ''), /作废/, '新正文要落到那条上');
+  assert.equal(index.entries[0].versions.length, 1, '旧正文留在版本里，能撤回');
+});
+
+test('只是标题像、正文不同：仍然排进待裁决，不替人猜', () => {
+  const scope = fresh('auto-merge-skip');
+  store.saveEntry(scope, { title: '发版取凭据的流程', summary: '发版前怎么拿凭据', when: '要发版时', kind: 'procedure', body: 'npm token 在 Keychain 里取，GitHub 用 gh auth。' });
+  const other = store.saveEntry(scope, { title: '发版取凭据的流程（备份）', summary: '发版前怎么拿凭据', when: '要发版时', kind: 'procedure', body: '发版前先跑一遍测试，全部通过再打 tag，最后 npm publish。' });
+  assert.equal(other.needsResolution, true);
+  const index = loadIndex(scope);
+  assert.equal(index.entries.length, 1);
+  assert.equal((index.conflicts || []).length, 1);
+});
+
 console.log(`store.test.mjs: ${passed} passed`);

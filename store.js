@@ -2797,6 +2797,58 @@ function bindSameTopic(projectScope, ref) {
 }
 
 
+/** 撞标题时先自己判一次：同层、两段正文几乎逐字相同、新正文不比旧短，就并进已有那条。
+ *  旧正文留在版本历史里，随时能撤回；只是「有点像」的仍交回队列，不替人猜。 */
+const SAME_KNOWLEDGE = 0.88;
+
+/** 正文按去空白标点后的四字片段比：同一段知识换个说法仍是高分。 */
+function bodyShingles(text, size = 4) {
+  const plain = String(text || '').toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+  const out = new Set();
+  for (let i = 0; i + size <= plain.length; i += 1) out.add(plain.slice(i, i + size));
+  if (plain.length > 0 && plain.length < size) out.add(plain);
+  return out;
+}
+
+/** 两段正文的重合度：按较小那侧的片段数取比例，短正文全被覆盖就是 1。 */
+export function bodyOverlap(left, right) {
+  const a = bodyShingles(left);
+  const b = bodyShingles(right);
+  if (a.size === 0 || b.size === 0) return 0;
+  let hit = 0;
+  for (const item of a) if (b.has(item)) hit += 1;
+  return hit / Math.min(a.size, b.size);
+}
+
+/** 能把这次草稿并进哪一条：只认唯一一条相近、同层、正文近乎同一段的情形。 */
+function autoMergeLocked(scope, draft, rows, foreignEntries) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (list.length !== 1) return null;
+  const body = String((draft && draft.body) || '');
+  if (!body.trim()) return null;
+  const entry = (loadIndex(scope).entries || []).find((item) => item.id === list[0].id && item.status !== 'archived');
+  if (!entry) return null;
+  const oldBody = String(entry.body || '');
+  if (!oldBody.trim()) return null;
+  const score = bodyOverlap(body, oldBody);
+  if (score < SAME_KNOWLEDGE) return null;
+  /** 新正文更短又不完全一样时不动：可能是旧版本重存，并进去会丢内容。 */
+  if (body.length < oldBody.length && score < 0.98) return null;
+  /** 只带正文与语义字段回写：草稿里的「取代/改标题」指令不跟着重放。 */
+  const payload = { id: entry.id, expectedRevision: entry.revision || 1 };
+  for (const key of ['title', 'summary', 'body', 'when', 'kind', 'tags', 'conditions', 'applicability', 'selection', 'triggers', 'links', 'topicKey', 'origin']) {
+    if (draft[key] !== undefined) payload[key] = draft[key];
+  }
+  let patched;
+  try {
+    patched = upsertLocked(scope, payload, { foreignEntries });
+  } catch {
+    return null;
+  }
+  if (!patched || patched.needsResolution || !patched.record) return null;
+  return { ...patched, autoMerged: true, knowledgeOverlap: Math.round(score * 100) / 100 };
+}
+
 /** 冲突队列：只记待办，不预写记忆；最多 20 条。 */
 const CONFLICT_LIMIT = 20;
 
@@ -3026,6 +3078,19 @@ export function saveEntry(projectScope, source) {
     if (!result.needsResolution) clearConflictLocked(targetScope, draft ? draft.title : next.title);
     if (result.needsResolution) {
       const rows = Array.isArray(result.similarList) ? result.similarList : [];
+      /** 同一段知识存了两次：并进已有那条，别再多出一条等人裁决的待办。 */
+      const mergedInto = autoMergeLocked(targetScope, result.draft || draft, rows, foreign);
+      if (mergedInto) {
+        clearConflictLocked(targetScope, mergedInto.record.title);
+        const left = loadIndex(targetScope).conflicts;
+        return {
+          ...mergedInto,
+          chosenScope: targetScope.key === 'global' ? 'global' : 'project',
+          needsScope: false,
+          reasonCode: routed.reasonCode,
+          pendingConflicts: Array.isArray(left) ? left.length : 0,
+        };
+      }
       const pendingConflicts = queueConflictLocked(targetScope, result.draft || draft, rows);
       return { ...result, chosenScope: targetScope.key === 'global' ? 'global' : 'project', needsScope: false, reasonCode: routed.reasonCode, pendingConflicts };
     }
