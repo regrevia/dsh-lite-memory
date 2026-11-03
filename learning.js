@@ -7,9 +7,9 @@ export const POLICY_VERSION = 1;
 export const LIMITS = {
   inputBytes: 8192,
   maxChanges: 2,
-  maxTokens: 768,
+  maxTokens: 1024,
   outputBytes: 2048,
-  timeoutMs: 15000,
+  timeoutMs: 60000,
   attemptsPerEpisode: 2,
   attemptsPerProject: 6,
   windowMs: 24 * 60 * 60 * 1000,
@@ -27,6 +27,40 @@ export const LIMITS = {
 };
 
 export const FEEDBACK_TYPES = ['spec_change', 'execution_miss', 'task_exception', 'aspect_accept', 'artifact_accept', 'unclear'];
+/** 模型常把类型写成同义词或另一种命名法：先归一再校验，别让一个词把整轮结果废掉。 */
+const FEEDBACK_TYPE_ALIASES = {
+  spec_change: ['spec_change', 'spec-change', 'specchange', 'specification_change', 'requirement_change', 'behaviour_change', 'behavior_change', 'preference', 'preferences', 'instruction', 'rule', 'new_rule', 'general_rule'],
+  execution_miss: ['execution_miss', 'execution-miss', 'execution_mistake', 'execution_error', 'mistake', 'miss', 'correction', 'checkpoint'],
+  task_exception: ['task_exception', 'task-exception', 'exception', 'one_off', 'once', 'noise'],
+  aspect_accept: ['aspect_accept', 'aspect-accept', 'partial_accept', 'partial_approval', 'aspect_approval'],
+  artifact_accept: ['artifact_accept', 'artifact-accept', 'accept', 'accepted', 'approval', 'approve', 'sample'],
+  unclear: ['unclear', 'unknown', 'other', 'none', 'ambiguous'],
+};
+/** 在途整理的结果还算不算数：只有同一期作品又来新反馈才作废，别处的新反馈不算。 */
+export function feedbackStillCurrent({ episodeRevisions, scopeRevisions, scopeKey, episodeId, revision } = {}) {
+  const chain = episodeId ? episodeRevisions : scopeRevisions;
+  const current = chain && typeof chain.get === 'function'
+    ? chain.get(`${scopeKey}\u0000${episodeId || ''}`)
+    : undefined;
+  const fallback = scopeRevisions && typeof scopeRevisions.get === 'function' ? (scopeRevisions.get(scopeKey) || 0) : 0;
+  const effective = current === undefined ? (episodeId ? revision : fallback) : current;
+  return effective === revision;
+}
+
+export function normalizeFeedbackType(value) {
+  const text = String(value == null ? '' : value).trim().toLowerCase().replace(/[\s]+/g, '_');
+  if (!text) return '';
+  if (FEEDBACK_TYPES.includes(text)) return text;
+  for (const type of FEEDBACK_TYPES) {
+    if (FEEDBACK_TYPE_ALIASES[type].includes(text)) return type;
+  }
+  const compact = text.replace(/[_-]/g, '');
+  for (const type of FEEDBACK_TYPES) {
+    if (type.replace(/_/g, '') === compact) return type;
+    if (FEEDBACK_TYPE_ALIASES[type].some((alias) => alias.replace(/[_-]/g, '') === compact)) return type;
+  }
+  return '';
+}
 export const LEARNING_STATES = ['pending', 'trial', 'active', 'paused'];
 export const PHASES = ['brief', 'theme', 'outline', 'script', 'shoot', 'edit', 'publish'];
 const ALLOWED_KEYS = new Set(['target', 'feedbackType', 'topicKey', 'currentText', 'title', 'summary', 'applicability', 'conditions', 'evidence', 'persistence', 'sourceExcerpt']);
@@ -582,7 +616,9 @@ export function validateChange(change, { refs, rules, ranges, expectedTarget } =
   const target = String(change.target || '').trim();
   if (!target) return { ok: false, reason: '变化缺少目标' };
   if (target !== 'new' && !byRef.has(target)) return { ok: false, reason: '变化目标不在本次输入里' };
-  if (!FEEDBACK_TYPES.includes(change.feedbackType)) return { ok: false, reason: '反馈类型不认' };
+  const feedbackType = normalizeFeedbackType(change.feedbackType);
+  if (!feedbackType) return { ok: false, reason: '反馈类型不认' };
+  change.feedbackType = feedbackType;
   if (change.feedbackType === 'task_exception' || change.feedbackType === 'unclear') {
     return { ok: false, reason: '这类反馈不直接形成长期规则' };
   }

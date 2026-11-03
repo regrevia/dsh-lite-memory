@@ -1458,3 +1458,38 @@ test('B30 连续纠正同一规则收敛到一条现行版', () => {
 });
 
 console.log(`learning.test.mjs: ${passed} passed`);
+
+test('L03b 反馈类型按同义词归一，真不认的才拒', () => {
+  const rules = [];
+  const refs = { feedback: { u0: 'm1' }, rules: {} };
+  const check = (feedbackType) => learning.validateChange({ ...NEW_CHANGE, target: 'new', feedbackType }, { refs, rules, ranges: RANGES });
+  assert.equal(learning.normalizeFeedbackType('preference'), 'spec_change');
+  assert.equal(learning.normalizeFeedbackType('Spec-Change'), 'spec_change');
+  assert.equal(learning.normalizeFeedbackType('执行检查点'), '');
+  assert.equal(check('preference').ok, true, '同义词应归一到 spec_change 并放行');
+  assert.equal(check('spec-change').ok, true);
+  assert.equal(check('新规则').ok, false);
+});
+
+test('L03c 整理超时给了模型足够时间', () => {
+  assert.ok(learning.LIMITS.timeoutMs >= 60000, `timeoutMs 太小：${learning.LIMITS.timeoutMs}`);
+  assert.ok(learning.LIMITS.maxTokens >= 1024, `maxTokens 太小：${learning.LIMITS.maxTokens}`);
+});
+
+test('L03d 只有同一期的新反馈才作废在途整理', () => {
+  const mk = (episodeId, revision) => {
+    const episodeRevisions = new Map();
+    const scopeRevisions = new Map();
+    episodeRevisions.set(`S\u0000${episodeId}`, revision);
+    scopeRevisions.set('S', revision);
+    return { episodeRevisions, scopeRevisions, scopeKey: 'S', episodeId, revision };
+  };
+  const own = mk('ep_1', 7);
+  assert.equal(learning.feedbackStillCurrent(own), true);
+  const other = mk('ep_2', 9);
+  assert.equal(learning.feedbackStillCurrent({ ...other, episodeId: 'ep_1', revision: 7 }), true, '别的作品来新反馈不该作废这一期');
+  const superseded = { episodeRevisions: new Map([['S\u0000ep_1', 9]]), scopeRevisions: new Map([['S', 9]]), scopeKey: 'S', episodeId: 'ep_1', revision: 7 };
+  assert.equal(learning.feedbackStillCurrent(superseded), false, '同一期又来新反馈才作废');
+  const noEpisode = mk('', 3);
+  assert.equal(learning.feedbackStillCurrent({ ...noEpisode, revision: 5 }), false, '没有作品时按项目代次判断');
+});

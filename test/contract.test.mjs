@@ -1085,7 +1085,7 @@ const orgRules = store.learningSnapshot(orgScope).rules;
 assert.equal(orgRules.length, 1);
 assert.equal(orgRules[0].body, '开头先给结论。');
 assert.equal(orgRules[0].state, 'active');
-assert.equal(orgPrepare.config.maxTokens, 768);
+assert.equal(orgPrepare.config.maxTokens, 1024);
 assert.equal(orgOptions.purpose, 'project-evolution');
 assert.equal('tools' in orgOptions, false);
 assert.equal(orgOptions.sessionId, 'session-organize');
@@ -1675,3 +1675,47 @@ assert.deepEqual(replayCase.topIds, prodRank.slice(0, 3).map((row) => String(row
 assert.equal(replayCase.bytes, prodCards.bytes, 'replay card bytes match production rendered bytes');
 
 console.log('contract.test.mjs: all passed');
+
+// ── 模型把反馈类型写成同义词，也要照常变成经验，不能整轮作废 ────────────────────
+const aliasCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-contract-alias-'));
+sessionCwds.set('session-alias', aliasCwd);
+const aliasOn = await call('/lite-memory/evolution', { sessionId: 'session-alias', enabled: true });
+assert.equal(aliasOn.status, 200);
+const aliasScope = store.scopeOf(aliasCwd);
+await store.setTaskDefault(aliasScope, { taskKind: 'video', seriesId: '口播' });
+llmImpl = {
+  prepareCall: async () => ({
+    config: { provider: 'deepseek', model: 'chat' },
+    stream: async function* () {
+      yield {
+        type: 'text-delta',
+        text: JSON.stringify({
+          changes: [{
+            target: 'new',
+            feedbackType: 'preference',
+            topicKey: '脚本',
+            currentText: '脚本先写三版再挑。',
+            applicability: 'conditional',
+            conditions: [{ key: 'taskKind', value: 'video' }, { key: 'seriesId', value: '口播' }, { key: 'phase', value: 'brief' }],
+            evidence: ['u0'],
+            persistence: 'project_candidate',
+          }],
+        }),
+      };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    },
+  }),
+};
+const aliasAgent = { id: 'session-alias', cwd: aliasCwd, session: { id: 'session-alias', header: { id: 'session-alias', cwd: aliasCwd }, requestHeader: () => ({ config: { provider: 'deepseek', model: 'chat' } }) } };
+currentAgent = aliasAgent;
+await preStep({ agent: aliasAgent, signal: orgSig, turn: '41' }, async () => ({
+  kind: 'enter',
+  messages: [{ role: 'user', id: 'alias-m1', source: { kind: 'user' }, content: [{ type: 'text', text: '以后脚本先写三版再挑，别只写一版。' }] }],
+}));
+orgTurnEnd(aliasAgent.session, { type: 'turn/end', data: { reason: { kind: 'completed' } } });
+for (let i = 0; i < 100 && store.learningSnapshot(aliasScope).rules.length === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const aliasRules = store.learningSnapshot(aliasScope).rules;
+assert.equal(aliasRules.length, 1, JSON.stringify(store.learningSnapshot(aliasScope).receipts?.slice(-1)));
+assert.equal(aliasRules[0].body, '脚本先写三版再挑。');

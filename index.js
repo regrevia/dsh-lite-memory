@@ -1549,6 +1549,8 @@ export function apply(ctx, config) {
   const feedbackCandidates = new Map();
   /** 项目内反馈代次：每来一次新的可整理反馈就加一，旧整理结果必须作废。 */
   const feedbackRevisions = new Map();
+  /** 按项目+作品记代次：别处的新反馈不该作废这一期的整理结果。 */
+  const feedbackEpisodeRevisions = new Map();
   /** 一个项目同一时间只整理一次；控制器放在模块级供开关路由中止。 */
   const learningJobs = new Map();
 
@@ -3804,6 +3806,7 @@ export function apply(ctx, config) {
     candidate.turn = String(turn || '');
     const revision = (feedbackRevisions.get(scope.key) || 0) + 1;
     feedbackRevisions.set(scope.key, revision);
+    feedbackEpisodeRevisions.set(`${scope.key}\u0000${candidate.episodeId || ''}`, revision);
     candidate.feedbackRevision = revision;
     const prior = feedbackCandidates.get(sessionId);
     feedbackCandidates.set(sessionId, {
@@ -3905,7 +3908,13 @@ export function apply(ctx, config) {
       }
       if (sawTool) throw new Error('整理返回了工具调用');
       /** 运行期间用户又给了新反馈：旧结果不能覆盖新纠正，直接作废，等排队的下一次整理。 */
-      if ((feedbackRevisions.get(scope.key) || 0) !== candidate.feedbackRevision) {
+      if (!learning.feedbackStillCurrent({
+        episodeRevisions: feedbackEpisodeRevisions,
+        scopeRevisions: feedbackRevisions,
+        scopeKey: scope.key,
+        episodeId: candidate.episodeId,
+        revision: candidate.feedbackRevision,
+      })) {
         throw new Error('反馈已更新，这轮结果没采用');
       }
       const parsed = learning.parseOutput(text, { finish, refs: input.refs, rules: input.rules, ranges, expectedTarget: candidate.expectedTarget });
