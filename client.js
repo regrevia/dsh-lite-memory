@@ -1,12 +1,12 @@
 window.__ModuleLoader__.load({
   id: 'dsh-lite-memory',
-  factory(require) {
-    const React = require('react');
+  factory(loadReq) {
+    const React = loadReq('react');
     const h = React.createElement;
     /** 浮层挂到 body：宿主容器的定位/裁切不该决定面板活不活。 */
     const portal = (node) => {
       try {
-        return require('react-dom').createPortal(node, document.body);
+        return loadReq('react-dom').createPortal(node, document.body);
       } catch {
         return node;
       }

@@ -111,7 +111,7 @@ const checks = {
 };
 if (Object.values(checks).some((ok) => !ok)) {
   console.error(JSON.stringify({ checks, measured }, null, 2));
-  process.exit(1);
+  process.exitCode = 1;
 }
 console.log(JSON.stringify({
   kind: 'project-evolution',
