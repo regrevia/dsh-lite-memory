@@ -321,7 +321,7 @@ assert.notEqual(bootA.provider.text({ agent: agentB, signal: signalB }), prepare
   const fourth = await bootA.exec('memory_read', { id: bigBodies[3].id }, agent);
   assert.equal(fourth.status, 'budget_exhausted');
   assert.equal(fourth.body || '', '');
-  assert.equal(bootA.render('memory_read', {}, fourth), 'memory · 这条消息已停止读记忆，下一条消息再读');
+  assert.equal(bootA.render('memory_read', {}, fourth), 'memory · 本条消息读正文到上限（3 条 / 共 8 次），下一条消息接着读；已读到的不会丢');
   const win = bootA.debug.windowOf(agent);
   assert.ok(win.bytes <= 8192);
   assert.equal(win.bodies, 3);
@@ -623,6 +623,34 @@ console.log('recall.test.mjs: ok');
   const links = await bootA.exec('memory_read', { id: unresolved.id, view: 'links' }, agent);
   assert.equal(links.status, 'needs_context');
   assert.doesNotMatch(JSON.stringify(links), /发布前要检查什么/);
+}
+
+// A21：展示行可以原样当句柄；适用条件缺上下文时报出缺哪项，并允许用 task 声明本轮任务。
+{
+  const agent = makeAgent('agent-handle-task', cwdA);
+  await bootA.preStep({ agent, signal: signal(), turn: 't1' }, enter(human('发布前要检查什么')));
+  const decorated = await bootA.exec('memory_read', { title: '[项目] 「大正文样本1」（本项目）' }, agent);
+  assert.equal(decorated.status, 'ok');
+  assert.equal(decorated.title, '大正文样本1');
+
+  const cwdTask = mkdir('task-ctx');
+  const scopeTask = store.scopeOf(cwdTask);
+  const taskEntry = save(scopeTask, {
+    title: '只在评审阶段看', summary: '评审阶段才适用。', body: '评审阶段要先看 diff。',
+    applicability: 'conditional', conditions: [{ key: 'artifactKey', value: 'checkout' }],
+  });
+  const agentTask = makeAgent('agent-task-ctx', cwdTask);
+  await prepare(bootA, agentTask, '先看下这段代码');
+  const blocked = await bootA.exec('memory_read', { title: '只在评审阶段看' }, agentTask);
+  assert.ok(taskEntry.id);
+  assert.equal(blocked.body, '');
+  assert.equal(blocked.missing, 'artifactKey');
+  assert.match(bootA.render('memory_read', { title: '只在评审阶段看' }, blocked), /缺 artifactKey/);
+  const declared = await bootA.exec('memory_read', { title: '只在评审阶段看', task: { artifactKey: 'checkout' } }, agentTask);
+  assert.equal(declared.status, 'ok');
+  assert.match(declared.body, /评审阶段要先看 diff/);
+  const flattened = await bootA.exec('memory_read', { title: '只在评审阶段看', taskArtifactKey: 'checkout' }, agentTask);
+  assert.equal(flattened.status, 'ok', '扁平 task 参数和 task 对象等价');
 }
 
 // A24：纯英文查询按整词判断，自动注入和手动搜索必须给同一个结论。
@@ -1121,4 +1149,63 @@ console.log('recall.test.mjs: ok');
   await runtime.preStep({ agent, signal: signal(), turn: 't1' }, enter(human('超时回滚探针怎么用')));
   const ok = runtime.debug.preparedOf(agent);
   assert.ok(ok && ok.cards.length >= 1, '下一真人请求照常拿到卡片');
+}
+
+// A37：动作侧窄查询——工具真的被调用时，用工具名 + 关键参数补一次，只认触发词命中的预防型条目。
+{
+  const cwd = mkdir('action-side');
+  const scope = store.scopeOf(cwd);
+  store.setRecallMode(scope, 'adaptive', { operationId: 'action-side-mode' });
+  save(scope, {
+    title: '迁移脚本先跑干跑再看差异',
+    kind: 'procedure',
+    triggers: ['migrate.py', '迁移'],
+    body: '先 python migrate.py --dry-run 看差异，再带 --apply 执行；不要直接 apply。',
+  });
+  save(scope, { title: '无关的配色说明', kind: 'note', triggers: ['配色'], body: '配色说明正文' });
+  const guards = [];
+  const agent = makeAgent('agent-action-side', cwd);
+  agent.ctx = {
+    tools: { guard: (fn) => { guards.push(fn); return () => {}; } },
+    effect: (fn) => fn(),
+  };
+  const runtime = boot();
+  runtime.handlers.get('agent/created').at(-1)({ agent });
+  await runtime.preStep({ agent, signal: signal(), turn: 'as-1' }, enter(human('这个库要加个字段')));
+  const hint = guards[0]({ name: 'bash', callId: 'as-call-1', arguments: { command: 'python migrate.py --apply' } });
+  assert.match(String(hint), /迁移脚本先跑干跑再看差异/, '动作发生前给预防型条目');
+  assert.match(String(hint), /--dry-run/, '给正文而不是只给标题');
+  assert.equal(guards[0]({ name: 'bash', callId: 'as-call-2', arguments: { command: 'python migrate.py --apply' } }), undefined, '同一轮只补一次');
+  assert.equal(guards[0]({ name: 'read', callId: 'as-call-3', arguments: { file_path: 'migrate.py' } }), undefined, '只读动作不打扰');
+  assert.equal(guards[0]({ name: 'bash', callId: 'as-call-4', arguments: { command: 'ls -la' } }), undefined, '触发词没出现就不打扰');
+}
+
+// A38：「继续发版」这类最长 8 字的续说开头沿用上一轮原话，别在这一轮断掉提醒。
+{
+  const cwd = mkdir('continuation-opening');
+  const scope = store.scopeOf(cwd);
+  store.setRecallMode(scope, 'adaptive', { operationId: 'continuation-opening-mode' });
+  save(scope, { title: '发版顺序', kind: 'convention', triggers: ['发版'], body: '先升版本号，再跑测试，最后发布。' });
+  const runtime = boot();
+  const agent = makeAgent('agent-cont-open', cwd);
+  await runtime.preStep({ agent, signal: signal(), turn: 'co-1' }, enter(human('继续发版')));
+  const prepared = runtime.debug.preparedOf(agent);
+  assert.ok(prepared, '续说开头也算当前任务，仍留下请求状态');
+  const win = runtime.debug.windowOf(agent);
+  assert.ok(win && String(win.query).includes('继续发版'), '查询带着这句话');
+}
+
+// A39：注入为空时留下 miss 证据（查询与最近候选及分数），阈值调整有据可查。
+{
+  const cwd = mkdir('miss-evidence');
+  const scope = store.scopeOf(cwd);
+  store.setRecallMode(scope, 'adaptive', { operationId: 'miss-evidence-mode' });
+  save(scope, { title: '数据库连接池上限', kind: 'note', tags: ['连接池'], body: '上限 20，超过要排队。' });
+  const runtime = boot();
+  const agent = makeAgent('agent-miss', cwd);
+  await runtime.preStep({ agent, signal: signal(), turn: 'me-1' }, enter(human('今天天气怎么样')));
+  const receipt = runtime.debug.receiptOf(scope, 'session-agent-miss');
+  assert.ok(receipt, '每轮都留回执');
+  assert.equal(receipt.cards, 0, '这一轮没有卡片');
+  assert.equal(receipt.closest, '', '没有接近的候选时就是空的');
 }

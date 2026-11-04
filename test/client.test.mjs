@@ -469,7 +469,7 @@ assert.deepEqual([...titleCountsOf(checkupRows).values()], [2, 1]);
 assert.equal(checkupOf([], [], false).globalEntries, null);
 // 两条一模一样的拦截结果在同一轮里只展示一行：拦截结果没有 id，只能按曝光类型 + 文案 + 正文认。
 const blockedBlock = (text) => ({ kind: 'tool-result', callId: 'call-a', content: [{ type: 'text', text }], subCalls: [] });
-const blockedText = 'memory · 这条记忆的适用条件还没确认，先说明当前任务再读';
+const blockedText = 'memory · 这条记忆的适用条件还没确认（缺 artifactKey）；带 task 声明本轮任务再读，或先说明当前任务';
 assert.equal(blockedText.includes('mem_'), false);
 const blockedKeys = [rowKeyOf('memory_read', blockedBlock(blockedText)), rowKeyOf('memory_read', blockedBlock(blockedText))];
 assert.equal(blockedKeys[0].length > 0, true);

@@ -180,6 +180,8 @@ function noteRecall(scope, sessionId, receipt) {
     chars: Number(receipt.chars) || 0,
     limit: view.CARD.max,
     bytes: view.CARD.bytes,
+    /** 注入为空时留在回执里的最近候选：查了什么、差多少，阈值只能靠这个调。 */
+    closest: String(receipt.closest || '').slice(0, 200),
   });
   while (recallReceipts.size > 64) recallReceipts.delete(recallReceipts.keys().next().value);
 }
@@ -1244,10 +1246,14 @@ const SEARCH_PARAMS = {
 const READ_PARAMS = {
   type: 'object',
   properties: {
-    title: { type: 'string', description: '记忆标题，来自搜索结果或召回卡' },
-    view: { type: 'string', enum: ['full', 'links'], description: '默认 full 读正文；links 只看直接相关的记忆清单，不取正文' },
+    title: { type: 'string', description: '标题或 id，展示行可原样粘贴' },
+    view: { type: 'string', enum: ['full', 'links'], description: '默认 full 读正文；links 只看相关清单，不取正文' },
     scope: { type: 'string', enum: ['project', 'global'], description: '只在指定层解析标题；默认先当前项目再全局' },
-    contextId: { type: 'string', description: '上一轮自动索引或工具结果给出的任务上下文 id；读实验规则时带上' },
+    contextId: { type: 'string', description: '上一轮给的上下文 id；读实验规则时带上' },
+    taskKind: { type: 'string' },
+    taskSeriesId: { type: 'string' },
+    taskPhase: { type: 'string' },
+    taskArtifactKey: { type: 'string' },
   },
   additionalProperties: false,
 };
@@ -1270,6 +1276,21 @@ const FORGET_PARAMS = {
  * 按标题解析内部身份。对外仍只显示标题，但解析必须能说明「唯一 / 同层歧义 / 不存在」：
  * 同层同名只应剩一条（旧数据残留才会撞上歧义），跨层同名才是常态。
  */
+/**
+ * 展示格式不是句柄：召回卡/搜索结果印的是「[项目] 「标题」（场景）」，
+ * 解析时先剥掉装饰再按裸标题找，别让「原样抄」变成三次失败。
+ */
+function cleanTitleHandle(value) {
+  let text = String(value ?? '').trim();
+  if (!text) return '';
+  const quoted = text.match(/「([^」]+)」/);
+  if (quoted && quoted[1].trim()) return quoted[1].trim();
+  text = text.replace(/^\[[^\]]{0,40}\]\s*/, '');
+  text = text.replace(/^[「『"“]([\s\S]*)[」』"”]$/, '$1');
+  text = text.replace(/\s*（[^（）]*）\s*$/, '');
+  return text.trim();
+}
+
 function titleHitsIn(target, title, { includeArchived = false } = {}) {
   let index;
   try { index = loadIndex(target); } catch { return []; }
@@ -1351,7 +1372,9 @@ function nearTitleMatches(targets, title) {
 function refIdOf(scope, args, label = '记忆', options = {}) {
   const id = typeof args.id === 'string' ? args.id.trim() : '';
   if (id) return id;
-  const title = typeof args.title === 'string' ? args.title.trim() : '';
+  const rawTitle = typeof args.title === 'string' ? args.title.trim() : '';
+  const received = String(rawTitle ?? '').trim();
+  const title = cleanTitleHandle(rawTitle);
   if (!title) throw new Error(`要读或要忘一条${label}，先给标题`);
   /** 显式指定层时只解析那一层：同名条目不会被顺手改掉，项目层也不会命中全局。 */
   const explicit = args && args.scope === 'global' ? globalScope() : args && args.scope === 'project' ? scope : null;
@@ -1378,9 +1401,9 @@ function refIdOf(scope, args, label = '记忆', options = {}) {
       const pick = live.length ? live : matches;
       if (pick.length === 1) return pick[0].id;
     }
-    throw new Error(`没有「${title}」这条${label}。相近的里有：${near.map((item) => `「${item}」`).join('、')}；用完整标题或 id 再试`);
+    throw new Error(`没有「${received || title}」这条${label}。相近的里有：${near.map((item) => `「${item}」`).join('、')}；展示行可原样粘贴，也可以给 id`);
   }
-  throw new Error(`没有「${title}」这条${label}；先用 memory_search 对一下标题`);
+  throw new Error(`没有「${received || title}」这条${label}；标题可粘展示行或给 id，也可以先用 memory_search 对一下`);
 }
 
 /** 同名条目可能分布在项目层和全局层：更新前先报候选，不能先匹配。 */
@@ -2891,7 +2914,7 @@ export function apply(ctx, config) {
 
   ctx.effect(() => tools.register({
     name: 'memory_read',
-    description: '读一条记忆的正文。搜索结果里只有一行摘要，需要细节时按标题读。索引里还有、正文文件丢了会直接报错，不会返回空正文。',
+    description: `读一条记忆的正文。搜索只有摘要，细节按标题读；缺条件加 taskPhase。一条消息读 ${view.REQUEST_LIMITS.bodies} 条 / ${view.REQUEST_LIMITS.reads} 次为限，下一条接着算。正文丢了报错，不返回空正文。`,
     parameters: READ_PARAMS,
     output: {
       schema: {
@@ -2905,6 +2928,7 @@ export function apply(ctx, config) {
           origin: { type: 'string', enum: ['user_explicit', 'model_drafted', 'project_evolution'] },
           kind: { type: 'string' },
           status: { type: 'string', enum: ['ok', 'archived', 'needs_context', 'not_applicable', 'gone', 'budget_exhausted', 'memory_disabled'] },
+          missing: { type: 'string' },
           body: { type: 'string' },
           links: { type: 'string' },
           repeat: { type: 'boolean' },
@@ -2915,7 +2939,7 @@ export function apply(ctx, config) {
       render: (_args, value) => [{
         type: 'text',
         text: value.status === 'budget_exhausted'
-          ? 'memory · 这条消息已停止读记忆，下一条消息再读'
+          ? `memory · 本条消息读正文到上限（${view.REQUEST_LIMITS.bodies} 条 / 共 ${view.REQUEST_LIMITS.reads} 次），下一条消息接着读；已读到的不会丢`
           : value.status === 'memory_disabled'
             ? 'memory · 记忆检索已关闭'
             : value.repeat
@@ -2925,7 +2949,7 @@ export function apply(ctx, config) {
                 : value.links !== undefined && value.status === 'ok'
                   ? `memory · 「${value.title}」的相关记忆\n${value.links || '(无)'}`
                   : value.status === 'needs_context'
-                    ? 'memory · 这条记忆的适用条件还没确认，先说明当前任务再读'
+                    ? `memory · 这条记忆的适用条件还没确认${value.missing ? `（缺 ${value.missing}）` : ''}；带 task 声明本轮任务再读，或先说明当前任务`
                     : value.status === 'not_applicable'
                       ? 'memory · 这条记忆不适用于当前任务'
                       : value.status === 'archived'
@@ -2956,15 +2980,27 @@ export function apply(ctx, config) {
       const allowExperimental = resolved.experimental === true;
       const agent = execution?.agent;
       const win = windowOf(agent);
-      const gateRuntime = resolved.held || win?.runtime
+      const gateBase = resolved.held || win?.runtime
         || { projectId: scope.key, context, experimental: resolved.experimental === true };
+      /** task 只补本次读取的条件上下文：模型显式声明已确认的任务键，不写回任何记忆、不影响自动召回。 */
+      const flatTask = ['kind', 'seriesId', 'phase', 'artifactKey']
+        .reduce((acc, key) => (typeof args[`task${key[0].toUpperCase()}${key.slice(1)}`] === 'string'
+          ? { ...acc, [key]: args[`task${key[0].toUpperCase()}${key.slice(1)}`] } : acc), {});
+      const task = args.task && typeof args.task === 'object' ? args.task : (Object.keys(flatTask).length ? flatTask : null);
+      const gateRuntime = task
+        ? { ...gateBase, task: { ...(gateBase.task || {}), ...task } }
+        : gateBase;
+      const readContext = task ? view.contextWithTask(context, task) : context;
       if (args.view === 'links') {
         const refId = refIdOf(readScope, args, '记忆', { adoptNear: true });
         const source = locate(readScope, refId);
         const gateOk = !source || view.eligibility(source.record, gateRuntime, 'read').ok;
-        if (!gateOk) return { scope: '', status: 'needs_context', links: '' };
-        const found = readLinks(readScope, refId, { context, allowExperimental, runtime: gateRuntime, now: Date.now() });
-        if (!found) throw new Error(`没有「${String(args.title || args.id || '').trim()}」这条记忆`);
+        if (!gateOk) {
+          const gaps = view.conditionGaps(source.record, gateRuntime).join('、');
+          return { scope: '', status: 'needs_context', missing: gaps, links: '' };
+        }
+        const found = readLinks(readScope, refId, { context: readContext, allowExperimental, runtime: gateRuntime, now: Date.now() });
+        if (!found) throw new Error(`没有「${String(args.title || args.id || '').trim()}」这条记忆；标题可粘展示行或给 id`);
         if (found.status !== 'ok') {
           const withheld = { scope: '', status: found.status, links: '' };
           if (win) {
@@ -2993,19 +3029,23 @@ export function apply(ctx, config) {
       }
       const record = readEntry(readScope, refIdOf(readScope, args, '记忆', { adoptNear: true }), {
         layers: args.scope ? [readScope] : undefined,
-        context,
+        context: readContext,
         allowExperimental,
         /** 只有真正把正文交出去的读取才算用过：条件未知/被取代/过期不更新使用记录。 */
         usage: (item) => view.eligibility(item, gateRuntime, 'read').ok,
       });
-      if (!record) throw new Error(`没有「${String(args.title || args.id || '').trim()}」这条记忆`);
+      if (!record) throw new Error(`没有「${String(args.title || args.id || '').trim()}」这条记忆；标题可粘展示行或给 id`);
       /** 归档条目还能按标题找到：只回状态，不交正文，也不把它当成「不存在」。 */
       if (record.status === 'archived') return { title: record.title, scope: record.scope, status: 'archived', body: '' };
       const gate = view.eligibility(record, gateRuntime, 'read');
-      if (!gate.ok) return { scope: record.scope, status: gate.status, body: '' };
+      if (!gate.ok) {
+        const gaps = gate.status === 'needs_context' ? view.conditionGaps(record, gateRuntime).join('、') : '';
+        return { scope: record.scope, status: gate.status, missing: gaps, body: '' };
+      }
       /** 条件未知或不适用的条目只报状态：标题只能定位，不能证明适用，正文一律不先返回。 */
       if (record.status !== 'ok' && record.status !== 'archived') {
-        return { scope: record.scope, status: record.status === 'needs_context' ? 'needs_context' : 'not_applicable', body: '' };
+        const gaps = record.status === 'needs_context' ? view.conditionGaps(record, gateRuntime).join('、') : '';
+        return { scope: record.scope, status: record.status === 'needs_context' ? 'needs_context' : 'not_applicable', missing: gaps, body: '' };
       }
       const revision = record.revision || 1;
       const body = String(record.body ?? '');
@@ -3422,6 +3462,76 @@ export function apply(ctx, config) {
     }
   };
 
+  /**
+   * 动作侧通道：工具真的被调用时，用「工具名 + 关键参数」做一次窄查询。
+   * 预防型条目（procedure / pitfall）约束的是下一步动作，字面常写在命令里，而不是用户那句话里；
+   * 只认触发词真的出现在这次调用里的条目，避免把泛泛相关的记忆塞进工具结果。
+   * 与自动召回共用同一份请求额度（win.toolBytes），每轮最多补一次。
+   */
+  const PASSIVE_ACTION = /^(?:read|read_image|glob|grep|list|find|view|fetch|web_search|web_fetch|job_output|job_list|job_kill|todo_write|ask_user_question|ask_user|question|skill|working_directory|present|sidebar_open|unlag_refresh|schedule_list|schedule_create|schedule_delete|schedule_update|memory_)/;
+  const ACTION_ARG_KEYS = ['command', 'cmd', 'input', 'file_path', 'path', 'pattern', 'query', 'url', 'description', 'content', 'old_string', 'new_string', 'script', 'code', 'target', 'action', 'package'];
+  const ACTION_ARG_CHARS = 160;
+  const actionQueryOf = (execution) => {
+    const name = String(execution?.name || '').trim();
+    const args = execution?.arguments && typeof execution.arguments === 'object' ? execution.arguments : {};
+    let text = name;
+    for (const key of ACTION_ARG_KEYS) {
+      const value = args[key];
+      if (typeof value === 'string' && value.trim()) text += ` ${value.trim().slice(0, ACTION_ARG_CHARS)}`;
+    }
+    return text.slice(0, 600);
+  };
+  const actionSideHint = (agent, execution) => {
+    try {
+      const name = String(execution?.name || '');
+      if (!name || MEMORY_TOOLS.includes(name) || PASSIVE_ACTION.test(name)) return undefined;
+      const held = prepared.get(agent);
+      if (!held || held.actionHinted) return undefined;
+      if (!memoryOnForAgent(agent)) return undefined;
+      const win = windowOf(agent);
+      if (!win || !win.autoBudget) return undefined;
+      const query = actionQueryOf(execution);
+      if (!query || query === name) return undefined;
+      const runtime = held.runtimeHeld || win.runtime || null;
+      const context = runtime && runtime.context ? runtime.context : view.trustedContext(held.scope, {});
+      const task = runtime && runtime.task ? runtime.task : null;
+      const lowered = query.toLowerCase();
+      let row = null;
+      for (const source of [held.scope, globalScope()]) {
+        let index;
+        try { index = loadIndex(source); } catch { continue; }
+        const records = [];
+        for (const entry of index.entries || []) {
+          if (!entry || entry.archived || entry.origin === 'project_evolution') continue;
+          if (entry.kind !== 'procedure' && entry.kind !== 'pitfall') continue;
+          if (held.deliveredIds instanceof Set && held.deliveredIds.has(entry.id)) continue;
+          /** 窄：触发词必须真的出现在这次调用里，否则不打扰。 */
+          const fired = (entry.triggers || []).some((trigger) => {
+            const text = String(trigger || '').trim().toLowerCase();
+            return Boolean(text) && lowered.includes(text);
+          });
+          if (fired) records.push(entry);
+        }
+        if (!records.length) continue;
+        const ranked = view.rank(records, query, { limit: 1, requireApplicable: true, context, runtime, task });
+        row = ranked[0] && ranked[0].record ? ranked[0].record : null;
+        if (row) break;
+      }
+      if (!row) return undefined;
+      const body = String(row.body || row.summary || '').trim().slice(0, 600);
+      if (!body) return undefined;
+      const hint = `[lite-memory] 执行 ${name} 之前先看记忆「${row.title}」：\n${body}`;
+      if (!affordableTool(win, Buffer.byteLength(hint))) return undefined;
+      win.toolBytes = Number(win.toolBytes || 0) + Buffer.byteLength(hint);
+      held.actionHinted = true;
+      if (!(held.deliveredIds instanceof Set)) held.deliveredIds = new Set();
+      if (row.id) held.deliveredIds.add(row.id);
+      return hint;
+    } catch {
+      return undefined;
+    }
+  };
+
   /** 执行入口再拦一次：工具若已出现在旧快照里，调用时也不放行。 */
   if (typeof ctx.on === 'function') ctx.on('agent/created', (payload) => {
     const agent = payload?.agent;
@@ -3431,7 +3541,7 @@ export function apply(ctx, config) {
         if (MEMORY_TOOLS.includes(execution?.name)) {
           return memoryOnForAgent(agent) ? undefined : '本项目记忆已关闭，先在面板打开';
         }
-        return npmProbeHint(agent, execution);
+        return npmProbeHint(agent, execution) || actionSideHint(agent, execution);
       }), 'lite-memory: tool guard');
     } catch { /* older host without guards */ }
     syncMemoryTools(agent);
@@ -3581,7 +3691,8 @@ export function apply(ctx, config) {
       } : null;
       /** 工具模式也要记下本轮真人原话：只用于核对绑定，不自动注入。 */
       const said = saidThisStep;
-      const continuationHint = view.isContinuationQuery(said) || view.isEllipticalContinuation(said);
+      const continuationHint = view.isContinuationQuery(said) || view.isEllipticalContinuation(said)
+        || view.isContinuationOpening(said);
       /** 「继续」这类续说没有检索词：带上同会话上一轮原话，否则这一轮必然召回为空。 */
       const carried = continuationHint
         ? (sessionTask?.taskQuery || previous?.query || sessionTask?.query || '') : '';
@@ -3691,8 +3802,28 @@ export function apply(ctx, config) {
       }
       /** 实验规则最后才取预算：普通卡片先占，弱相关实验不能把强相关项目规则挤出去。 */
       const experiment = runtime ? experimentFor(scope, runtime, win) : null;
+      /**
+       * 一条卡片都没发布时落 miss 证据：查询原话、最接近的候选与分数。
+       * 只记判断不留正文，面板与回执都读得到，阈值调整才有依据。
+       */
+      let closest = '';
+      if (!snapshot.cards.length && query) {
+        const near = [];
+        for (const source of [scope, globalScope()]) {
+          let index;
+          try { index = loadIndex(source); } catch { continue; }
+          const records = (index.entries || []).filter((item) => item && item.title && item.status !== 'archived'
+            && item.origin !== 'project_evolution' && !view.lifecycleStatusOf(item));
+          if (!records.length) continue;
+          const rows = view.rank(records, query, {
+            limit: 2, requireApplicable: true, context: recalledContext, runtime: runtime ? runtime.held : null, task: currentTask,
+          });
+          for (const row of rows) near.push(`${row.record.title} ${(Number(row.score) || 0).toFixed(2)}`);
+        }
+        closest = near.slice(0, 3).join(' / ');
+      }
       noteRecall(scope, sessionId, {
-        reason: snapshot.reason, matched: snapshot.matched, cards: snapshot.cards.length, chars: snapshot.bytes,
+        reason: snapshot.reason, matched: snapshot.matched, cards: snapshot.cards.length, chars: snapshot.bytes, closest,
       });
       /** 没发布出去的投影要退还额度：不能因为一次超时把本请求的召回额度耗掉。 */
       const rollbackBudget = () => {
@@ -4227,6 +4358,8 @@ export function apply(ctx, config) {
       setDeadlineMs: (ms) => { if (Number.isFinite(ms) && ms >= 0) recallDeadlineMs = ms; },  // 0 表示立刻超时，只给测试用
       deadlineFor: (scope) => recallDeadlineFor(scope),
       humanAskedGlobal,
+      /** 测试专用：读某一轮落下的召回回执（含 miss 证据）。 */
+      receiptOf: (scope, sessionId) => recallReceiptOf(scope, sessionId),
     };
     return () => {
       delete globalThis.__liteMemoryRecall;

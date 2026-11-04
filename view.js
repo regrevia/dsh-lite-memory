@@ -298,6 +298,22 @@ export function eligibility(record, runtime = {}, purpose = 'read', now = Date.n
   return { ok: true, status, reason: '' };
 }
 
+/**
+ * 适用条件缺哪几项：读工具拿它回话，调用方知道要补什么，而不是只收到一句「还没确认」。
+ * 只报键名，不把条件值当作已确认事实。
+ */
+export function conditionGaps(record, runtime = {}) {
+  if (!record) return [];
+  const result = evaluate(record, contextWithTask((runtime && runtime.context) || {}, (runtime && runtime.task) || {}));
+  const gaps = Array.isArray(result.missing) ? result.missing.slice() : [];
+  const selection = record.selection;
+  if (selection && selection.mode === 'complete' && !gaps.includes('artifactKey')) {
+    const artifactKey = ((runtime && runtime.context) || {}).artifactKey;
+    if (!artifactKey) gaps.push('artifactKey');
+  }
+  return gaps;
+}
+
 /** 旧库迁过来的条目没复核过，先让人看见再决定，不自动注入。 */
 export function canAutoRecall(record, context) {
   if (!record || record.reviewState === 'legacy_unreviewed') return false;
@@ -950,6 +966,17 @@ export function isEllipticalContinuation(text) {
   const match = cut.match(/^(?:继续|接着|再接着|往下)[，,、\s]*(.+)$/u);
   if (!match) return false;
   return ELLIPTICAL_BODY.test(match[1].trim());
+}
+
+/**
+ * 「继续发版」这类最长 8 字的续说开头：句首是续说标记，后面只有几个字。
+ * 整句白名单要求后面全是通用动作词，会漏掉带一个具体动词的续句；
+ * 句子短且以续说标记开头，就仍算当前任务，带上上一轮原话检索，别让提醒在这一轮断掉。
+ */
+export function isContinuationOpening(text) {
+  const raw = plain(text, 40).trim().replace(/[\s\u3002\uff01\uff1f?!\uff0c,\u3001\u2026~\uff5e]+/gu, '');
+  if (!raw || [...raw].length > 8) return false;
+  return /^(?:继续|接着|再接着|然后|往下|再来)/u.test(raw);
 }
 
 /** 这句话有没有具体动作：只用于判断要不要把上一轮的工具线索并进这次查询。 */

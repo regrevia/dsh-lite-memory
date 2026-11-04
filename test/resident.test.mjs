@@ -29,7 +29,8 @@ const caps = {
   memory_save: 5860,
   memory_suggest: 2900,
   memory_search: 1750,
-  memory_read: 1350,
+  /* 读工具多了「id/展示行句柄」和 task 键：+75B，从别的工具账上没挪，仍守总账。 */
+  memory_read: 1425,
   memory_forget: 1000,
   memory_persona: 1350,
   memory_tune: 1650,
