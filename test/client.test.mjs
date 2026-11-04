@@ -303,6 +303,24 @@ assert.equal(palaceRoomsOf([]).length, 4);
 // 每页 24 条；页码夹在有效范围内。
 const palaceMany = Array.from({ length: 25 }, (_, index) => palaceRecord(`mem_${index}`, 'preference', `P${index}`));
 assert.equal(palaceRoomsOf(palaceMany)[0].pages, 2);
+
+/* 「所有」视图：宫殿按归属层分房间，图谱标签带层名；默认行为一个字不改。 */
+const scopeRows = [
+  { id: 'mem_a', kind: 'note', scopeKey: 'proj-1', scopeLabel: '项目甲' },
+  { id: 'mem_b', kind: 'note', scopeKey: 'global', scopeLabel: '全局' },
+  { id: 'mem_c', kind: 'note', scopeKey: 'proj-1', scopeLabel: '项目甲' },
+];
+assert.deepEqual(
+  palaceRoomsOf(scopeRows, { byScope: true }).map((room) => [room.id, room.name, room.total]),
+  [['scope:proj-1', '项目甲', 2], ['scope:global', '全局', 1]],
+);
+assert.equal(palaceRoomsOf(scopeRows).length, 4, '默认仍按类型分房间');
+assert.deepEqual(palaceCorridorOf(scopeRows, { byScope: true }).map((door) => door.name), ['项目甲', '全局']);
+assert.equal(palaceRoomsOf(scopeRows, { byScope: true })[0].pages, 1);
+const scopedGraph = graphOf([{ id: 'mem_a', kind: 'note', title: '甲条', scopeLabel: '项目甲' }], '', { showScope: true });
+assert.ok(scopedGraph.nodes.some((node) => node.label === '项目甲 · 甲条'));
+const plainGraph = graphOf([{ id: 'mem_a', kind: 'note', title: '甲条', scopeLabel: '项目甲' }], '');
+assert.ok(plainGraph.nodes.some((node) => node.label === '甲条'));
 // 房间预览按内容铺槽位：没有记录时不用空槽，满 4 条封顶。
 assert.equal(palaceSlotCountOf(1), 1);
 assert.equal(palaceSlotCountOf(3), 3);

@@ -687,9 +687,11 @@ function keepHandler(webServer, cwdForSession) {
         scopes.push({ key: 'global', kind: 'global', label: '全局', entries: 0, archived: 0, experimental: 0, enabled: false, updatedAt: '' });
       }
       const requested = typeof body.scopeKey === 'string' ? body.scopeKey : '';
+      /** 「所有」只是读视图：把枚举到的项目层和全局层合成一份，写操作仍按行自己的层走。 */
+      const allView = requested === 'all';
       let selectedScope = scope;
       if (requested === 'global') selectedScope = globalScope();
-      else if (requested) {
+      else if (requested && !allView) {
         if (requested === scope.key) selectedScope = scope;
         else {
           const row = listed.find((item) => item.key === requested);
@@ -697,13 +699,7 @@ function keepHandler(webServer, cwdForSession) {
           selectedScope = { key: row.key, dir: row.dir, cwd: row.cwd || '', requestedCwd: row.cwd || '', rootSource: 'configured', confirmed: true };
         }
       }
-      let index;
-      try {
-        index = loadIndex(selectedScope, { readOnly: true });
-      } catch (error) {
-        return sendJson(res, 409, { ok: false, reason: error instanceof Error ? error.message : '这个项目的记忆读不出来' });
-      }
-      const records = index.entries.filter((entry) => entry.status !== 'archived').map((record) => ({
+      const shapeRecord = (record, layer, scopeKey, scopeLabel) => ({
         id: record.id,
         title: record.title || '',
         summary: record.summary || '',
@@ -723,6 +719,9 @@ function keepHandler(webServer, cwdForSession) {
         used: record.used === true,
         bytes: Number(record.bytes) || 0,
         experimental: isExperimentalRecord(record),
+        scope: layer,
+        scopeKey,
+        scopeLabel,
         learning: record.learning ? {
           state: record.learning.state || '',
           pinned: record.learning.pinned === true,
@@ -731,14 +730,59 @@ function keepHandler(webServer, cwdForSession) {
           evidence: Array.isArray(record.learning.evidence) ? record.learning.evidence.length : 0,
           versions: Array.isArray(record.learning.versions) ? record.learning.versions.length : 0,
         } : null,
-      }));
-      const archives = Array.isArray(index.archived) ? index.archived : [];
-      const archived = archives.slice(0, 80).map((record) => ({
-        id: record.id,
-        title: record.title || '',
-        revision: Number(record.revision) || 1,
-        updated: record.updated || '',
-      }));
+      });
+      const targetsOfView = (() => {
+        if (!allView) return [selectedScope];
+        const rows = [];
+        const seen = new Set();
+        const add = (target) => {
+          if (!target || seen.has(target.key)) return;
+          seen.add(target.key);
+          rows.push(target);
+        };
+        for (const row of listed) add({ key: row.key, dir: row.dir, cwd: row.cwd || '', requestedCwd: row.cwd || '', rootSource: 'configured', confirmed: true });
+        add(scope);
+        add(globalScope());
+        return rows;
+      })();
+      /** 有的项目状态读坏了不连坐整张视图：跳过那一层继续渲染别的。 */
+      const records = [];
+      const archives = [];
+      const conflicts = [];
+      const seenIds = new Set();
+      for (const target of targetsOfView) {
+        let loaded;
+        try {
+          loaded = loadIndex(target, { readOnly: true });
+        } catch (error) {
+          if (!allView) return sendJson(res, 409, { ok: false, reason: error instanceof Error ? error.message : '这个项目的记忆读不出来' });
+          continue;
+        }
+        const layer = target.key === 'global' ? 'global' : 'project';
+        const scopeLabel = labelOf(target);
+        for (const record of loaded.entries) {
+          if (record.status === 'archived') continue;
+          const key = `${target.key}:${record.id}`;
+          if (seenIds.has(key)) continue;
+          seenIds.add(key);
+          records.push(shapeRecord(record, layer, target.key, scopeLabel));
+        }
+        for (const record of (Array.isArray(loaded.archived) ? loaded.archived : [])) {
+          archives.push({
+            id: record.id,
+            title: record.title || '',
+            revision: Number(record.revision) || 1,
+            updated: record.updated || '',
+            scope: layer,
+            scopeKey: target.key,
+            scopeLabel,
+          });
+        }
+        let rows = [];
+        try { rows = conflictsOf(target); } catch { rows = []; }
+        for (const row of rows) conflicts.push({ ...row, scope: layer, scopeKey: target.key, scopeLabel });
+      }
+      const archived = archives.slice(0, 80);
       const tags = new Set();
       let links = 0;
       for (const record of records) {
@@ -771,15 +815,15 @@ function keepHandler(webServer, cwdForSession) {
         current: { key: scope.key, label: labelOf(scope), control: currentControl, evolution: currentEvolution, recall: recallReceiptOf(scope, sessionId) },
         scopes,
         selected: {
-          key: selectedScope.key,
-          kind: selectedScope.key === 'global' ? 'global' : 'project',
-          label: labelOf(selectedScope),
+          key: allView ? 'all' : selectedScope.key,
+          kind: allView ? 'all' : selectedScope.key === 'global' ? 'global' : 'project',
+          label: allView ? '所有项目' : labelOf(selectedScope),
           updatedAt: records.reduce((latest, record) => record.updated > latest ? record.updated : latest, ''),
           control: selectedControl,
           evolution: selectedEvolution,
           records,
           archived,
-          conflicts: conflictsOf(selectedScope),
+          conflicts,
           stats: {
             total: records.length,
             experimental: records.filter((record) => record.experimental).length,
@@ -817,12 +861,14 @@ function keepHandler(webServer, cwdForSession) {
       if (op !== 'keep' && op !== 'drop') return sendJson(res, 400, { ok: false, reason: '不认识这个操作' });
       const conflictId = typeof body.conflictId === 'string' ? body.conflictId.trim() : '';
       if (!conflictId) return sendJson(res, 400, { ok: false, reason: '缺少这条待裁决' });
+      /** 丢掉不写记忆，不拿版本挡它；只有另存一条要知道批的是哪一版草稿。 */
       const expectedRevision = Number(body.expectedRevision);
-      if (!Number.isInteger(expectedRevision) || expectedRevision < 1) {
+      const staleKnown = Number.isInteger(expectedRevision) && expectedRevision >= 1;
+      if (op === 'keep' && !staleKnown) {
         return sendJson(res, 409, { ok: false, reason: '这条待裁决的版本不清楚，先刷新再处理' });
       }
       try {
-        const ref = { id: conflictId, expectedRevision };
+        const ref = staleKnown ? { id: conflictId, expectedRevision } : { id: conflictId };
         const outcome = op === 'drop' ? dropConflict(target, ref) : resolveConflict(target, ref);
         if (!outcome.ok) {
           return sendJson(res, 409, {
@@ -1149,9 +1195,10 @@ const SAVE_PARAMS = {
     },
     resolution: {
       type: 'string',
-      enum: ['distinct'],
-      description: '确认「不是同一条」；返回 needsResolution 且核对后确实不同时带',
+      enum: ['distinct', 'merge', 'discard'],
+      description: '自己裁决：distinct 换标题另存、merge 并进相近那条（配 mergeInto）、discard 不存',
     },
+    mergeInto: { type: 'string', description: 'resolution="merge" 时并进哪条的标题，不给取最相近' },
     scope: { type: 'string', enum: ['auto', 'project', 'global'], description: 'auto（默认）/ project / global；用户明确说「所有项目」才 global，本机路径、端口、项目事实降为项目层' },
     memoryClass: { type: 'string', enum: ['personal_preference', 'project_fact', 'environment_fact', 'portable_procedure'], description: '归属：个人偏好/项目事实/设备事实/可搬流程；设备事实须带条件' },
     durability: { type: 'string', enum: ['durable', 'task'], description: 'durable（默认）或 task（一次性参数，不落盘）' },
@@ -1227,7 +1274,7 @@ const SAVE_PARAMS = {
 
 const SUGGEST_PARAMS = {
   ...SAVE_PARAMS,
-  properties: Object.fromEntries(Object.entries(SAVE_PARAMS.properties).filter(([key]) => !['scope', 'id', 'updateTitle', 'resolution', 'memoryClass', 'durability', 'evidenceRef', 'sameTopicAs', 'supersedes', 'mode'].includes(key))),
+  properties: Object.fromEntries(Object.entries(SAVE_PARAMS.properties).filter(([key]) => !['scope', 'id', 'updateTitle', 'resolution', 'mergeInto', 'memoryClass', 'durability', 'evidenceRef', 'sameTopicAs', 'supersedes', 'mode'].includes(key))),
 };
 
 const SEARCH_PARAMS = {
@@ -2472,7 +2519,7 @@ export function apply(ctx, config) {
 
   ctx.effect(() => tools.register({
     name: 'memory_save',
-    description: `保存跨会话有用的记忆。只在会改变以后判断时存；用户说「记住」或话已是长期规则就直接调用，不必先问。先搜，能更新就不新建；文本相近但标题不同先不写，needsResolution 核对后是同一条就改标题重存，确实不同才带 resolution="distinct"。按标题更新时未给字段保留，正文整段替换。同层同名只有一条：同时存在两个标题再另存一条，不要靠同名加前置条件分开。${NOTES}`,
+    description: `保存跨会话有用的记忆。只在会改变以后判断时存；说「记住」或已是长期规则就直接调用。先搜，能更新就不新建。needsResolution 自己裁决：补充就 resolution="merge"（mergeInto 指定并进哪条），另一条就 resolution="distinct" 换标题另存，重复就 resolution="discard" 不存。按标题更新时未给字段保留，正文整段替换。同层同名只有一条：两个标题同时存在时再另存，不靠同名加前置条件分开。${NOTES}`,
     parameters: SAVE_PARAMS,
     output: {
       presentationMeta: (_args, value) => ({
@@ -2483,7 +2530,8 @@ export function apply(ctx, config) {
         changed: value.changed === true,
         recordKind: typeof value.kind === 'string' && value.kind ? value.kind : '',
         mode: value.error ? 'failed'
-          : value.needsScope ? 'needs_scope'
+          : value.discarded ? 'discarded'
+            : value.needsScope ? 'needs_scope'
           : value.existingTitle ? 'duplicate'
             : value.needsResolution ? 'needs_resolution'
               : value.changed === false ? 'unchanged' : value.merged ? 'updated' : 'created',
@@ -2508,6 +2556,7 @@ export function apply(ctx, config) {
           scope: { type: 'string' },
           scopeName: { type: 'string' },
           needsResolution: { type: 'boolean' },
+          discarded: { type: 'boolean' },
           needsScope: { type: 'boolean' },
           reason: { type: 'string' },
           existingTitle: { type: 'string' },
@@ -2533,6 +2582,8 @@ export function apply(ctx, config) {
           ? value.needsCompaction
             ? `memory · ${value.error}\n${value.suggestedAction || ''}`
             : `memory · ${value.error}`
+          : value.discarded
+          ? `memory · 没存：「${value.title}」和已有记忆重复，不另存`
           : value.needsScope
           ? value.reason === 'memory_disabled'
             ? `memory · ${value.offCopy || '本项目记忆已关闭，先在面板打开'}`
@@ -2642,6 +2693,13 @@ export function apply(ctx, config) {
           similarTitles: '',
           similar: '',
           archived: '',
+        };
+      }
+      if (saved.discarded) {
+        return {
+          title: saved.draft?.title || '', summary: '', when: '', revision: 0,
+          merged: false, changed: false, scope: saved.chosenScope || '', discarded: true,
+          needsScope: false, needsResolution: false, similarTitles: '', similar: '', archived: '',
         };
       }
       if (saved.existing) {

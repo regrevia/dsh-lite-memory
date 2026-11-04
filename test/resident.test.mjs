@@ -26,7 +26,8 @@ const resident = (def) => bytes(def.description) + bytes(def.parameters) + bytes
 
 /* 常驻提示每轮都要发一遍：工具定义变大就是每次请求都变贵。 */
 const caps = {
-  memory_save: 5860,
+  /* 0.18.83 上调到 6260：save 要自己讲清 merge/distinct/discard 三种裁决，这段判据省不掉。 */
+  memory_save: 6260,
   memory_suggest: 2900,
   memory_search: 1750,
   /* 读工具多了「id/展示行句柄」和 task 键：+75B，从别的工具账上没挪，仍守总账。 */
@@ -45,7 +46,8 @@ for (const [name, cap] of Object.entries(caps)) {
   total += size;
   assert.ok(size <= cap, `${name} resident ${size}B exceeds ${cap}B`);
 }
-assert.ok(total <= 15400, `resident tool text ${total}B exceeds 15400B`);
+/* 0.18.83 总账 15400→15600：save 的 merge/distinct/discard 判据与 mergeInto 参数是这一版的行为，不能只塞进代码不告诉模型。 */
+assert.ok(total <= 15600, `resident tool text ${total}B exceeds 15600B`);
 assert.ok(defs.get('memory_suggest').parameters.properties.supersedes === undefined, 'suggest does not accept supersedes');
 assert.ok(defs.get('memory_suggest').parameters.properties.mode === undefined, 'suggest does not accept mode');
 console.log('resident tool text', total, 'bytes');

@@ -1094,8 +1094,26 @@ window.__ModuleLoader__.load({
       note: 'notes',
     });
     const palaceRoomIdOf = (kind) => PALACE_ROOM_OF_KIND[kind] || 'notes';
-    const palaceRoomsOf = (records) => {
+    /** 「所有」视图按归属层分房间：同一层的东西站一起，走廊才看得懂。 */
+    const palaceScopeRoomsOf = (rows) => {
+      const order = [];
+      const byKey = new Map();
+      for (const record of rows) {
+        const key = String(record.scopeKey || '') || 'project';
+        if (!byKey.has(key)) {
+          byKey.set(key, { id: `scope:${key}`, name: record.scopeLabel || '项目', items: [], total: 0, pages: 1 });
+          order.push(key);
+        }
+        byKey.get(key).items.push(record);
+      }
+      return order.map((key) => {
+        const room = byKey.get(key);
+        return { ...room, total: room.items.length, pages: Math.max(1, Math.ceil(room.items.length / PALACE_PAGE_SIZE)) };
+      });
+    };
+    const palaceRoomsOf = (records, options) => {
       const rows = Array.isArray(records) ? records : EMPTY;
+      if (options && options.byScope === true) return palaceScopeRoomsOf(rows);
       return PALACE_ROOMS.map((room) => {
         const items = rows.filter((record) => palaceRoomIdOf(record && record.kind) === room.id);
         return { id: room.id, name: room.name, items, total: items.length, pages: Math.max(1, Math.ceil(items.length / PALACE_PAGE_SIZE)) };
@@ -1103,8 +1121,8 @@ window.__ModuleLoader__.load({
     };
     /** 房间预览按内容铺：1 条就 1 个槽，不拿虚位占地方。 */
     const palaceSlotCountOf = (total) => Math.min(PALACE_PREVIEW, Math.max(1, Number.isFinite(total) ? Math.floor(total) : 0));
-    const palaceRoomPageOf = (records, roomId, page) => {
-      const room = palaceRoomsOf(records).find((row) => row.id === roomId);
+    const palaceRoomPageOf = (records, roomId, page, options) => {
+      const room = palaceRoomsOf(records, options).find((row) => row.id === roomId);
       if (!room) return { items: EMPTY, total: 0, pages: 0, page: 1 };
       const current = Math.min(room.pages, Math.max(1, Number.isFinite(page) ? Math.floor(page) : 1));
       return {
@@ -1139,9 +1157,9 @@ window.__ModuleLoader__.load({
       }
       return base;
     };
-    const palaceCorridorOf = (records) => {
+    const palaceCorridorOf = (records, options) => {
       const taken = [];
-      return palaceRoomsOf(records).map((room) => {
+      return palaceRoomsOf(records, options).map((room) => {
         const slot = palaceDoorSlotOf(room.id, taken);
         taken.push(slot);
         return { id: room.id, name: room.name, total: room.total, slot };
@@ -1366,7 +1384,8 @@ window.__ModuleLoader__.load({
       return rows;
     };
 
-    const graphOf = (records, selectedId) => {
+    const graphOf = (records, selectedId, options) => {
+      const showScope = Boolean(options && options.showScope === true);
       const all = Array.isArray(records) ? records : EMPTY;
       const rows = projectionOf(all, selectedId);
       const byId = new Map(rows.map((record) => [record.id, record]));
@@ -1385,7 +1404,11 @@ window.__ModuleLoader__.load({
         edges.push({ from, to, type });
       };
       for (const record of rows) {
-        nodes.push({ id: record.id, kind: 'memory', label: record.title || '记忆', experimental: record.experimental === true });
+        nodes.push({
+          id: record.id, kind: 'memory',
+          label: showScope && record.scopeLabel ? `${record.scopeLabel} · ${record.title || '记忆'}` : record.title || '记忆',
+          experimental: record.experimental === true,
+        });
       }
       for (const [tag, count] of tags) {
         nodes.push({ id: `tag:${tag}`, kind: 'tag', label: `#${tag}`, count });
@@ -1482,7 +1505,10 @@ window.__ModuleLoader__.load({
     const MemoryGraph = (props) => {
       const primaryKind = props.primaryKind || 'memory';
       const selectedId = props.selectedId;
-      const graph = React.useMemo(() => (props.graphOf || graphOf)(props.records, selectedId), [props.records, props.graphOf, selectedId]);
+      const graph = React.useMemo(
+        () => (props.graphOf || graphOf)(props.records, selectedId, props.showScope ? { showScope: true } : undefined),
+        [props.records, props.graphOf, selectedId, props.showScope],
+      );
       const [zoom, setZoom] = React.useState(1);
       const [pan, setPan] = React.useState({ x: 0, y: 0 });
       const [dragging, setDragging] = React.useState(false);
@@ -1916,6 +1942,7 @@ window.__ModuleLoader__.load({
       h('span', { style: { fontSize: '12px', lineHeight: '16px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, record.title || '记忆'),
       h('span', { style: { ...PANEL_MUTED, display: 'flex', alignItems: 'center', gap: '5px', minWidth: 0, lineHeight: '14px' } },
         h('span', null, KIND_LABEL[record.kind] || record.kind),
+        props.showScope && record.scopeLabel ? h('span', { style: { flex: '0 0 auto' } }, record.scopeLabel) : null,
         record.experimental ? h('span', { style: { color: 'var(--dsw-alias-state-warn-primary)' } }, '实验') : null,
         h('span', { style: { marginLeft: 'auto', flex: '0 0 auto', fontVariantNumeric: 'tabular-nums' } }, EVO_DATE(record.updated)),
       ),
@@ -2122,10 +2149,10 @@ window.__ModuleLoader__.load({
       const frameRef = React.useRef(0);
       const lastRoom = React.useRef('');
       const reduced = useReducedMotion();
-      const rooms = React.useMemo(() => palaceRoomsOf(rows), [rows]);
-      const corridor = React.useMemo(() => palaceCorridorOf(rows), [rows]);
+      const rooms = React.useMemo(() => palaceRoomsOf(rows, { byScope: props.byScope === true }), [rows, props.byScope]);
+      const corridor = React.useMemo(() => palaceCorridorOf(rows, { byScope: props.byScope === true }), [rows, props.byScope]);
       const room = rooms.find((item) => item.id === roomId) || null;
-      const pageInfo = room ? palaceRoomPageOf(rows, room.id, palacePageAtOf(pages, room.id)) : null;
+      const pageInfo = room ? palaceRoomPageOf(rows, room.id, palacePageAtOf(pages, room.id), { byScope: props.byScope === true }) : null;
 
       React.useEffect(() => {
         if (roomId && !room) setRoomId('');
@@ -2536,9 +2563,10 @@ window.__ModuleLoader__.load({
         if (!row || busy) return;
         setBusy(true);
         setNote('');
-        post('/lite-memory/conflict', {
-          sessionId, scopeKey: selectedKey, conflictId: row.id, expectedRevision: row.revision, op,
-        }).then((result) => {
+        const payload = { sessionId, scopeKey: row && row.scopeKey ? row.scopeKey : selectedKey, conflictId: row.id, op };
+        /** 丢掉不需要版本，老队列里的行也没有版本，硬塞 null 会被服务端当非法值。 */
+        if (Number.isInteger(row.revision)) payload.expectedRevision = row.revision;
+        post('/lite-memory/conflict', payload).then((result) => {
           if (!alive.current) return;
           setBusy(false);
           if (succeeded(result)) setExpandedConflict('');
@@ -2591,7 +2619,10 @@ window.__ModuleLoader__.load({
         let live = true;
         setDetail(null);
         setDetailNote('');
-        post('/lite-memory/body', { sessionId, id: selectedMemory, scopeKey: data.selected.key }).then((result) => {
+        /** 行自带归属层：「所有」视图里点开的是哪层就读哪层，不能拿当前选中范围顶。 */
+        const row = Array.isArray(data.selected.records) ? data.selected.records.find((item) => item.id === selectedMemory) : null;
+        const scopeKey = row && row.scopeKey ? row.scopeKey : data.selected.key;
+        post('/lite-memory/body', { sessionId, id: selectedMemory, scopeKey }).then((result) => {
           if (!live) return;
           if (result.ok && result.body && result.body.ok) {
             if (result.body.status === 'gone') setDetailNote('这条记忆已经不在这里了');
@@ -2624,6 +2655,9 @@ window.__ModuleLoader__.load({
       const canToggle = Boolean(selectedKey) && selectedKey === currentKey;
       const canManage = canToggle && memoryOn;
       const globalView = Boolean(selected && selected.kind === 'global');
+      /** 「所有」是跨层只读视图：能看能裁决，改记忆仍要切回具体那层。 */
+      const allView = Boolean(selected && selected.kind === 'all');
+      const rowScopeReadOnly = (row) => allView && row && row.scopeKey !== currentKey && row.scopeKey !== 'global';
       const activeTab = globalView && tab !== 'settings' ? 'memory' : tab;
       React.useEffect(() => { if (globalView) setTab('memory'); }, [globalView]);
 
@@ -2903,7 +2937,9 @@ window.__ModuleLoader__.load({
           disabled: loading || !data,
           style: { height: '30px', maxWidth: '190px', padding: '0 8px', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '8px', background: 'var(--dsw-alias-bg-layer-2)', color: 'inherit', fontSize: '12px' },
         },
-        data && Array.isArray(data.scopes) ? data.scopes.map((scope) => h('option', { key: scope.key, value: scope.key }, scope.kind === 'global' ? '全局' : scope.label)) : null) : null,
+        data && Array.isArray(data.scopes)
+          ? [h('option', { key: 'all', value: 'all' }, '所有')].concat(data.scopes.map((scope) => h('option', { key: scope.key, value: scope.key }, scope.kind === 'global' ? '全局' : scope.label)))
+          : null) : null,
         closeButton,
       ),
       );
@@ -3009,7 +3045,7 @@ window.__ModuleLoader__.load({
             filteredNow ? h(Action, { onClick: () => { setHubFilter(null); setQuery(''); } }, '清除搜索') : null,
           )
           : filtered.map((record) => h(MemoryRow, {
-            key: record.id, record, active: record.id === selectedMemory,
+            key: record.id, record, showScope: allView, active: record.id === selectedMemory,
             onClick: () => { setSelectedMemory(record.id); setSelectedRule(''); },
           }));
 
@@ -3135,9 +3171,9 @@ window.__ModuleLoader__.load({
               textAlign: 'left', font: 'inherit', fontSize: '12px', lineHeight: '20px',
               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer',
             },
-          }, row.title),
-          conflictReadOnly || facts.draftMissing ? null : h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'keep') }, '另存一条'),
-          conflictReadOnly ? null : h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'drop') }, '丢掉'),
+          }, allView && row.scopeLabel ? `${row.title} · ${row.scopeLabel}` : row.title),
+          conflictReadOnly || rowScopeReadOnly(row) || facts.draftMissing ? null : h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'keep') }, '另存一条'),
+          conflictReadOnly || rowScopeReadOnly(row) ? null : h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'drop') }, '丢掉'),
         ),
         open ? h('div', {
           style: { ...PANEL_MUTED, padding: '2px 0 4px', lineHeight: '18px', overflowWrap: 'anywhere', maxHeight: '180px', overflowY: 'auto' },
@@ -3196,12 +3232,13 @@ window.__ModuleLoader__.load({
                 records: graphFiltered, total: hubFilter ? graphFiltered.length : total,
                 selectedId: selectedMemory, onPick: onPickNode,
                 onPickHub,
+                showScope: allView,
                 emptyText: query || hubFilter ? '没有匹配的记忆' : '还没有记忆', ariaLabel: '记忆关系图',
                 legend: '实心 记忆 · 空心 标签/主题 · 虚线 归类 · 点标签筛选，点记忆看正文',
               }))),
             palace: () => h('div', { style: { display: 'flex', minWidth: 0, minHeight: 0, width: '100%' } },
               h(MemoryPalace, {
-                key: selectedKey, records: filtered, selectedId: selectedMemory,
+                key: selectedKey, records: filtered, selectedId: selectedMemory, byScope: allView,
                 onPick: (id) => { setSelectedMemory(id); setSelectedRule(''); },
                 emptyText: query ? '没有匹配的记忆' : '这个项目还没有记忆',
               })),

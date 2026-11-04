@@ -222,7 +222,7 @@ export function loadIndex(scope, options = {}) {
     receipts: JSON.parse(JSON.stringify(loaded.state.receipts || [])),
     lastSuggestedAt: loaded.state.lastSuggestedAt || '',
     suppressions: JSON.parse(JSON.stringify(loaded.state.suppressions || [])),
-    conflicts: JSON.parse(JSON.stringify(loaded.state.conflicts || [])),
+    conflicts: normalizeConflicts(loaded.state.conflicts, loaded.state.scopeKey),
     __evolution: state.evolutionOf(loaded.state),
     __tasks: anchor.normalizeTasks(state.evolutionOf(loaded.state).tasks),
     __control: state.controlOf(loaded.state),
@@ -236,6 +236,22 @@ export function loadIndex(scope, options = {}) {
     storeId: loaded.state.storeId || '',
   };
   return index;
+}
+
+/**
+ * 旧版队列里的行没有 revision：补成 1。面板拿着 null 去处理会被版本检查挡住，
+ * 于是「丢掉」点了也不动；补一个默认版本让老队列还能处理掉。
+ */
+function normalizeConflicts(rows, scopeKey) {
+  const layer = scopeKey === 'global' ? 'global' : 'project';
+  return (Array.isArray(rows) ? rows : []).map((raw) => {
+    const row = raw && typeof raw === 'object' ? JSON.parse(JSON.stringify(raw)) : {};
+    row.id = typeof row.id === 'string' ? row.id : '';
+    row.title = typeof row.title === 'string' ? row.title : '';
+    row.scope = row.scope === 'global' || row.scope === 'project' ? row.scope : layer;
+    row.revision = Number(row.revision) || 1;
+    return row;
+  });
 }
 
 /** 扁平索引 → v2 状态：整层重写，条目、候选、回执一次换完。 */
@@ -1045,6 +1061,8 @@ function applyDraft(scope, index, source, now, options = {}) {
   scanUnsafe(draft);
   const foreign = options.foreignEntries || [];
   const distinct = source && source.resolution === 'distinct';
+  /** 模型自己判定「这是已有那条的补充」：直接并进去，不再排成待用户裁决。 */
+  const merge = source && source.resolution === 'merge';
   /** 取代/过期记录不参与合并判断：新内容不该再合进一条已经不是现行的记录。 */
   const live = index.entries.filter((item) => !staleRecord(item));
   const supersedeTarget = (selfId) => {
@@ -1077,6 +1095,22 @@ function applyDraft(scope, index, source, now, options = {}) {
       .some((name) => String(name || '').trim().toLowerCase() === String(draft.title || '').trim().toLowerCase()));
     if (clash) throw new Error(`已经有同名记忆「${clash.title}」，另存一条请换一个能区分的标题`);
   }
+  /** 合并目标：先看调用方点名的标题/id，再退到最相近的那条；找不到才继续走原来的判断。 */
+  if (!record && merge) {
+    const named = String((source && (source.mergeInto || source.similarId)) || '').trim();
+    const pick = (named
+      ? live.find((item) => item.id === named)
+        || live.find((item) => [item.title, ...(item.aliases || [])].some((name) => String(name || '').trim().toLowerCase() === named.toLowerCase()))
+      : null)
+      || (similarEntries(live, draft.title, draft.summary, 1)[0] || null);
+    const found = pick ? live.find((item) => item.id === pick.id) : null;
+    if (found) {
+      record = found;
+      mergedFrom = found.title === draft.title ? null : found.title;
+      /** 合并以已有那条的标题为准：标题是句柄，别借着并内容把人家改名。 */
+      delete draft.has.title;
+    }
+  }
   if (!record) {
     /** distinct 是用户明确说的「这是另一条」：不改同名的，按不同标题另起一条。 */
     const hit = distinct ? null : resolveTarget(live, draft);
@@ -1087,7 +1121,10 @@ function applyDraft(scope, index, source, now, options = {}) {
       /** 同一槽位只留一条现行规范：同层同 topicKey + 同条件必须确认是更新还是另一条。 */
       const slot = live.find((item) => (item.topicKey || '') === draft.topicKey
         && view.conditionsKey(item.conditions) === view.conditionsKey(draft.conditions));
-      if (slot) {
+      if (slot && merge) {
+        record = slot;
+        mergedFrom = slot.title === draft.title ? null : slot.title;
+      } else if (slot) {
         const row = {
           id: slot.id,
           title: slot.title,
@@ -1105,7 +1142,7 @@ function applyDraft(scope, index, source, now, options = {}) {
       /** 同名不同前置条件是用户明确表达的另一条，不走确认；只有换个说法的相近标题才拦。 */
       const sameName = live.some((item) => [item.title, ...(item.aliases || [])]
         .some((name) => String(name || '').toLowerCase() === draft.title.toLowerCase()));
-      if (similarList.length > 0 && !distinct && !sameName) {
+      if (similarList.length > 0 && !distinct && !merge && !sameName) {
         return { needsResolution: true, similarList, similar: similarList[0], draft, record: null, merged: false, previousBody: null, archived: [] };
       }
     }
@@ -2972,7 +3009,7 @@ export function dropConflict(scope, ref) {
   return withLocks([scope, globalScope()], () => {
     const row = conflictRowLocked(scope, ref);
     if (!row) return { ok: false, reasonCode: 'gone', reason: '这条待裁决已经不在了，刷新面板看看' };
-    if (staleDraft(row, ref)) return { ok: false, reasonCode: 'stale_draft', reason: '这条待裁决又更新了，刷新后再处理' };
+    /** 丢掉只是删这条待办，不写记忆：版本对不上也照丢，不能让它卡在队列里点不动。 */
     if (clearConflictLocked(scope, { id: row.id }).removed === 0) return { ok: false, reasonCode: 'gone', reason: '这条待裁决已经不在了，刷新面板看看' };
     return { ok: true };
   });
@@ -3042,6 +3079,13 @@ export function saveEntry(projectScope, source) {
           throw new state.StateError('conflict', '这条记忆已经被更新过，刷新后再改');
         }
       }
+    }
+    /** 模型判定这条和已有记忆重复：不写盘、不进队列，直接回执没存。 */
+    if (source && source.resolution === 'discard') {
+      return {
+        discarded: true, changed: false, merged: false, needsResolution: false, needsScope: false,
+        similarList: [], draft, chosenScope: targetScope.key === 'global' ? 'global' : 'project',
+      };
     }
     /** 更新已有项目条目也必须落在确认过的根目录里。 */
     swept = targetScope;

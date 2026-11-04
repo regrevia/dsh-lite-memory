@@ -112,7 +112,8 @@ assert.equal(saveParams.links.items.properties.id, undefined);
 assert.equal(saveParams.links.items.properties.title.type, 'string');
 assert.equal(JSON.stringify(saveParams.applicability.enum), JSON.stringify(['all_in_scope', 'conditional', 'unresolved']));
 
-assert.deepEqual(saveParams.resolution.enum, ['distinct']);
+assert.deepEqual(saveParams.resolution.enum, ['distinct', 'merge', 'discard']);
+assert.equal(saveParams.mergeInto.type, 'string');
 /** 一次检索最多回 4 条：列表是给下一步取正文用的，不是索引。 */
 assert.equal(defs.get('memory_search').parameters.properties.limit.maximum, 4);
 /** 空检索结果会带 noTriggerReason，输出 schema 必须声明它，否则宿主校验直接报错。 */
@@ -207,6 +208,24 @@ assert.equal(distinct.needsResolution, false);
 assert.equal(distinct.merged, false);
 assert.equal(distinct.id, undefined);
 assert.notEqual(distinct.title, saved.title);
+
+// ── 相近条目由模型自己裁决：合并 / 丢弃，都不再排给用户 ──────────────────────
+await exec('memory_save', { title: '合并目标条目', summary: '合并目标', body: '原正文' });
+const mergedAuto = await exec('memory_save', {
+  title: '合并目标条目咋做', summary: '合并目标', body: '补充说明', resolution: 'merge', mergeInto: '合并目标条目',
+});
+assert.equal(mergedAuto.needsResolution, false, '给定合并目标就直接并进去');
+assert.equal(mergedAuto.merged, true);
+assert.equal(mergedAuto.title, '合并目标条目');
+assert.ok(mergedAuto.revision >= 2, '并进去是更新已有那条');
+assert.match(render('memory_save', {}, mergedAuto), /merged|saved/);
+const discardedAuto = await exec('memory_save', {
+  title: '合并目标条目重复说法', summary: '合并目标', body: '同一件事', resolution: 'discard',
+});
+assert.equal(discardedAuto.discarded, true, '重复信息不存');
+assert.equal(discardedAuto.changed, false);
+assert.equal(discardedAuto.needsResolution, false, '丢弃不排进待裁决');
+assert.match(render('memory_save', {}, discardedAuto), /没存/);
 /** 刚存完就能查回来：不是只统计条数，命中的必须是刚存的那一条。 */
 const justSaved = await exec('memory_search', { query: '发布顺序是啥' });
 assert.ok(justSaved.count >= 1);
@@ -1204,6 +1223,57 @@ assert.equal(ovGlobal.status, 200);
 assert.equal(ovGlobal.body.selected.kind, 'global');
 assert.ok(ovGlobal.body.selected.records.some((row) => row.title === '观察全局'));
 
+// 「所有」：跨层合并成一张只读表，行自带归属层，路径和正文照样不出去
+const ovAll = await call('/lite-memory/overview', { sessionId: 'session-overview', scopeKey: 'all' });
+assert.equal(ovAll.status, 200);
+assert.equal(ovAll.body.ok, true);
+assert.equal(ovAll.body.selected.key, 'all');
+assert.equal(ovAll.body.selected.kind, 'all');
+assert.equal(ovAll.body.selected.label, '所有项目');
+assert.equal(ovAll.body.current.key, ov.body.current.key, '合并视图不换当前项目');
+const ovAllTitles = ovAll.body.selected.records.map((row) => row.title);
+for (const title of ['别的项目', '发布窗口', '封面留白', '开场先给结论', '观察全局']) {
+  assert.ok(ovAllTitles.includes(title), `合并视图少了「${title}」`);
+}
+assert.equal(ovAll.body.selected.stats.total, ovAll.body.selected.records.length, '总数就是合并后的行数');
+assert.ok(ovAll.body.selected.stats.total >= 5, '至少覆盖三层各自的内容');
+const ovAllScopes = new Set(ovAll.body.selected.records.map((row) => row.scopeKey));
+assert.ok(ovAllScopes.has(ov.body.current.key));
+assert.ok(ovAllScopes.has(store.scopeOf(ovOtherCwd).key));
+assert.ok(ovAllScopes.has('global'));
+for (const row of ovAll.body.selected.records) {
+  assert.ok(['project', 'global'].includes(row.scope), `行要给归属层：${row.title}`);
+  assert.ok(typeof row.scopeKey === 'string' && row.scopeKey, `行要能给回读的那一层：${row.title}`);
+  assert.equal('body' in row, false);
+}
+assert.equal(JSON.stringify(ovAll.body).includes('"dir"'), false, '合并视图同样不暴露内部目录');
+assert.equal(JSON.stringify(ovAll.body).includes(process.env.DSH_HOME), false);
+assert.equal(
+  ovAll.body.selected.records.filter((row) => row.title === '开场先给结论').length, 1,
+  '同一层里同标题只有一条，合并后也不重复',
+);
+const ovAllTagged = ovAll.body.selected.records.find((row) => row.title === '开场先给结论');
+assert.equal(ovAllTagged.scope, 'project');
+assert.equal(ovAllTagged.scopeKey, ov.body.current.key);
+assert.equal(ovAllTagged.scopeLabel, path.basename(ovCwd));
+const ovAllGlobal = ovAll.body.selected.records.find((row) => row.title === '观察全局');
+assert.equal(ovAllGlobal.scope, 'global');
+assert.equal(ovAllGlobal.scopeKey, 'global');
+assert.equal(ovAllGlobal.scopeLabel, '全局');
+// 合并视图是只读：写路径不接受 'all'，改哪层必须指名哪层
+const ovAllBody = await call('/lite-memory/body', { sessionId: 'session-overview', title: '观察全局', scopeKey: 'all' });
+assert.equal(ovAllBody.status, 404, '「所有」不能当写范围用');
+const ovAllEntry = await call('/lite-memory/entry', {
+  sessionId: 'session-overview', scopeKey: 'all', id: ovAllGlobal.id, title: '观察全局', body: 'x',
+});
+assert.notEqual(ovAllEntry.status, 200, '「所有」不能改正文');
+const ovAllConflict = await call('/lite-memory/conflict', { sessionId: 'session-overview', scopeKey: 'all', op: 'drop', conflictId: 'x' });
+assert.notEqual(ovAllConflict.status, 200, '裁决也要指名层');
+// 折回单层：还是原来那张表
+const ovBack = await call('/lite-memory/overview', { sessionId: 'session-overview', scopeKey: ov.body.current.key });
+assert.equal(ovBack.body.selected.stats.total, 3);
+assert.equal(ovBack.body.selected.records.every((row) => row.scopeKey === ov.body.current.key), true);
+
 // 面板改正文：只动当前项目、必须带读到的版本，冲突和改名撞车都不覆盖
 const ovRow = ov.body.selected.records.find((row) => row.title === '开场先给结论');
 const ovEntry = await call('/lite-memory/entry', {
@@ -1408,6 +1478,31 @@ const cfDropAgain = await call('/lite-memory/conflict', {
 assert.equal(cfDropAgain.status, 409, '队列没了再丢要明确失败');
 assert.equal(cfDropAgain.body.code, 'gone', '面板据此换掉过期行');
 assert.match(cfDropAgain.body.reason, /不在了/);
+
+// 老队列兼容：旧版存的冲突行没有 revision，面板不能因此点不动
+{
+  const legacyScope = store.scopeOf(cfCwd);
+  const legacyIndex = store.loadIndex(legacyScope);
+  legacyIndex.conflicts.push({ id: 'cf_legacy_no_revision', title: '老草稿', createdAt: new Date().toISOString() });
+  store.saveIndex(legacyScope, legacyIndex);
+  const legacyView = await call('/lite-memory/overview', { sessionId: 'session-conflict-panel' });
+  const legacyRow = legacyView.body.selected.conflicts.find((row) => row.id === 'cf_legacy_no_revision');
+  assert.ok(legacyRow, '老行要出现在待裁决里');
+  assert.equal(legacyRow.revision, 1, '没有版本的老行按第一版算，面板才敢处理');
+  const legacyDrop = await call('/lite-memory/conflict', {
+    sessionId: 'session-conflict-panel', scopeKey: cfScopeKey, conflictId: legacyRow.id, op: 'drop',
+  });
+  assert.equal(legacyDrop.status, 200, '丢掉不拿版本挡');
+  assert.equal(legacyDrop.body.ok, true);
+  assert.equal(legacyDrop.body.remaining, 0);
+  assert.equal(store.conflictsOf(legacyScope).length, 0);
+  /** 另存一条仍然要知道版本：没有版本的没法重放草稿，明确拒绝。 */
+  const legacyKeep = await call('/lite-memory/conflict', {
+    sessionId: 'session-conflict-panel', scopeKey: cfScopeKey, conflictId: 'cf_legacy_no_revision', op: 'keep',
+  });
+  assert.equal(legacyKeep.status, 409);
+  assert.match(legacyKeep.body.reason, /版本不清楚/);
+}
 assert.equal(cfDropAgain.body.remaining, 0, '失败也带队列现状');
 
 // 项目记忆关闭时，选全局待裁决也不能借这个入口落盘
