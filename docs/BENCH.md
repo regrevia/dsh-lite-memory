@@ -92,14 +92,14 @@ P50 差值在同机噪音范围内（同一进程内 3 次中位数），注入�
 
 ## 包体 / client.js
 
-2026-10-31，本机 Node v24 v24.16.0。量法固定为 `raw = Buffer.length`、`gzip = zlib.gzipSync(raw, { level: 9 }).length`（别和 `gzip -9` 混用，两者差约 400 B）。基线存 `bench/bundle-baseline.json`，`test/bundle.test.mjs` 只许下降。
+2026-11-08，本机 Node v24.16.0。量法固定为 `raw = Buffer.length`、`gzip = zlib.gzipSync(raw, { level: 9 }).length`（别和 `gzip -9` 混用，两者差约 400 B）。基线存 `bench/bundle-baseline.json`，`test/bundle.test.mjs` 只许下降。
 
 | 指标 | 数值 |
 | --- | --- |
-| raw | 186590 B |
-| gzip -9 | 46309 B |
+| raw | 193948 B |
+| gzip -9 | 48482 B |
 | 40 KiB 目标 | 40960 B |
-| 距目标 | 还差 5349 B（记作待还的债，不算达标） |
+| 距目标 | 还差 7522 B（记作待还的债，不算达标） |
 
 ## 规模基线（0.18.68 工作区，2026-10-31）
 

@@ -6,7 +6,7 @@
 
 - `npm test` 全绿；新增行为必须有回归测试。
 - 写入质量：超单条上限（4096 B）回 `needsCompaction` + `stored:false` + `maxBytes` + 可执行拆法，不谎报成功；软提示（细节较多 / 引用临时路径 / 建议补适用条件）只随回执给一行，不拦写入、不改正文。
-- `client.js` 体积棘轮：实测 raw 186590 B / gzip -9 46309 B（`test/bundle.test.mjs` 只许下降，基线在 `bench/bundle-baseline.json`）。40 KiB 目标（40960 B）当前还差 5349 B，是待还的债，不是达标。
+- `client.js` 体积棘轮：实测 raw 193948 B / gzip -9 48482 B（`test/bundle.test.mjs` 只许下降，基线在 `bench/bundle-baseline.json`）。40 KiB 目标（40960 B）当前还差 7522 B，是待还的债，不是达标。
 - 规模基线 200/400/1000（每层条数）三档全 gate，数字与改动理由记在 `docs/BENCH.md`：
   1000+1000 条 120 次 prepare p50 308.3 ms / P95 327.0 ms，注入 359 B；召回上限随条数放宽（150 ms→400 ms 封顶）。
 - 数字按整段比（`view.matchScore` 的 `number` 加分）：「条目 7」不再和「条目 77/797」并列靠 id 决胜负。
