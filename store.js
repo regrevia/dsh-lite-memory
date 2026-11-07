@@ -1098,11 +1098,12 @@ function applyDraft(scope, index, source, now, options = {}) {
   /** 合并目标：先看调用方点名的标题/id，再退到最相近的那条；找不到才继续走原来的判断。 */
   if (!record && merge) {
     const named = String((source && (source.mergeInto || source.similarId)) || '').trim();
-    const pick = (named
-      ? live.find((item) => item.id === named)
-        || live.find((item) => [item.title, ...(item.aliases || [])].some((name) => String(name || '').trim().toLowerCase() === named.toLowerCase()))
-      : null)
-      || (similarEntries(live, draft.title, draft.summary, 1)[0] || null);
+    const exact = (value) => live.find((item) => item.id === value)
+      || live.find((item) => [item.title, ...(item.aliases || [])].some((name) => String(name || '').trim().toLowerCase() === value.toLowerCase()))
+      || null;
+    /** 点名的合并目标找不到就报错：悄悄并进「最相近的」那条是知识串位。 */
+    if (named && !exact(named)) throw new Error(`没有找到要合并的目标「${named}」，先确认它现在的标题或 id`);
+    const pick = exact(named) || (similarEntries(live, draft.title, draft.summary, 1)[0] || null);
     const found = pick ? live.find((item) => item.id === pick.id) : null;
     if (found) {
       record = found;
@@ -2847,14 +2848,23 @@ function bodyShingles(text, size = 4) {
   return out;
 }
 
-/** 两段正文的重合度：按较小那侧的片段数取比例，短正文全被覆盖就是 1。 */
-export function bodyOverlap(left, right) {
-  const a = bodyShingles(left);
-  const b = bodyShingles(right);
+/** 单向覆盖率：from 里有多少片段能在 into 里找到（分母是 from，不是较小那侧）。 */
+function bodyCoverage(from, into) {
+  const a = bodyShingles(from);
+  const b = bodyShingles(into);
   if (a.size === 0 || b.size === 0) return 0;
   let hit = 0;
   for (const item of a) if (b.has(item)) hit += 1;
-  return hit / Math.min(a.size, b.size);
+  return hit / a.size;
+}
+
+/**
+ * 两段正文的相近程度：取双向覆盖率的较小值。
+ * 「短正文被长正文整段包含」只在单向是 1，双向会露出来，不能当成同一段知识。
+ */
+export function bodyOverlap(left, right) {
+  if (!String(left || '').trim() || !String(right || '').trim()) return 0;
+  return Math.min(bodyCoverage(left, right), bodyCoverage(right, left));
 }
 
 /** 能把这次草稿并进哪一条：只认唯一一条相近、同层、正文近乎同一段的情形。 */
@@ -2867,10 +2877,13 @@ function autoMergeLocked(scope, draft, rows, foreignEntries) {
   if (!entry) return null;
   const oldBody = String(entry.body || '');
   if (!oldBody.trim()) return null;
-  const score = bodyOverlap(body, oldBody);
+  /** 判据只看「旧正文的知识有没有被新正文留住」：追加式更新是常态，双向相似会把它们挡在门外。 */
+  const score = bodyCoverage(oldBody, body);
   if (score < SAME_KNOWLEDGE) return null;
-  /** 新正文更短又不完全一样时不动：可能是旧版本重存，并进去会丢内容。 */
-  if (body.length < oldBody.length && score < 0.98) return null;
+  /** 短正文只覆盖长正文一部分时同样过不了这道门，不会悄悄删掉旧内容。 */
+  if (bodyOverlap(body, oldBody) < 0.5 && body.length < oldBody.length) return null;
+  /** 正文缩水超过一成即视为改写而不是重存，自动合并会丢掉被删掉的那部分。 */
+  if (body.length < oldBody.length * 0.9) return null;
   /** 只带正文与语义字段回写：草稿里的「取代/改标题」指令不跟着重放。 */
   const payload = { id: entry.id, expectedRevision: entry.revision || 1 };
   for (const key of ['title', 'summary', 'body', 'when', 'kind', 'tags', 'conditions', 'applicability', 'selection', 'triggers', 'links', 'topicKey', 'origin']) {

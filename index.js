@@ -65,6 +65,7 @@ import * as persona from './persona.js';
 import * as personaStore from './persona-store.js';
 import * as evolve from './evolve.js';
 import * as evolveStore from './evolve-store.js';
+import * as scheduler from './scheduler.js';
 
 /** 开关路由在 apply 外，也要能中止在途整理。 */
 const learningAborts = new Map();
@@ -180,6 +181,10 @@ function noteRecall(scope, sessionId, receipt) {
     chars: Number(receipt.chars) || 0,
     limit: view.CARD.max,
     bytes: view.CARD.bytes,
+    /** 这一轮按什么档位检索的：类型与深度，不记用户原话。 */
+    plan: receipt.plan && receipt.plan.type
+      ? { type: receipt.plan.type, tier: receipt.plan.tier, candidates: receipt.plan.candidates, cards: receipt.plan.cards }
+      : null,
     /** 注入为空时留在回执里的最近候选：查了什么、差多少，阈值只能靠这个调。 */
     closest: String(receipt.closest || '').slice(0, 200),
   });
@@ -749,6 +754,8 @@ function keepHandler(webServer, cwdForSession) {
       const records = [];
       const archives = [];
       const conflicts = [];
+      /** 读不出来的层要报出来：跳过一层还当整张视图完整，用户会以为记忆丢了。 */
+      const failed = [];
       const seenIds = new Set();
       for (const target of targetsOfView) {
         let loaded;
@@ -756,6 +763,7 @@ function keepHandler(webServer, cwdForSession) {
           loaded = loadIndex(target, { readOnly: true });
         } catch (error) {
           if (!allView) return sendJson(res, 409, { ok: false, reason: error instanceof Error ? error.message : '这个项目的记忆读不出来' });
+          failed.push({ key: target.key, label: labelOf(target) });
           continue;
         }
         const layer = target.key === 'global' ? 'global' : 'project';
@@ -814,6 +822,7 @@ function keepHandler(webServer, cwdForSession) {
         ok: true,
         current: { key: scope.key, label: labelOf(scope), control: currentControl, evolution: currentEvolution, recall: recallReceiptOf(scope, sessionId) },
         scopes,
+        failed,
         selected: {
           key: allView ? 'all' : selectedScope.key,
           kind: allView ? 'all' : selectedScope.key === 'global' ? 'global' : 'project',
@@ -1776,6 +1785,8 @@ export function apply(ctx, config) {
 
   /** 纯内存：读两层当前投影，先判适用再排序，整卡装预算。 */
   function projectRecall(scope, query, context, win, runtime) {
+    /** 检索调度：先按这一轮的话定档位，再决定查多深、给几张卡；字节上限仍由投递端封顶。 */
+    const plan = scheduler.retrievalPlanOf(query, { cardMax: view.CARD.max });
     context = view.contextWithTask(context, runtime && runtime.task);
     const layers = { project: [], global: [] };
     const seen = new Set();
@@ -1814,7 +1825,7 @@ export function apply(ctx, config) {
       }
     })();
     const ranked = view.recallRank(records, query, {
-      limit: 8, requireApplicable: true, context, runtime: gateRuntime, task,
+      limit: plan.candidates, requireApplicable: true, context, runtime: gateRuntime, task,
       ...(tuned ? { params: tuned } : {}),
     });
     /** 普通记忆与实验规则共用一份自动注入预算：总条数和最终完整文本字节一起算。 */
@@ -1826,7 +1837,7 @@ export function apply(ctx, config) {
     const cards = [];
     for (const row of ranked) {
       const usedCards = cards.length + (auto ? (auto.experimentCards || 0) : 0);
-      if (usedCards >= view.CARD.max) break;
+      if (usedCards >= plan.cards) break;
       const card = view.cardOf(row.record, layerOf.get(row.record.id));
       if (card.scope === 'project') card.scopeName = projectNameOf(scope);
       const line = renderRecallCard(card);
@@ -1902,8 +1913,8 @@ export function apply(ctx, config) {
             : (gateRuntime && gateRuntime.enabled ? 'no_overlap' : 'needs_context');
     const matched = ranked.length || nearMatched;
     const ids = cards.map((card) => card.id).filter(Boolean);
-    if (!cards.length) return { text: '', cards: [], lines: [], ids, bytes: 0, query, reason, matched };
-    return { text: finalText, cards, lines: linesMeta, ids, bytes: Buffer.byteLength(finalText), query, reason, matched };
+    if (!cards.length) return { text: '', cards: [], lines: [], ids, bytes: 0, query, reason, matched, plan };
+    return { text: finalText, cards, lines: linesMeta, ids, bytes: Buffer.byteLength(finalText), query, reason, matched, plan };
   }
 
   /* ---------------- 项目自进化：任务锚点、读取决策、上下文解析 ---------------- */
@@ -3882,6 +3893,7 @@ export function apply(ctx, config) {
       }
       noteRecall(scope, sessionId, {
         reason: snapshot.reason, matched: snapshot.matched, cards: snapshot.cards.length, chars: snapshot.bytes, closest,
+        plan: snapshot.plan,
       });
       /** 没发布出去的投影要退还额度：不能因为一次超时把本请求的召回额度耗掉。 */
       const rollbackBudget = () => {

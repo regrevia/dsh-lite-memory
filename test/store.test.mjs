@@ -1607,6 +1607,29 @@ test('同一段知识存两次：正文几乎相同时并进已有那条，不�
   assert.equal(index.entries[0].versions.length, 1, '旧正文留在版本里，能撤回');
 });
 
+test('短正文被长正文整段包含：不算同一段知识，不自动合并', () => {
+  const scope = fresh('auto-merge-subset');
+  const longBody = '发布前必须执行完整测试，另外还需要检查凭据、版本、回滚和兼容性，全部通过才允许打 tag。';
+  store.saveEntry(scope, { title: '发布前的检查清单', summary: '发版前要查什么', when: '要发版时', kind: 'procedure', body: longBody });
+  const short = store.saveEntry(scope, { title: '发布前的检查清单（简版）', summary: '发版前要查什么', when: '要发版时', kind: 'procedure', body: '发布前必须执行完整测试。' });
+  assert.notEqual(short.autoMerged, true, '单向包含不能当成重复');
+  assert.ok(store.bodyOverlap('发布前必须执行完整测试。', longBody) < 0.88, '双向覆盖率要低于同一段知识的阈值');
+  const index = loadIndex(scope);
+  assert.equal(index.entries.length, 1);
+  assert.match(String(index.entries[0].body || ''), /兼容性/, '旧正文里的独立知识不能被短的覆盖掉');
+  assert.equal((index.conflicts || []).length, 1, '拦下来进待裁决，人来决定');
+});
+
+test('指定合并目标不存在：报错，不悄悄并进最相近的那条', () => {
+  const scope = fresh('merge-target-missing');
+  store.saveEntry(scope, { title: '发布前的检查清单', summary: '发版前要查什么', when: '要发版时', kind: 'procedure', body: '发布前必须执行完整测试。' });
+  assert.throws(() => store.saveEntry(scope, {
+    title: '发布前的检查清单（补）', summary: '发版前要查什么', when: '要发版时', kind: 'procedure',
+    body: '发布前必须执行完整测试。', resolution: 'merge', mergeInto: '根本不存在的条目',
+  }), /没有找到要合并的目标/);
+  assert.equal(loadIndex(scope).entries.length, 1, '报错时不能顺手改到别的条目');
+});
+
 test('只是标题像、正文不同：仍然排进待裁决，不替人猜', () => {
   const scope = fresh('auto-merge-skip');
   store.saveEntry(scope, { title: '发版取凭据的流程', summary: '发版前怎么拿凭据', when: '要发版时', kind: 'procedure', body: 'npm token 在 Keychain 里取，GitHub 用 gh auth。' });

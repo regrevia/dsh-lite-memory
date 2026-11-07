@@ -2442,6 +2442,7 @@ window.__ModuleLoader__.load({
       const [loading, setLoading] = React.useState(true);
       const [failed, setFailed] = React.useState(false);
       const [note, setNote] = React.useState('');
+      const [scopeOpen, setScopeOpen] = React.useState(false);
       const [query, setQuery] = React.useState('');
       const [tab, setTab] = React.useState('memory');
       const [memoryView, setMemoryView] = React.useState('list');
@@ -2921,6 +2922,57 @@ window.__ModuleLoader__.load({
         style: { width: '30px', height: '30px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', border: 'none', borderRadius: '8px', background: 'transparent', color: 'inherit', opacity: 0.65, cursor: 'pointer' },
       }, h(CloseIcon));
 
+      /** 范围选择：自绘列表，跟面板同一套 token 与行样式，不用系统原生下拉。 */
+      const scopeChoices = data && Array.isArray(data.scopes)
+        ? [{ key: 'all', label: '所有' }].concat(data.scopes.map((scope) => ({ key: scope.key, label: scope.kind === 'global' ? '全局' : scope.label })))
+        : [];
+      const scopeChoice = scopeChoices.find((choice) => choice.key === selectedKey);
+      const scopePicker = () => h('div', { style: { position: 'relative', display: 'inline-flex' } },
+        h('button', {
+          type: 'button',
+          'aria-label': '记忆范围',
+          'aria-haspopup': 'listbox',
+          'aria-expanded': scopeOpen === true,
+          disabled: loading || !data,
+          onClick: () => setScopeOpen((value) => !value),
+          style: {
+            display: 'inline-flex', alignItems: 'center', gap: '6px', height: '30px', maxWidth: '190px', padding: '0 8px',
+            border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '8px', background: 'var(--dsw-alias-bg-layer-2)',
+            color: 'inherit', font: 'inherit', fontSize: '12px', cursor: loading || !data ? 'default' : 'pointer',
+          },
+        },
+        h('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, scopeChoice ? scopeChoice.label : '范围'),
+        h('span', { 'aria-hidden': 'true', style: { marginLeft: 'auto', flex: '0 0 auto', fontSize: '10px', opacity: 0.55 } }, '▾')),
+        scopeOpen && data
+          ? [
+            h('div', { key: 'backdrop', onClick: () => setScopeOpen(false), style: { position: 'fixed', inset: 0, zIndex: 999, background: 'transparent' } }),
+            h('div', {
+              key: 'menu', role: 'listbox', 'aria-label': '记忆范围',
+              style: {
+                position: 'absolute', top: '34px', right: 0, zIndex: 1000, minWidth: '150px', maxWidth: '240px',
+                maxHeight: '280px', overflowY: 'auto', padding: '4px', borderRadius: '10px',
+                border: '1px solid var(--dsw-alias-border-l1)', background: 'var(--dsw-alias-bg-layer-1)',
+                boxShadow: '0 12px 32px rgba(0, 0, 0, 0.18)',
+              },
+            },
+            scopeChoices.map((choice) => h('button', {
+              key: choice.key, type: 'button', role: 'option', 'aria-selected': choice.key === selectedKey,
+              onClick: () => {
+                setScopeOpen(false);
+                if (choice.key !== selectedKey) load(choice.key);
+              },
+              style: {
+                display: 'flex', alignItems: 'center', gap: '6px', width: '100%', minWidth: 0,
+                padding: '6px 8px', border: 'none', borderRadius: '7px',
+                background: choice.key === selectedKey ? 'var(--dsw-alias-bg-layer-2)' : 'transparent',
+                color: 'inherit', font: 'inherit', fontSize: '12px', textAlign: 'left', cursor: 'pointer',
+              },
+            },
+            h('span', { 'aria-hidden': 'true', style: { flex: '0 0 12px', width: '12px', color: 'var(--dsw-alias-brand-primary)' } }, choice.key === selectedKey ? '✓' : ''),
+            h('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, choice.label))))
+          ]
+          : null);
+
       const header = h('div', {
         style: { display: 'flex', alignItems: 'center', gap: '10px', padding: '14px 18px', borderBottom: '1px solid var(--dsw-alias-border-l1)', flex: '0 0 auto' },
       },
@@ -2930,16 +2982,7 @@ window.__ModuleLoader__.load({
         h('span', { style: { ...PANEL_MUTED, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, selected ? `${selected.label} · ${total} 条` : '读取中…'),
       ),
       h('span', { style: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '8px' } },
-        activeTab === 'memory' ? h('select', {
-          value: selectedKey,
-          onChange: (event) => load(event.target.value),
-          'aria-label': '记忆范围',
-          disabled: loading || !data,
-          style: { height: '30px', maxWidth: '190px', padding: '0 8px', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: '8px', background: 'var(--dsw-alias-bg-layer-2)', color: 'inherit', fontSize: '12px' },
-        },
-        data && Array.isArray(data.scopes)
-          ? [h('option', { key: 'all', value: 'all' }, '所有')].concat(data.scopes.map((scope) => h('option', { key: scope.key, value: scope.key }, scope.kind === 'global' ? '全局' : scope.label)))
-          : null) : null,
+        activeTab === 'memory' ? scopePicker() : null,
         closeButton,
       ),
       );
