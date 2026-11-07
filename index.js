@@ -1789,6 +1789,8 @@ export function apply(ctx, config) {
   function projectRecall(scope, query, context, win, runtime) {
     /** 检索调度：先按这一轮的话定档位，再决定查多深、给几张卡；字节上限仍由投递端封顶。 */
     const plan = scheduler.retrievalPlanOf(query, { cardMax: view.CARD.max });
+    /** 档位预算是这一轮投递的天花板，实验段也要算在同一份额度里，交给后面的投影读。 */
+    if (win) win.recallPlanBytes = plan.bytes;
     context = view.contextWithTask(context, runtime && runtime.task);
     const layers = { project: [], global: [] };
     const seen = new Set();
@@ -1996,7 +1998,9 @@ export function apply(ctx, config) {
     const cards = (normalCards === undefined ? (auto.normalCards || 0) : normalCards)
       + (experimentCards === undefined ? (auto.experimentCards || 0) : experimentCards);
     const bytes = Buffer.byteLength(parts.text);
-    if (cards > view.CARD.max || bytes > view.CARD.bytes) return { ok: false, bytes, cards };
+    const capBytes = win && Number.isInteger(win.recallPlanBytes)
+      ? Math.min(view.CARD.bytes, win.recallPlanBytes) : view.CARD.bytes;
+    if (cards > view.CARD.max || bytes > capBytes) return { ok: false, bytes, cards };
     const previousTotal = Number(auto.totalBytes || 0);
     if (!affordable(win, bytes - previousTotal)) return { ok: false, bytes, cards };
     auto.normalText = parts.normal;
@@ -2045,7 +2049,10 @@ export function apply(ctx, config) {
     }
     const bytes = Buffer.byteLength(`\n\n${text}`);
     const previous = win ? (win.experimentBytes || 0) : 0;
-    if (bytes > EXPERIMENT_BYTES) return '';
+    /** 低档回合的 400 B 是整段投递的额度，实验段不能单独按 1200 B 算。 */
+    const cap = win && Number.isInteger(win.recallPlanBytes)
+      ? Math.min(EXPERIMENT_BYTES, win.recallPlanBytes) : EXPERIMENT_BYTES;
+    if (bytes > cap) return '';
     if (win) {
       if (!affordable(win, bytes - previous)) return '';
       win.bytes += bytes - previous;
@@ -2146,9 +2153,12 @@ export function apply(ctx, config) {
     const cardCap = auto
       ? Math.max(0, view.CARD.max - (auto.normalCards || 0) - (auto.experimentCards || 0))
       : view.CARD.max;
+    /** 档位预算包含实验段：低档 400 B 的回合不能靠实验规则再多吃掉中档的额度。 */
+    const planCap = win && Number.isInteger(win.recallPlanBytes)
+      ? Math.min(view.CARD.bytes, win.recallPlanBytes) : view.CARD.bytes;
     const autoCap = auto
-      ? Math.max(0, view.CARD.bytes - Buffer.byteLength(auto.normalText || '') - 2)
-      : EXPERIMENT_BYTES;
+      ? Math.max(0, planCap - Buffer.byteLength(auto.normalText || '') - 2)
+      : Math.min(EXPERIMENT_BYTES, planCap);
     const relevant = matched
       .slice()
       .sort((a, b) => b.score - a.score)

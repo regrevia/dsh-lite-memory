@@ -9,6 +9,7 @@ const store = await import('../store.js');
 const state = await import('../state.js');
 const anchor = await import('../anchor.js');
 const view = await import('../view.js');
+const scheduler = await import('../scheduler.js');
 
 const effect = (fn) => {
   const dispose = fn();
@@ -682,4 +683,30 @@ console.log('evolution-read.test.mjs: all passed');
   const sig2 = signal();
   await runtime.preStep({ agent, signal: sig2, turn: 't2' }, enter(human('这期口播导出参数怎么配')));
   assert.equal(runtime.text(agent, sig2).includes('导出统一用 H.264'), true, '相关时环境条件规则照常注入');
+}
+
+/* L26：档位预算是整段投递的额度，实验段不能把它撑破。 */
+{
+  const dir = mkdir('tier-cap');
+  const scope = scopeOf(dir);
+  store.setRecallMode(scope, 'adaptive', { operationId: 'tier-cap-mode' });
+  save(scope, { title: 'unlag 面板端口 53421', kind: 'note', tags: ['端口'], body: '面板端口 53421，改之前先看宿主日志，别拿 curl 去猜。' });
+  seedRule(scope, {
+    title: '端口改动先备份',
+    body: '端口改动前先备份 rc 文件，再重启宿主核对一遍，不要直接改线上。',
+    tags: ['端口'],
+    conditions: [{ key: 'taskKind', value: 'code' }],
+  });
+  enable(scope, { taskKind: 'code' });
+  const runtime = boot();
+  const agent = makeAgent('a-tier-cap', dir);
+  const sig = signal();
+  await runtime.preStep({ agent, signal: sig, turn: 't1' }, enter(human('unlag 端口是哪个')));
+  const text = runtime.text(agent, sig);
+  const receipt = runtime.debug.receiptOf(scope, 'session-a-tier-cap');
+  const plan = scheduler.retrievalPlanOf('unlag 端口是哪个');
+  assert.equal(receipt.plan.tier, 'low', '「哪个」属于精确查询');
+  assert.equal(plan.bytes, 400, '低档额度是 400 B');
+  assert.ok(text.includes('端口'), '这一轮确实有内容，不是空跑');
+  assert.ok(Buffer.byteLength(text) <= plan.bytes, `投递 ${Buffer.byteLength(text)} B 超过档位 ${plan.bytes} B`);
 }
