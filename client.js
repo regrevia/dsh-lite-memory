@@ -831,6 +831,8 @@ window.__ModuleLoader__.load({
     /** 待裁决先露两条；「查看全部 N 条」后按队列原样全列，不截断。 */
     const conflictVisibleRows = (queued, all) => (all ? queued : queued.slice(0, 2));
 
+    const rowEditable = (memoryOn, allView, row, key) => memoryOn && !(allView && row.scopeKey !== key && row.scopeKey !== 'global');
+
     /** 面板展开区一次给全：层级、适用条件、范围清单、触发词、相近条目、完整正文。 */
     const conflictFactsOf = (row) => {
       const draft = row && row.draft && typeof row.draft === 'object' ? row.draft : {};
@@ -2658,7 +2660,6 @@ window.__ModuleLoader__.load({
       const globalView = Boolean(selected && selected.kind === 'global');
       /** 「所有」是跨层只读视图：能看能裁决，改记忆仍要切回具体那层。 */
       const allView = Boolean(selected && selected.kind === 'all');
-      const rowScopeReadOnly = (row) => allView && row && row.scopeKey !== currentKey && row.scopeKey !== 'global';
       const activeTab = globalView && tab !== 'settings' ? 'memory' : tab;
       React.useEffect(() => { if (globalView) setTab('memory'); }, [globalView]);
 
@@ -3187,16 +3188,15 @@ window.__ModuleLoader__.load({
       const memoryViewActive = viewModeOf(display, memoryView);
       const evolutionViewActive = graphViewOf(display.graph, evolutionView);
 
-      const conflictReadOnly = !memoryOn || (!globalView && selectedKey !== currentKey);
       const visibleConflicts = conflictVisibleRows(queued, conflictAll);
       const conflictBar = queued.length === 0 ? null : h('div', {
         style: { display: 'flex', flexDirection: 'column', gap: '3px', padding: '7px 9px 8px', borderBottom: '1px solid var(--dsw-alias-border-l1)', flex: '0 0 auto' },
       },
       h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
-        h('span', { style: { ...PANEL_MUTED, lineHeight: '18px', flex: 1, minWidth: 0 } }, `${queued.length} 条保存还没定${conflictReadOnly ? ' · 只读' : ''}`),
+        h('span', { style: { ...PANEL_MUTED, lineHeight: '18px', flex: 1, minWidth: 0 } }, `${queued.length} 条保存还没定${memoryOn ? '' : ' · 只读'}`),
         queued.length > 2 ? h(Action, { disabled: busy, onClick: () => setConflictAll((value) => !value) }, conflictAll ? '收起' : `查看全部 ${queued.length} 条`) : null,
       ),
-      h('span', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, '保存时标题撞上已有记忆，先停在这里：另存成一条，或者丢掉不存'),
+      h('span', { style: { ...PANEL_MUTED, lineHeight: '18px' } }, '标题撞上了：另存一条，或丢掉'),
       visibleConflicts.map((row) => {
         const open = expandedConflict === row.id;
         const facts = conflictFactsOf(row);
@@ -3215,8 +3215,8 @@ window.__ModuleLoader__.load({
               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer',
             },
           }, allView && row.scopeLabel ? `${row.title} · ${row.scopeLabel}` : row.title),
-          conflictReadOnly || rowScopeReadOnly(row) || facts.draftMissing ? null : h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'keep') }, '另存一条'),
-          conflictReadOnly || rowScopeReadOnly(row) ? null : h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'drop') }, '丢掉'),
+          !rowEditable(memoryOn, allView, row, currentKey) || facts.draftMissing ? null : h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'keep') }, '另存一条'),
+          !rowEditable(memoryOn, allView, row, currentKey) ? null : h(Action, { disabled: busy, onClick: () => resolveQueued(row, 'drop') }, '丢掉'),
         ),
         open ? h('div', {
           style: { ...PANEL_MUTED, padding: '2px 0 4px', lineHeight: '18px', overflowWrap: 'anywhere', maxHeight: '180px', overflowY: 'auto' },
@@ -3548,7 +3548,7 @@ window.__ModuleLoader__.load({
 
     // 测试缝：Node 里验引用投影，浏览器里没有任何副作用。
     if (typeof globalThis.__LITE_MEMORY_TEST__ === 'function') {
-      globalThis.__LITE_MEMORY_TEST__({ panelUi, updatePanel, usePanelUi, ProjectEvolution, MemoryOverlay, PANEL_BACKDROP, PANEL_DIALOG, metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, PanelBoundary, PersonaSection, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceHashOf, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row, conflictVisibleRows, conflictFactsOf, conflictNote });
+      globalThis.__LITE_MEMORY_TEST__({ panelUi, updatePanel, usePanelUi, ProjectEvolution, MemoryOverlay, PANEL_BACKDROP, PANEL_DIALOG, metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, PanelBoundary, PersonaSection, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceHashOf, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row, conflictVisibleRows, rowEditable, conflictFactsOf, conflictNote });
     }
 
     return {

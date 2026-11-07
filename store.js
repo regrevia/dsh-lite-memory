@@ -1077,6 +1077,23 @@ function applyDraft(scope, index, source, now, options = {}) {
   let mergedFrom = null;
   let similarList = [];
   /**
+   * 合并目标优先级：明确 id → 明确点名 → 唯一标题匹配 → 自动相近候选。
+   * 点名必须排在同名之前，否则草稿标题碰巧等于另一条时，点名的目标会被静默忽略。
+   */
+  const mergeName = String((source && (source.mergeInto || source.similarId)) || '').trim();
+  const matchTarget = (value) => live.find((item) => item.id === value)
+    || live.find((item) => [item.title, ...(item.aliases || [])].some((name) => String(name || '').trim().toLowerCase() === value.toLowerCase()))
+    || null;
+  if (!record && merge && mergeName) {
+    const point = matchTarget(mergeName);
+    /** 点名的合并目标找不到就报错：悄悄并进「最相近的」那条是知识串位。 */
+    if (!point) throw new Error(`没有找到要合并的目标「${mergeName}」，先确认它现在的标题或 id`);
+    if (draft.id && draft.id !== point.id) throw new Error('要改的目标和要合并的目标不是同一条，先确认改哪条');
+    record = point;
+    mergedFrom = point.title === draft.title ? null : point.title;
+    delete draft.has.title;
+  }
+  /**
    * 同名就是同一条：标题是唯一句柄，重复存同一个标题必须是更新，不能悄悄另建一条
    * （否则按标题读、按标题忘都会撞上两条）。跨层同名才是合法的两行。
    */
@@ -1095,15 +1112,9 @@ function applyDraft(scope, index, source, now, options = {}) {
       .some((name) => String(name || '').trim().toLowerCase() === String(draft.title || '').trim().toLowerCase()));
     if (clash) throw new Error(`已经有同名记忆「${clash.title}」，另存一条请换一个能区分的标题`);
   }
-  /** 合并目标：先看调用方点名的标题/id，再退到最相近的那条；找不到才继续走原来的判断。 */
+  /** 没点名目标的合并：退到最相近的那条；找不到才继续走原来的判断。 */
   if (!record && merge) {
-    const named = String((source && (source.mergeInto || source.similarId)) || '').trim();
-    const exact = (value) => live.find((item) => item.id === value)
-      || live.find((item) => [item.title, ...(item.aliases || [])].some((name) => String(name || '').trim().toLowerCase() === value.toLowerCase()))
-      || null;
-    /** 点名的合并目标找不到就报错：悄悄并进「最相近的」那条是知识串位。 */
-    if (named && !exact(named)) throw new Error(`没有找到要合并的目标「${named}」，先确认它现在的标题或 id`);
-    const pick = exact(named) || (similarEntries(live, draft.title, draft.summary, 1)[0] || null);
+    const pick = similarEntries(live, draft.title, draft.summary, 1)[0] || null;
     const found = pick ? live.find((item) => item.id === pick.id) : null;
     if (found) {
       record = found;
@@ -2884,6 +2895,11 @@ function autoMergeLocked(scope, draft, rows, foreignEntries) {
   if (bodyOverlap(body, oldBody) < 0.5 && body.length < oldBody.length) return null;
   /** 正文缩水超过一成即视为改写而不是重存，自动合并会丢掉被删掉的那部分。 */
   if (body.length < oldBody.length * 0.9) return null;
+  /** 正文一样不等于同一条知识：适用范围被改过就不自动覆盖，留在待裁决里说清楚。 */
+  const has = draft.has || {};
+  if (has.conditions && view.conditionsKey(draft.conditions) !== view.conditionsKey(entry.conditions)) return null;
+  if (has.applicability && String(draft.applicability || '') !== String(entry.applicability || '')) return null;
+  if (has.selection && JSON.stringify(draft.selection || null) !== JSON.stringify(entry.selection || null)) return null;
   /** 只带正文与语义字段回写：草稿里的「取代/改标题」指令不跟着重放。 */
   const payload = { id: entry.id, expectedRevision: entry.revision || 1 };
   for (const key of ['title', 'summary', 'body', 'when', 'kind', 'tags', 'conditions', 'applicability', 'selection', 'triggers', 'links', 'topicKey', 'origin']) {

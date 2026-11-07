@@ -405,5 +405,30 @@ test('同一话题的换代条目只留最强一条在前面，不挤掉别的�
   assert.ok(ranked[0].raw > ranked[1].raw, '整段数字对上是加分，不是并列靠 id');
   assert.ok(view.matchScore(make(77), query).score > 0, '编号沾边的仍可被搜到，只是不排最前');
 }
+test('装卡按最终文本算字节：装不下的整张留到下一轮，不截半张，账能对上', () => {
+  const rec = (id, title, summary) => ({ id, scope: 'project', title, summary, conditions: [], links: [] });
+  const cost = (r, header = '') => Buffer.byteLength(header) + Buffer.byteLength(`\n${view.renderCard(view.cardOf(r, 'project'))}`);
+  const rows = [
+    { record: rec('mem_000000000071', '端口是哪个', '网关端口 7456，面板端口 55900') },
+    { record: rec('mem_000000000072', '钥匙串弹窗', '钥匙串弹窗先重启服务再点一次') },
+    { record: rec('mem_000000000073', '发布窗口', '发布窗口定在周四晚上，提前通知') },
+  ];
+  const budget = cost(rows[0].record) + cost(rows[1].record);
+  const packed = view.recallCards(rows, { max: 3, bytes: budget });
+  assert.equal(packed.cards.length, 2, '刚好装两张就只给两张');
+  assert.deepEqual(packed.omitted, [rows[2].record.id], '第三张整张留到下一轮');
+  assert.equal(packed.bytes, budget, '字节账等于两张卡的完整文本');
+  assert.equal(view.renderCard(packed.cards[0]), view.renderCard(view.cardOf(rows[0].record, 'project')), '交付的卡片没有被截断');
+
+  const long = { record: rec('mem_000000000074', '长条目', 'x'.repeat(400)) };
+  const refused = view.recallCards([long], { max: 3, bytes: 400 });
+  assert.equal(refused.cards.length, 0, '一张都装不下时交空，不给半张');
+  assert.deepEqual(refused.omitted, [long.record.id]);
+
+  const header = '已有记忆可能相关：\n';
+  const withHeader = view.recallCards(rows, { max: 3, bytes: budget + Buffer.byteLength(header) - 1, header });
+  assert.equal(withHeader.cards.length, 1, '表头也算预算，不能靠表头省出一张');
+});
+
 for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
 console.log(`view.test.mjs: ${passed} passed`);

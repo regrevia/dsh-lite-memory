@@ -29,7 +29,7 @@ assert.equal(panel.name, 'shell.overlay');
 assert.equal(panel.order, 30);
 
 const EMPTY_CHILDREN = [];
-const { panelUi, updatePanel, ProjectEvolution, MemoryOverlay, PANEL_BACKDROP, PANEL_DIALOG, metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, PanelBoundary, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, conflictVisibleRows, conflictFactsOf, conflictNote } = seen;
+const { panelUi, updatePanel, ProjectEvolution, MemoryOverlay, PANEL_BACKDROP, PANEL_DIALOG, metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, PanelBoundary, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, conflictVisibleRows, rowEditable, conflictFactsOf, conflictNote } = seen;
 
 // 点会话头那颗图标必须真把浮层打开，浮层里必须是面板本体。
 updatePanel({ open: false, sessionId: '' });
@@ -554,6 +554,14 @@ assert.equal(facts.draftMissing, false);
 
 assert.equal(conflictNote('drop', { ok: true, body: { ok: true } }), '已丢掉，没有写进记忆');
 assert.equal(conflictNote('keep', { ok: true, body: { ok: true } }), '已另存一条');
+
+// 冲突行能不能逐条裁决：开关关着不行；开关开着时，选中别的层也照样能另存或丢掉。
+assert.equal(rowEditable(true, false, { scopeKey: 'project' }, 'project'), true, '开关开着就该能另存或丢掉');
+assert.equal(rowEditable(true, false, { scopeKey: 'project' }, 'other-project'), true, '选中别的层不影响这一行的裁决');
+assert.equal(rowEditable(true, true, { scopeKey: 'global' }, 'project'), true, '全局的冲突行能处理');
+assert.equal(rowEditable(true, true, { scopeKey: 'other-project' }, 'project'), false, '别的项目的行只读');
+assert.equal(rowEditable(false, false, { scopeKey: 'project' }, 'project'), false, '记忆关掉时不能改');
+
 assert.equal(conflictNote('drop', { ok: false, status: 409, body: { ok: false, code: 'gone' } }), '这条已经不在了，列表已刷新');
 assert.equal(conflictNote('drop', { ok: false, status: 409, body: { ok: false, reason: '队列里没有这一条' } }), '队列里没有这一条');
 assert.equal(conflictNote('drop', { ok: false, status: 0, body: null }), '待裁决没处理成');

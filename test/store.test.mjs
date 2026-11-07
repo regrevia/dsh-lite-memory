@@ -1630,6 +1630,41 @@ test('指定合并目标不存在：报错，不悄悄并进最相近的那条',
   assert.equal(loadIndex(scope).entries.length, 1, '报错时不能顺手改到别的条目');
 });
 
+test('点名合并目标优先于同名匹配：标题撞上 A 也不能绕过 mergeInto=B', () => {
+  const scope = fresh('merge-target-wins');
+  const a = store.saveEntry(scope, { title: '规则甲', summary: '甲的正文', when: '同一场景下', kind: 'convention', body: '甲的正文：先跑测试再提交。' });
+  const b = store.saveEntry(scope, { title: 'npm 令牌放在钥匙串里', summary: '凭据从哪取', when: '要发 npm 时', kind: 'pointer', body: 'npm token 从 Keychain 里取，不写进仓库。' });
+  store.saveEntry(scope, {
+    title: '规则甲', summary: '凭据从哪取', when: '要发 npm 时', kind: 'pointer',
+    body: 'npm token 从 Keychain 里取，不写进仓库。\n补一句：再打 tag。', resolution: 'merge', mergeInto: 'npm 令牌放在钥匙串里',
+  });
+  const aNow = readEntry(scope, a.record.id);
+  const bNow = readEntry(scope, b.record.id);
+  assert.doesNotMatch(String(aNow.body || ''), /再打 tag/, '点名的目标之外那条不能被改');
+  assert.match(String(bNow.body || ''), /补一句/, '合并要落在点名的目标上');
+});
+
+test('正文相同但适用范围不同：不自动覆盖，留成待确认', () => {
+  const body = '完整构建约 40 秒，改动 client.js 后要重载宿主，并且再看一遍面板刷新。';
+  const same = fresh('auto-merge-same');
+  store.saveEntry(same, { title: '构建耗时的基线', summary: '构建要多久', when: '看构建时', kind: 'note', body,
+    applicability: 'conditional', conditions: [{ key: 'runtime', value: 'desktop' }] });
+  const merged = store.saveEntry(same, { title: '构建耗时的基线（桌面）', summary: '构建要多久', when: '看构建时', kind: 'note',
+    body: `${body}\n再补一句。`, applicability: 'conditional', conditions: [{ key: 'runtime', value: 'desktop' }] });
+  assert.equal(merged.autoMerged, true, '范围一致时重复才允许自动并掉');
+
+  const scope = fresh('auto-merge-scope');
+  const first = store.saveEntry(scope, { title: '构建耗时的基线', summary: '构建要多久', when: '看构建时', kind: 'note', body,
+    applicability: 'conditional', conditions: [{ key: 'runtime', value: 'desktop' }] });
+  const second = store.saveEntry(scope, { title: '构建耗时的基线（移动端）', summary: '构建要多久', when: '看构建时', kind: 'note',
+    body: `${body}\n再补一句。`, applicability: 'conditional', conditions: [{ key: 'runtime', value: 'mobile' }] });
+  assert.equal(second.needsResolution, true, '范围不同就不是同一条知识');
+  const kept = readEntry(scope, first.record.id);
+  assert.match(String(kept.body || ''), /^完整构建约 40 秒/);
+  assert.doesNotMatch(String(kept.body || ''), /再补一句/, '原记录不能被改写');
+  assert.deepEqual(kept.conditions, [{ key: 'runtime', value: 'desktop' }], '原记录的适用范围不能被改写');
+});
+
 test('只是标题像、正文不同：仍然排进待裁决，不替人猜', () => {
   const scope = fresh('auto-merge-skip');
   store.saveEntry(scope, { title: '发版取凭据的流程', summary: '发版前怎么拿凭据', when: '要发版时', kind: 'procedure', body: 'npm token 在 Keychain 里取，GitHub 用 gh auth。' });

@@ -9,8 +9,15 @@ test('按这一轮的话判定检索类型：具体任务压过宽泛词', () =>
   assert.equal(scheduler.queryTypeOf('继续做刚才那一步'), 'continuation');
   assert.equal(scheduler.queryTypeOf('下一版的重构方案怎么取舍'), 'planning');
   assert.equal(scheduler.queryTypeOf('写一段发版说明'), 'generation');
-  assert.equal(scheduler.queryTypeOf(''), 'continuation', '没新内容多半是在往下做');
+  assert.equal(scheduler.queryTypeOf(''), 'general', '空输入不自行推断成续接');
   assert.equal(scheduler.queryTypeOf('今天几点开会'), 'general');
+});
+
+test('续接只在没有更具体目标时成立，词形与纯续句分开判', () => {
+  assert.equal(scheduler.queryTypeOf('继续评估重构方案'), 'planning', '带明确目标的「继续」不是接着上文');
+  assert.equal(scheduler.queryTypeOf('解释为什么要写发布说明'), 'procedure', '「为什么」不该把解释请求判成排障');
+  assert.equal(scheduler.queryTypeOf('summarize this'), 'generation', '英文词形要看整词前缀，不能只认原形');
+  assert.equal(scheduler.queryTypeOf('继续'), 'continuation');
 });
 
 test('档位只影响候选深度与卡片数，字节不超过 1200', () => {

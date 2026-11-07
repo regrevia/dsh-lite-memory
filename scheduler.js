@@ -23,20 +23,23 @@ const TYPE_TIER = {
 };
 
 /** 有先后顺序：越具体、越影响下一步的意图排越前，宽泛的词不能盖住明确的任务。 */
-const RULES = [
-  ['troubleshooting', /报错|错误|失败|崩了|崩溃|闪退|卡死|白屏|超时|不生效|没反应|为什么|怎么回事|排查|定位|\b(error|failed|failure|crash|exception|timeout|broken|bug)\b/i],
+const TASK_RULES = [
+  ['troubleshooting', /报错|错误|失败|崩了|崩溃|闪退|卡死|白屏|超时|不生效|没反应|怎么回事|排查|定位|\b(error|failed|failure|crash|exception|timeout|broken|bug)\b/i],
   ['exact_lookup', /是哪个|哪个文件|哪一条|在哪里|在哪|路径|版本号|叫什么|多少|上次|之前说|还记得|查一下|\b(where|which|what version|path|previous|last time)\b/i],
-  ['continuation', /继续|接着|刚才那|上面那|上一步|然后呢|\b(continue|go on|next step)\b/i],
   ['planning', /方案|规划|计划|设计|重构|架构|下一阶段|路线|取舍|怎么选|评估|\b(plan|design|architecture|refactor|roadmap|trade-?off)\b/i],
-  ['generation', /写一段|写个|生成|起草|文案|总结|翻译|改写|润色|\b(write|draft|generate|summar|translat|rewrite|copy)\b/i],
-  ['procedure', /发布|发版|上线|部署|安装|升级|迁移|打包|提交|回滚|配置|接入|接入流程|步骤|\b(release|publish|deploy|install|migrat|rollback|setup|config)\b/i],
+  ['generation', /写一段|写个|生成|起草|文案|总结|翻译|改写|润色|\b(write|draft|generat|summar|translat|rewrit|copy)/i],
+  ['procedure', /发布|发版|上线|部署|安装|升级|迁移|打包|提交|回滚|配置|接入|接入流程|步骤|\b(release|publish|deploy|install|migrat|rollback|setup|config)/i],
 ];
 
-/** 一句话判定任务类型；空查询按 continuation（没新内容多半是在往下做）。 */
+/** 续句只在没有更具体目标时才算续接：「继续评估重构方案」是新任务，不是接着上文。 */
+const CONTINUATION = /继续|接着|刚才那|上面那|上一步|然后呢|\b(continue|go on|next step)\b/i;
+
+/** 一句话判定任务类型；空查询不猜续接，交给普通档。 */
 export function queryTypeOf(query) {
   const text = String(query || '').trim();
-  if (!text) return 'continuation';
-  for (const [type, rule] of RULES) if (rule.test(text)) return type;
+  if (!text) return 'general';
+  for (const [type, rule] of TASK_RULES) if (rule.test(text)) return type;
+  if (CONTINUATION.test(text)) return 'continuation';
   return 'general';
 }
 

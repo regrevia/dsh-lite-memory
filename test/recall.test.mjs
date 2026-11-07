@@ -1209,3 +1209,73 @@ console.log('recall.test.mjs: ok');
   assert.equal(receipt.cards, 0, '这一轮没有卡片');
   assert.equal(receipt.closest, '', '没有接近的候选时就是空的');
 }
+
+// A40：低档只给 400 B / 1 张卡片，后面的候选不进输出也不记账。
+{
+  const cwdLow = mkdir('tier-low');
+  const scopeLow = store.scopeOf(cwdLow);
+  store.setRecallMode(scopeLow, 'adaptive', { operationId: 'tier-low-mode' });
+  const lowRows = [
+    ['unlag 面板端口是 53421', 'unlag 面板端口 53421，改之前先看宿主日志，别拿 curl 去猜。'],
+    ['宿主端口和面板端口不是一回事', '宿主端口归宿主，面板端口归面板，混着改会连不上。'],
+    ['记错端口就全连不上', '端口记错就全连不上，先重启宿主再试，别急着改代码。'],
+  ];
+  for (const [title, summary] of lowRows) {
+    save(scopeLow, { title, summary, tags: ['端口'], body: `${summary} 说完这一段就够了。` });
+  }
+  const agent = makeAgent('agent-tier-low', cwdLow);
+  const runtime = boot();
+  const sig = signal();
+  await runtime.preStep({ agent, signal: sig, turn: 'tier-low-1' }, enter(human('unlag 端口是哪个')));
+  const text = runtime.provider.text({ agent, signal: sig });
+  const win = runtime.debug.windowOf(agent);
+  const cards = runtime.debug.preparedOf(agent).cards;
+  const receipt = runtime.debug.receiptOf(scopeLow, 'session-agent-tier-low');
+  assert.equal(receipt.plan.tier, 'low', '「哪个」属于精确查询');
+  assert.equal(receipt.matched, lowRows.length, '三条都入选了候选，只是没都投出去');
+  assert.ok(Buffer.byteLength(text) <= 400, `低档输出 ${Buffer.byteLength(text)} B 超过 400`);
+  assert.equal(cards.length, 1, '低档只放一张，多出来的被预算挡掉');
+  assert.ok(text.includes(cards[0].title), '这一张要在输出里');
+  for (const [title] of lowRows) {
+    if (cards.some((card) => card.title === title)) continue;
+    assert.ok(!text.includes(title), `没投放的「${title}」不能出现在输出里`);
+  }
+  assert.equal(win.autoBudget.cards, cards.length, '卡片数与账本一致');
+  assert.equal(win.autoBudget.totalBytes, Buffer.byteLength(text), '最终字节与账本一致');
+}
+
+// A41：高档满三张，第四张既不进输出也不算已提供。
+{
+  const cwdHigh = mkdir('tier-high');
+  const scopeHigh = store.scopeOf(cwdHigh);
+  store.setRecallMode(scopeHigh, 'adaptive', { operationId: 'tier-high-mode' });
+  const highRows = [
+    ['崩溃先看日志再动手', '崩溃的时候先看日志最后两百行，报错原文决定排查方向。'],
+    ['窗口栈能看出崩溃是谁挡的', '崩溃伴随白屏时看窗口栈，确认是插件浮层还是页面没起来。'],
+    ['两个插件冲突会偶发崩溃', '插件冲突会表现为偶发崩溃，排查时先禁用一半，二分定位。'],
+    ['崩溃先复现再改代码', '崩溃先拿到能复现的步骤再排查，别凭感觉改代码。'],
+  ];
+  for (const [title, summary] of highRows) {
+    save(scopeHigh, { title, summary, tags: ['崩溃', '排查'], body: `${summary} 处理完把结论写回记忆。` });
+  }
+  const agent = makeAgent('agent-tier-high', cwdHigh);
+  const runtime = boot();
+  const sig = signal();
+  await runtime.preStep({ agent, signal: sig, turn: 'tier-high-1' }, enter(human('崩溃排查')));
+  const text = runtime.provider.text({ agent, signal: sig });
+  const win = runtime.debug.windowOf(agent);
+  const cards = runtime.debug.preparedOf(agent).cards;
+  const receipt = runtime.debug.receiptOf(scopeHigh, 'session-agent-tier-high');
+  assert.equal(receipt.plan.tier, 'high', '排查类问题给高档');
+  assert.equal(receipt.matched, highRows.length, '四条都是候选，只有三张能出去');
+  assert.ok(Buffer.byteLength(text) <= 1200, `高档输出 ${Buffer.byteLength(text)} B 超过 1200`);
+  assert.equal(cards.length, 3, '高档正好三张，第四张被卡片上限挡掉');
+  assert.equal(win.autoBudget.cards, cards.length, '卡片数与账本一致');
+  assert.equal(win.autoBudget.totalBytes, Buffer.byteLength(text), '最终字节与账本一致');
+  for (const card of cards) assert.ok(text.includes(card.title), `卡片「${card.title}」必须在输出里`);
+  for (const [title] of highRows) {
+    if (cards.some((card) => card.title === title)) continue;
+    assert.ok(!text.includes(title), `没投放的「${title}」不能出现在输出里`);
+    assert.equal(win.provided.has(title), false, '没投放的条目不能记成已提供');
+  }
+}

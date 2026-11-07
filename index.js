@@ -185,6 +185,8 @@ function noteRecall(scope, sessionId, receipt) {
     plan: receipt.plan && receipt.plan.type
       ? { type: receipt.plan.type, tier: receipt.plan.tier, candidates: receipt.plan.candidates, cards: receipt.plan.cards }
       : null,
+    /** 与 plan 同一份数据的一行话，面板不必自己拼词。 */
+    summary: scheduler.planSummaryOf(receipt.plan),
     /** 注入为空时留在回执里的最近候选：查了什么、差多少，阈值只能靠这个调。 */
     closest: String(receipt.closest || '').slice(0, 200),
   });
@@ -1842,6 +1844,8 @@ export function apply(ctx, config) {
       if (card.scope === 'project') card.scopeName = projectNameOf(scope);
       const line = renderRecallCard(card);
       const nextText = `${RECALL_HEADER}\n${[...lines, line].join('\n')}`;
+      /** 档位给的字节上限先看：这一张放进来就超了，直接跳过，不进候选也不记账。 */
+      if (Buffer.byteLength(nextText) > plan.bytes) continue;
       if (auto) {
         /** 实验段可能先渲染：组装成最终两段再量，超了就跳过这张，不把标题留在模型侧。 */
         const admitted = admitAuto(win, {
@@ -1850,7 +1854,8 @@ export function apply(ctx, config) {
           normalCards: cards.length + 1,
           experimentCards: auto.experimentCards || 0,
         });
-
+        /** 准入被拒就不进输出：账本说不要，输出里也不能有。 */
+        if (!admitted.ok) continue;
       } else {
         const size = Buffer.byteLength(nextText);
 
@@ -1869,6 +1874,7 @@ export function apply(ctx, config) {
       /** 卡片行与到期时间一起留到最后输出：中间隔了系统提示组装，不能拿投影时的判断当现在。 */
       linesMeta.push({ id: card.id, line, validUntil: row.record.validUntil || '' });
     }
+    /** 每张准入时已按「拼上这一张后的完整文本」量过，最终文本必然在档位内，不再留二次清零分支。 */
     const finalText = `${RECALL_HEADER}\n${lines.join('\n')}`;
     if (auto) {
       /** 没有任何普通卡片时也要把已有实验段记账成当前状态。 */
