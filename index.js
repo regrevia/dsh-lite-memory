@@ -180,10 +180,11 @@ function noteRecall(scope, sessionId, receipt) {
     cards: Number(receipt.cards) || 0,
     chars: Number(receipt.chars) || 0,
     limit: view.CARD.max,
-    bytes: view.CARD.bytes,
+    /** 使用字节的口径就是这一轮的档位额度，不再固定报硬顶 1200。 */
+    bytes: receipt.plan && Number(receipt.plan.bytes) ? Number(receipt.plan.bytes) : view.CARD.bytes,
     /** 这一轮按什么档位检索的：类型与深度，不记用户原话。 */
     plan: receipt.plan && receipt.plan.type
-      ? { type: receipt.plan.type, tier: receipt.plan.tier, candidates: receipt.plan.candidates, cards: receipt.plan.cards }
+      ? { type: receipt.plan.type, tier: receipt.plan.tier, candidates: receipt.plan.candidates, cards: receipt.plan.cards, dropped: Number(receipt.dropped) || 0 }
       : null,
     /** 与 plan 同一份数据的一行话，面板不必自己拼词。 */
     summary: scheduler.planSummaryOf(receipt.plan),
@@ -1839,6 +1840,8 @@ export function apply(ctx, config) {
     const lines = [];
     const linesMeta = [];
     const cards = [];
+    /** 预算与准入挡下的卡片数：回执里要能说「候选几张、实际给几张、丢了几张」。 */
+    let dropped = 0;
     for (const row of ranked) {
       const usedCards = cards.length + (auto ? (auto.experimentCards || 0) : 0);
       if (usedCards >= plan.cards) break;
@@ -1847,7 +1850,10 @@ export function apply(ctx, config) {
       const line = renderRecallCard(card);
       const nextText = `${RECALL_HEADER}\n${[...lines, line].join('\n')}`;
       /** 档位给的字节上限先看：这一张放进来就超了，直接跳过，不进候选也不记账。 */
-      if (Buffer.byteLength(nextText) > plan.bytes) continue;
+      if (Buffer.byteLength(nextText) > plan.bytes) {
+        dropped += 1;
+        continue;
+      }
       if (auto) {
         /** 实验段可能先渲染：组装成最终两段再量，超了就跳过这张，不把标题留在模型侧。 */
         const admitted = admitAuto(win, {
@@ -1857,7 +1863,10 @@ export function apply(ctx, config) {
           experimentCards: auto.experimentCards || 0,
         });
         /** 准入被拒就不进输出：账本说不要，输出里也不能有。 */
-        if (!admitted.ok) continue;
+        if (!admitted.ok) {
+          dropped += 1;
+          continue;
+        }
       } else {
         const size = Buffer.byteLength(nextText);
 
@@ -1921,8 +1930,8 @@ export function apply(ctx, config) {
             : (gateRuntime && gateRuntime.enabled ? 'no_overlap' : 'needs_context');
     const matched = ranked.length || nearMatched;
     const ids = cards.map((card) => card.id).filter(Boolean);
-    if (!cards.length) return { text: '', cards: [], lines: [], ids, bytes: 0, query, reason, matched, plan };
-    return { text: finalText, cards, lines: linesMeta, ids, bytes: Buffer.byteLength(finalText), query, reason, matched, plan };
+    if (!cards.length) return { text: '', cards: [], lines: [], ids, bytes: 0, query, reason, matched, plan, dropped };
+    return { text: finalText, cards, lines: linesMeta, ids, bytes: Buffer.byteLength(finalText), query, reason, matched, plan, dropped };
   }
 
   /* ---------------- 项目自进化：任务锚点、读取决策、上下文解析 ---------------- */

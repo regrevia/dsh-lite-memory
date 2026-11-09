@@ -25,7 +25,7 @@ window.__ModuleLoader__.load({
     const EMPTY = [];
     const ROW = { display: 'flex', alignItems: 'center', gap: '6px', padding: '1px 0', fontSize: '12px', lineHeight: '1.6', opacity: 0.7 };
     const DOT = { flex: '0 0 auto', opacity: 0.8 };
-    const LABEL = { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
+    const ELLIPSIS = { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
     const KEEP_STYLE = { flex: '0 0 auto', border: '1px solid currentColor', background: 'transparent', color: 'inherit', borderRadius: '999px', padding: '0 8px', fontSize: '12px', lineHeight: '18px' };
     const KEEP_ON = { ...KEEP_STYLE, opacity: 0.9, cursor: 'pointer' };
     const KEEP_OFF = { ...KEEP_STYLE, opacity: 0.45, cursor: 'default' };
@@ -318,7 +318,7 @@ window.__ModuleLoader__.load({
         'data-tool': props.toolName,
         'data-memory-row': key || undefined,
         style: dup ? { ...ROW, display: 'none' } : ROW,
-      }, h('span', { style: DOT }, '·'), h('span', { style: LABEL }, line ?? RUNNING[props.toolName] ?? 'memory'));
+      }, h('span', { style: DOT }, '·'), h('span', { style: ELLIPSIS }, line ?? RUNNING[props.toolName] ?? 'memory'));
     };
 
     /** 建议行：候选 id 来自持久元数据，不读文案。 */
@@ -349,7 +349,7 @@ window.__ModuleLoader__.load({
         ? h('button', { type: 'button', onClick: keep, disabled: !canKeep, 'aria-label': '保留这条记忆', style: canKeep ? KEEP_ON : KEEP_OFF }, KEEP[state] ?? KEEP.idle)
         : null;
       const label = state === 'saved' ? 'memory · kept' : note || line;
-      return h('div', { 'data-tool': props.toolName, style: ROW }, h('span', { style: DOT }, '·'), h('span', { style: LABEL }, label), button);
+      return h('div', { 'data-tool': props.toolName, style: ROW }, h('span', { style: DOT }, '·'), h('span', { style: ELLIPSIS }, label), button);
     };
 
     /** 撤销只认真正写入且版本一致的那次保存。 */
@@ -396,7 +396,7 @@ window.__ModuleLoader__.load({
       const button = changed && state !== 'dropped'
         ? h('button', { type: 'button', onClick: drop, disabled: !canDrop, 'aria-label': '撤销此次修改', style: state === 'idle' || state === 'failed' ? DROP : { ...DROP, opacity: 0.25, cursor: 'default' } }, '✕')
         : null;
-      return h('div', { 'data-tool': props.toolName, style: ROW }, h('span', { style: DOT }, '·'), h('span', { style: LABEL }, label), button);
+      return h('div', { 'data-tool': props.toolName, style: ROW }, h('span', { style: DOT }, '·'), h('span', { style: ELLIPSIS }, label), button);
     };
 
 
@@ -673,9 +673,9 @@ window.__ModuleLoader__.load({
       },
       h('span', { 'aria-hidden': 'true', style: { flex: '0 0 auto', alignSelf: 'stretch', width: '2px', minHeight: '10px', borderRadius: '999px', background: props.tone, opacity: 0.85 } }),
       h('span', { style: { display: 'flex', flexDirection: 'column', gap: '1px', flex: '1 1 auto', minWidth: 0 } },
-        h('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, item.title || '记忆'),
+        h('span', { style: ELLIPSIS }, item.title || '记忆'),
         h('span', { style: { display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, fontSize: '11px', lineHeight: '16px', color: 'var(--dsw-alias-label-secondary)' } },
-          reason ? h('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, reason) : null,
+          reason ? h('span', { style: ELLIPSIS }, reason) : null,
           h('span', { style: { marginLeft: 'auto', flex: '0 0 auto', fontVariantNumeric: 'tabular-nums' } }, refMetaOf(item)),
         ),
       ));
@@ -958,16 +958,25 @@ window.__ModuleLoader__.load({
       const days = Math.floor(hours / 24);
       return days < 30 ? `${days} 天前` : '';
     };
-    /**
-     * 面板只说判断结果，不说内部原因码；条数来自上一次自动召回的回执。
-     */
+    /** 面板只说判断结果，不说内部原因码；条数来自上一次的回执。 */
+    const TYPE_LABEL = { troubleshooting: '排障', procedure: '步骤', exact_lookup: '精确查询', continuation: '接着上一步', planning: '规划', generation: '生成', general: '通用' };
+    const TIER_LABEL = { low: '精简', mid: '常规', high: '深入' };
+    const recallPlanTextOf = (plan, bytes) => {
+      if (!plan || typeof plan !== 'object') return '';
+      const raised = Number.isInteger(plan.bytes) ? plan.bytes : (Number.isInteger(bytes) ? bytes : 0);
+      return [TYPE_LABEL[plan.type], TIER_LABEL[plan.tier],
+        Number.isInteger(plan.candidates) && Number.isInteger(plan.cards) ? `候选 ${plan.candidates} · 投递 ${plan.cards}` : '',
+        raised ? `使用 ${raised} B` : ''].filter(Boolean).join(' · ');
+    };
     const recallTextOf = (receipt) => {
       if (!receipt || typeof receipt !== 'object') return '';
       const cards = Number.isInteger(receipt.cards) ? receipt.cards : 0;
       const matched = Number.isInteger(receipt.matched) ? receipt.matched : 0;
       const related = matched > 0 ? `${matched} 条相关记忆，` : '';
+      const detail = recallPlanTextOf(receipt.plan, receipt.bytes);
+      const withDetail = (text) => (text && detail ? `${text} · ${detail}` : text);
       switch (receipt.reason) {
-        case 'hit': return cards > 0 ? `上次自动提醒 ${cards} 条` : '';
+        case 'hit': return withDetail(cards > 0 ? `上次自动提醒 ${cards} 条` : '');
         case 'budget': return `上次没提醒，${related}本轮自动提醒已用满`;
         case 'needs_context': return `上次没提醒，${related}适用条件未确认`;
         case 'conflict': return `上次没提醒，${related}存在冲突的结论`;
@@ -2079,7 +2088,7 @@ window.__ModuleLoader__.load({
             ? '暂无变化记录'
             : history.map((row, index) => h('div', { key: `h${index}`, style: { display: 'flex', gap: '8px' } },
               h('span', { style: { flex: '0 0 auto', fontVariantNumeric: 'tabular-nums' } }, EVO_DATE(row.at) || '—'),
-              h('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, row.text))))
+              h('span', { style: ELLIPSIS }, row.text))))
         : null;
 
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
@@ -2366,7 +2375,7 @@ window.__ModuleLoader__.load({
         : null);
       const formedRows = formed.map((row) => h('div', { key: `formed:${row.dimension}`, style: { display: 'flex', flexDirection: 'column', gap: '1px', minWidth: 0 } },
         h('div', { style: { ...ROW, gap: '8px' } },
-          h('span', { style: { ...LABEL, flex: 1 } }, `${row.label} · ${row.valueLabel || row.value}`),
+          h('span', { style: { ...ELLIPSIS, flex: 1 } }, `${row.label} · ${row.valueLabel || row.value}`),
           basisNote(row.dimension),
           row.lockedByUser === true
             ? h('span', { style: { ...PANEL_MUTED, flex: '0 0 auto' } }, '已确认')
@@ -2376,7 +2385,7 @@ window.__ModuleLoader__.load({
         evidenceRows(row.dimension)));
       const observingRows = observing.map((row) => h('div', { key: `observing:${row.dimension}`, style: { display: 'flex', flexDirection: 'column', gap: '1px', minWidth: 0 } },
         h('div', { style: ROW },
-          h('span', { style: { ...LABEL, flex: 1 } }, `${row.label} · ${row.text || ''}`),
+          h('span', { style: { ...ELLIPSIS, flex: 1 } }, `${row.label} · ${row.text || ''}`),
           h('span', { style: { display: 'flex', alignItems: 'center', gap: '8px', flex: '0 0 auto' } },
             basisNote(row.dimension),
             h(Action, { disabled: busy, onClick: () => send({ op: 'reject', dimension: row.dimension }) }, '不用这个'))),
@@ -2386,7 +2395,7 @@ window.__ModuleLoader__.load({
         const from = row.from ? valueLabelOf(row.dimension, row.from) : '未定';
         const to = row.to ? valueLabelOf(row.dimension, row.to) : '';
         return h('div', { key: `change:${row.at}:${row.dimension}:${row.to}`, style: { ...ROW, gap: '8px' } },
-          h('span', { style: { ...LABEL, flex: 1 } }, `${row.label} · ${from}${to ? ` → ${to}` : ''}`),
+          h('span', { style: { ...ELLIPSIS, flex: 1 } }, `${row.label} · ${from}${to ? ` → ${to}` : ''}`),
           ago ? h('span', { style: { ...PANEL_MUTED, flex: '0 0 auto' } }, ago) : null);
       });
       const empty = panel && formed.length === 0 && observing.length === 0 && changes.length === 0;
@@ -2409,7 +2418,7 @@ window.__ModuleLoader__.load({
         },
         h(RefChevron, { open }),
         h('span', { style: { flex: '0 0 auto', fontSize: '12px', fontWeight: 600 } }, '记住我'),
-        h('span', { style: { ...PANEL_MUTED, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, statusText)));
+        h('span', { style: ELLIPSIS }, statusText)));
       const body = panel
         ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '7px', minWidth: 0 } },
           h('div', {
@@ -2731,7 +2740,7 @@ window.__ModuleLoader__.load({
           borderBottom: '1px solid var(--dsw-alias-border-l1)',
         },
       },
-      h('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, label),
+      h('span', { style: ELLIPSIS }, label),
       h('span', { style: { marginLeft: 'auto', flex: '0 0 auto', fontVariantNumeric: 'tabular-nums', opacity: 0.72 } }, value === null || value === undefined ? '—' : `${value} ${unit}`));
       const detailRecord = selectedMemory ? records.find((record) => record.id === selectedMemory) : null;
 
@@ -2942,7 +2951,7 @@ window.__ModuleLoader__.load({
             color: 'inherit', font: 'inherit', fontSize: '12px', cursor: loading || !data ? 'default' : 'pointer',
           },
         },
-        h('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, scopeChoice ? scopeChoice.label : '范围'),
+        h('span', { style: ELLIPSIS }, scopeChoice ? scopeChoice.label : '范围'),
         h('span', { 'aria-hidden': 'true', style: { marginLeft: 'auto', flex: '0 0 auto', fontSize: '10px', opacity: 0.55 } }, '▾')),
         scopeOpen && data
           ? [
@@ -2970,7 +2979,7 @@ window.__ModuleLoader__.load({
               },
             },
             h('span', { 'aria-hidden': 'true', style: { flex: '0 0 12px', width: '12px', color: 'var(--dsw-alias-brand-primary)' } }, choice.key === selectedKey ? '✓' : ''),
-            h('span', { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, choice.label))))
+            h('span', { style: ELLIPSIS }, choice.label))))
           ]
           : null);
 
@@ -2980,7 +2989,7 @@ window.__ModuleLoader__.load({
       h('span', { style: { width: '32px', height: '32px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderRadius: '9px', background: 'var(--dsw-alias-bg-layer-2)', border: '1px solid var(--dsw-alias-border-l1)', color: 'var(--dsw-alias-brand-primary)' } }, h(BrainIcon)),
       h('span', { style: { display: 'flex', flexDirection: 'column', minWidth: 0 } },
         h('span', { style: { fontSize: '14px', lineHeight: '1.35', fontWeight: 600 } }, '记忆'),
-        h('span', { style: { ...PANEL_MUTED, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, selected ? `${selected.label} · ${total} 条` : '读取中…'),
+        h('span', { style: ELLIPSIS }, selected ? `${selected.label} · ${total} 条` : '读取中…'),
       ),
       h('span', { style: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '8px' } },
         activeTab === 'memory' ? scopePicker() : null,
@@ -3016,7 +3025,7 @@ window.__ModuleLoader__.load({
         h('span', { style: { fontSize: '12px', lineHeight: '20px', fontWeight: 600, whiteSpace: 'nowrap' } }, label),
         h(Toggle, { ariaLabel: label, on, busy: busy || disabled, onClick: disabled ? undefined : onClick }),
       ),
-      hint ? h('span', { style: { ...PANEL_MUTED, lineHeight: '16px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, hint) : null);
+      hint ? h('span', { style: { ...ELLIPSIS, lineHeight: '16px' } }, hint) : null);
       const evolutionOn = Boolean(memoryOn && evolution && evolution.enabled === true);
       const recallLine = recallLineOf(current && current.recall);
       const settingsTab = h('div', { role: 'tabpanel', 'aria-label': '设置', style: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: '14px', overflowY: 'auto' } },
@@ -3034,7 +3043,7 @@ window.__ModuleLoader__.load({
           ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
             h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
               h('span', { style: { fontSize: '12px', fontWeight: 600 } }, '排序调参'),
-              h('span', { style: { ...PANEL_MUTED, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+              h('span', { style: { ...ELLIPSIS, flex: 1 } },
                 tune.replayCases > 0
                   ? `回放 ${tune.replayCases} 条 · ${tune.params && tune.params.summaryWeight}${tune.needsReeval === true ? ' · 待重评' : ''}`
                   : '标一条漏掉的查询后才可试算'),
@@ -3085,7 +3094,7 @@ window.__ModuleLoader__.load({
         ? h('div', { style: { ...PANEL_MUTED, padding: '14px 9px' } }, '读取中…')
         : filtered.length === 0
           ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '14px 9px', minWidth: 0 } },
-            h('span', { style: { ...PANEL_MUTED, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, filteredNow ? '没有匹配的记忆' : '还没有记忆'),
+            h('span', { style: ELLIPSIS }, filteredNow ? '没有匹配的记忆' : '还没有记忆'),
             filteredNow ? h(Action, { onClick: () => { setHubFilter(null); setQuery(''); } }, '清除搜索') : null,
           )
           : filtered.map((record) => h(MemoryRow, {
@@ -3332,7 +3341,7 @@ window.__ModuleLoader__.load({
               : `没有${stageLabel}的经验`;
       const evolutionList = filteredRules.length === 0
         ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '14px 9px', minWidth: 0 } },
-          h('span', { style: { ...PANEL_MUTED, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, evolutionEmptyText),
+          h('span', { style: ELLIPSIS }, evolutionEmptyText),
           stage !== 'all' && (memoryOn && evolution && evolution.enabled === true) ? h(Action, { onClick: () => setStage('all') }, '看全部') : null,
         )
         : filteredRules.map((rule) => h(EvolutionRow, {
@@ -3548,7 +3557,7 @@ window.__ModuleLoader__.load({
 
     // 测试缝：Node 里验引用投影，浏览器里没有任何副作用。
     if (typeof globalThis.__LITE_MEMORY_TEST__ === 'function') {
-      globalThis.__LITE_MEMORY_TEST__({ panelUi, updatePanel, usePanelUi, ProjectEvolution, MemoryOverlay, PANEL_BACKDROP, PANEL_DIALOG, metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, PanelBoundary, PersonaSection, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceHashOf, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row, conflictVisibleRows, rowEditable, conflictFactsOf, conflictNote });
+      globalThis.__LITE_MEMORY_TEST__({ panelUi, updatePanel, usePanelUi, ProjectEvolution, MemoryOverlay, PANEL_BACKDROP, PANEL_DIALOG, metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, PanelBoundary, PersonaSection, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceHashOf, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, recallTextOf, recallPlanTextOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row, conflictVisibleRows, rowEditable, conflictFactsOf, conflictNote });
     }
 
     return {

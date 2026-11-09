@@ -29,7 +29,7 @@ assert.equal(panel.name, 'shell.overlay');
 assert.equal(panel.order, 30);
 
 const EMPTY_CHILDREN = [];
-const { panelUi, updatePanel, ProjectEvolution, MemoryOverlay, PANEL_BACKDROP, PANEL_DIALOG, metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, PanelBoundary, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, conflictVisibleRows, rowEditable, conflictFactsOf, conflictNote } = seen;
+const { panelUi, updatePanel, ProjectEvolution, MemoryOverlay, PANEL_BACKDROP, PANEL_DIALOG, metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, PanelBoundary, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, recallTextOf, recallPlanTextOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, conflictVisibleRows, rowEditable, conflictFactsOf, conflictNote } = seen;
 
 // 点会话头那颗图标必须真把浮层打开，浮层里必须是面板本体。
 updatePanel({ open: false, sessionId: '' });
@@ -506,6 +506,13 @@ assert.deepEqual(modeSwitchesOf('off').map((item) => item.on), [false, false]);
 assert.equal(modeSwitchesOf('off')[1].hint, '项目级，已关闭');
 assert.equal(recallLineOf({ reason: 'hit', cards: 1, matched: 1 }), '上次自动提醒 1 条');
 assert.equal(recallLineOf({ reason: 'hit', cards: 1, matched: 1, at: new Date(Date.now() - 120000).toISOString() }), '上次自动提醒 1 条 · 2 分钟前');
+// 回执一行要说清这一轮的判断结果：类型、档位、候选、实际投递、使用字节
+assert.equal(
+  recallTextOf({ reason: 'hit', cards: 2, matched: 12, bytes: 800, plan: { type: 'planning', tier: 'high', candidates: 12, cards: 3 } }),
+  '上次自动提醒 2 条 · 规划 · 深入 · 候选 12 · 投递 3 · 使用 800 B',
+);
+assert.equal(recallPlanTextOf({ type: 'exact_lookup', tier: 'low', candidates: 4, cards: 1 }, 380), '精确查询 · 精简 · 候选 4 · 投递 1 · 使用 380 B');
+assert.equal(recallTextOf({ reason: 'hit', cards: 1, matched: 1 }), '上次自动提醒 1 条', '没有 plan 的旧回执照旧显示');
 assert.equal(recallLineOf({ reason: 'no_overlap', at: new Date().toISOString() }), '上次没提醒，没有匹配的记忆 · 刚刚');
 assert.equal(recallLineOf({ reason: 'budget', cards: 0, matched: 2 }), '上次没提醒，2 条相关记忆，本轮自动提醒已用满');
 assert.equal(recallLineOf({ reason: 'needs_context', cards: 0, matched: 1 }), '上次没提醒，1 条相关记忆，适用条件未确认');

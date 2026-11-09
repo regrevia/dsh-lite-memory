@@ -637,6 +637,8 @@ assert.ok(receiptPlan && receiptPlan.type, '回执要带这一轮的检索类型
 assert.ok(['low', 'mid', 'high'].includes(receiptPlan.tier), '回执要带档位');
 assert.ok(receiptPlan.candidates >= receiptPlan.cards && receiptPlan.cards >= 1, '候选深度不能小于卡片数');
 assert.match(recallReceipt.body.current.recall.summary, new RegExp(receiptPlan.tier), '回执的一行摘要要包含档位');
+assert.equal(receiptPlan.dropped, 0, '没被预算挡下时丢弃数为零');
+assert.ok([400, 800, 1200].includes(recallReceipt.body.current.recall.bytes), '使用字节按档位额度记账，不是固定硬顶');
 const missTurn = await preStep({ agent: recallAgent, signal: sig1, turn: '3' }, pass('把这段视频的字幕导出来', 'h2'));
 assert.equal(missTurn.kind, 'enter');
 assert.equal(recall.text({ agent: recallAgent, signal: sig1 }), '');
@@ -1756,6 +1758,7 @@ assert.equal(tuneCross.status, 403);
 /** 生产召回与回放必须是同一条流水线：同一查询、同一参数下名次与卡片字节逐项相等。 */
 const viewMod = await import('../view.js');
 const evolveMod = await import('../evolve.js');
+const schedulerMod = await import('../scheduler.js');
 const tuneParams = { floor: 2.4, summaryWeight: 1.5 };
 const tuneQuery = '部署脚本用 bash 还是 zsh';
 const tuneRecords = [
@@ -1773,6 +1776,26 @@ assert.equal(prodRank.some((row) => row.record.id === 'm0'), false, 'archived en
 const replayCase = evolveMod.runCase({ id: 'same-pipeline', query: tuneQuery, records: tuneRecords, expectIds: [prodCards.cards[0].id], forbidIds: [] }, tuneParams);
 assert.deepEqual(replayCase.topIds, prodRank.slice(0, 3).map((row) => String(row.record.id)), 'replay top-3 matches production rank');
 assert.equal(replayCase.bytes, prodCards.bytes, 'replay card bytes match production rendered bytes');
+assert.deepEqual(
+  replayCase.deliveredIds,
+  prodCards.cards.map((card) => String(card.id)),
+  'replay delivers exactly the cards production delivers: pre-budget candidates that lost the byte gate are not hits',
+);
+// 档位额度就是这一轮的天花板：低/中/高三档各报各的字节，卡片数只能被收紧不能放宽
+const tierCases = [
+  ['unlag 端口是哪个', 'low', 400],
+  ['部署脚本用 bash 还是 zsh', 'mid', 800],
+  ['线上报错怎么排', 'high', 1200],
+];
+for (const [text, tier, bytes] of tierCases) {
+  const plan = schedulerMod.retrievalPlanOf(text);
+  assert.equal(plan.tier, tier, `「${text}」应落到 ${tier} 档`);
+  assert.equal(plan.bytes, bytes, `${tier} 档额度是 ${bytes} B`);
+  assert.ok(plan.bytes <= viewMod.CARD.bytes, '档位额度不超过投递硬顶');
+  const tighter = schedulerMod.retrievalPlanOf(text, { cardMax: 2 });
+  assert.equal(tighter.bytes, plan.bytes, '收紧卡片数不改字节额度');
+  assert.ok(tighter.cards <= plan.cards && tighter.cards === Math.min(plan.cards, 2), 'cardMax 只能收紧卡片数');
+}
 
 console.log('contract.test.mjs: all passed');
 

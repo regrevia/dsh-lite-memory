@@ -6,6 +6,7 @@ import path from 'node:path';
 process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-'));
 const store = await import('../store.js');
 const state = await import('../state.js');
+const view = await import('../view.js');
 
 const { upsert, search, readEntry, forget, undoChange, acceptCandidate, rejectCandidate,
   suggestionGate, noteSuggestion, findSuggestion, renderIndex, normalizeDraft, loadIndex,
@@ -1673,6 +1674,89 @@ test('只是标题像、正文不同：仍然排进待裁决，不替人猜', ()
   const index = loadIndex(scope);
   assert.equal(index.entries.length, 1);
   assert.equal((index.conflicts || []).length, 1);
+});
+
+
+test('撤销回旧版本会连适用范围一起还原：还原出来的条目仍要过适用性检查', () => {
+  const scope = fresh('undo-recheck');
+  const first = upsert(scope, {
+    title: '构建耗时的基线', summary: '构建要多久', when: '看构建时', kind: 'note',
+    body: '完整构建约 40 秒。', applicability: 'conditional',
+    conditions: [{ key: 'runtime', value: 'desktop' }], resolution: 'distinct',
+  });
+  const id = first.record.id;
+  upsert(scope, {
+    id, title: '构建耗时的基线', summary: '构建要多久', when: '看构建时', kind: 'note',
+    body: '完整构建约 40 秒，移动端约 90 秒。', applicability: 'conditional',
+    conditions: [{ key: 'runtime', value: 'mobile' }],
+  });
+  const undone = undoChange(scope, id);
+  assert.equal(undone.mode, 'restored');
+  const restored = readEntry(scope, id);
+  assert.match(String(restored.body || ''), /约 40 秒/);
+  assert.doesNotMatch(String(restored.body || ''), /90 秒/, '旧版本里没有的正文不能留在还原结果里');
+  assert.deepEqual(restored.conditions, [{ key: 'runtime', value: 'desktop' }], '适用范围要跟着旧版本回来');
+  assert.equal(view.eligibility(restored, { context: { runtime: 'desktop' } }, 'auto').ok, true, '条件对得上才允许自动召回');
+  assert.equal(view.eligibility(restored, { context: { runtime: 'mobile' } }, 'auto').ok, false, '还原不能绕过适用性检查');
+});
+
+test('容量腾挪不碰用户固定住的条目：先让最久没读的普通条目归档，正文保在冷存里', () => {
+  const scope = fresh('evict-pinned');
+  fs.mkdirSync(scope.dir, { recursive: true });
+  const chunk = Math.ceil(LIMITS.totalBytes / 20);
+  const entries = Array.from({ length: 20 }, (_, i) => {
+    const day = String(i + 1).padStart(2, '0');
+    return {
+      id: `mem_${String(i).padStart(12, '0')}`,
+      title: `旧条目 ${i}`,
+      summary: `第 ${i} 条`,
+      when: '',
+      kind: 'note',
+      tags: [],
+      created: `2026-01-${day}T00:00:00.000Z`,
+      updated: `2026-01-${day}T00:00:00.000Z`,
+      lastUsed: `2026-01-${day}T00:00:00.000Z`,
+      revision: 1,
+      status: 'active',
+      source: 'user_explicit',
+      hits: 0,
+      merges: 0,
+      versions: [],
+      bytes: chunk,
+      /** 最旧那条在旧库里就是固定住的：收编成新状态时这个选择不能丢。 */
+      ...(i === 0 ? { maintenance: { learning: { pinned: true, state: 'active' } } } : {}),
+    };
+  });
+  fs.writeFileSync(path.join(scope.dir, 'index.json'), JSON.stringify({
+    version: 1, scope: scope.key, entries, suggestions: [], receipts: [],
+  }));
+  fs.mkdirSync(path.join(scope.dir, 'entries'), { recursive: true });
+  for (const entry of entries) {
+    fs.writeFileSync(path.join(scope.dir, 'entries', `${entry.id}.md`), 'x'.repeat(chunk));
+  }
+  /** 读一次让旧格式收编成 v2 状态，再给最老的一条打上固定标记（只走签名事务，不手改盘上文件）。 */
+  const loaded = loadIndex(scope);
+  const oldestId = loaded.entries.reduce((a, b) => (String(a.created) <= String(b.created) ? a : b)).id;
+  assert.equal(
+    (stateOf(scope).entries[0].maintenance || {}).learning?.pinned, true,
+    '旧库收编要连固定标记一起带过来，不能悄悄变成可腾挪的普通条目',
+  );
+  const pinnedTx = state.transact(scope, {}, (draft) => {
+    const entry = draft.entries.find((row) => row.id === oldestId);
+    entry.maintenance = { ...(entry.maintenance || {}), learning: { pinned: true, state: 'active' } };
+    entry.revision = Number(entry.revision) + 1;
+    return { changed: true };
+  });
+  assert.ok(pinnedTx.archived.length >= 1, '已到字节上限，这一笔事务就要腾位置');
+  for (const item of pinnedTx.archived) {
+    assert.notEqual(item.id, oldestId, `固定住的条目不能被腾掉，实际腾了 ${item.title}`);
+  }
+  const saved = upsert(scope, { title: '新的一条', summary: '满了也要能存', body: '新正文' });
+  assert.equal(saved.record.title, '新的一条');
+  const pinnedNow = stateOf(scope).entries.find((row) => row.id === oldestId);
+  assert.equal(pinnedNow.status, 'active', '固定住的条目仍是 active');
+  const victim = stateOf(scope).entries.find((row) => row.id === pinnedTx.archived[0].id);
+  assert.equal(victim.status, 'archived');
 });
 
 console.log(`store.test.mjs: ${passed} passed`);

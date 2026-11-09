@@ -939,15 +939,17 @@ function toStateEntry(legacy, body, status) {
       links: Array.isArray(legacy.links) ? legacy.links : [],
       aliases: Array.isArray(legacy.aliases) ? legacy.aliases : [],
     },
+    /** 旧库里的维护信息要原样带过来：固定住、学习记录这些字段丢了就等于用户的选择丢了。 */
     maintenance: {
-      reviewState: 'legacy_unreviewed',
-      sourceRefs: [],
-      retiredNames: Array.isArray(legacy.aliases) ? legacy.aliases : [],
-      versions: Array.isArray(legacy.versions) ? legacy.versions : [],
-      checks: [],
-      hits: Number(legacy.hits) || 0,
-      merges: Number(legacy.merges) || 0,
-      lastUsed: legacy.lastUsed || at,
+      ...(legacy.maintenance && typeof legacy.maintenance === 'object' ? legacy.maintenance : {}),
+      reviewState: legacy.maintenance && legacy.maintenance.reviewState ? legacy.maintenance.reviewState : 'legacy_unreviewed',
+      sourceRefs: Array.isArray(legacy.maintenance && legacy.maintenance.sourceRefs) ? legacy.maintenance.sourceRefs : [],
+      retiredNames: Array.isArray(legacy.maintenance && legacy.maintenance.retiredNames) ? legacy.maintenance.retiredNames : (Array.isArray(legacy.aliases) ? legacy.aliases : []),
+      versions: Array.isArray(legacy.maintenance && legacy.maintenance.versions) ? legacy.maintenance.versions : (Array.isArray(legacy.versions) ? legacy.versions : []),
+      checks: Array.isArray(legacy.maintenance && legacy.maintenance.checks) ? legacy.maintenance.checks : [],
+      hits: Number(legacy.maintenance && legacy.maintenance.hits) || Number(legacy.hits) || 0,
+      merges: Number(legacy.maintenance && legacy.maintenance.merges) || Number(legacy.merges) || 0,
+      lastUsed: (legacy.maintenance && legacy.maintenance.lastUsed) || legacy.lastUsed || at,
     },
   };
 }
