@@ -17,10 +17,20 @@
 
 同机重跑 200 / 400 / 1000（每层）三档，数值已写回 `docs/BENCH.md`：P50 91.2 / 145.7 / 323.4 ms，P95 106.1 / 156.7 / 347.5 ms。与 10 月 31 日那组相比，1000 档 P50 +15.1 ms、P95 +20.5 ms，属于同机日内波动量级；调度定档是纯本地正则，没有新增 IO、缓存或额外扫描，本轮不据此做优化。
 
+## 回执账单与面板判断结果（`index.js` / `client.js`）
+
+- 回执 `plan` 多记一个 `dropped`：档位字节装不下、准入被拒都算淘汰，面板能说清「为什么只投了这么几条」。
+- 回执的 `bytes` 改按这一轮的档位落账（低 400 / 中 800 / 高 1200），不再统一记满 1200 B；回放与生产读同一份账单。
+- 面板回执多一行判断结果：`排障 · 深入 · 候选 12 · 投递 3 · 使用 1200 B`。只显示中文标签，不出现原始枚举和内部原因码；旧回执没有 `plan` 时只显示原来的条数，不报错。
+
+## 旧库维护信息不再丢（`state.js`）
+
+`toStateEntry` 重建条目时漏了把旧 `maintenance` 原样带过来，固定住的规则（`maintenance.learning.pinned`）在收编后会变成可腾挪的普通条目，容量腾挪时被归档。现在先整份继承旧维护信息再补默认值；`test/store.test.mjs` 补了一条回归：把修复回退即失败。
+
 ## 验证
 
 - 全量 `npm test`：35 个测试文件全过、0 失败。
 - `test/scheduler.test.mjs` 5 项通过（含新增 50 条分类回归）。
 - `test/evolve.test.mjs` 14 项、`test/evolve-consistency.test.mjs` 13 项通过。
 - `test/eval-hard.test.mjs` 8 项通过（固定负例 6 条 0 误触发），`test/evolution-read.test.mjs` 全部通过。
-- 包体未动（只改 `scheduler.js` / `evolve.js` / 测试 / 文档），`test/bundle.test.mjs` 仍是 raw 193948 B / gzip -9 48482 B / 距目标 7522 B。
+- 包体：`client.js` raw 193941 B（比基线收紧 7 B）、gzip -9 48849 B / 距 40 KiB 目标 7889 B。新增的中文标签压不进 gzip，基线显式上调 367 B 并写清原因，差额记为待还的债；同时把 7 处省略号样式收成一份共享常量。
