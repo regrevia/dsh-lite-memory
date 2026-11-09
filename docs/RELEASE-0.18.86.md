@@ -34,3 +34,12 @@
 - `test/evolve.test.mjs` 14 项、`test/evolve-consistency.test.mjs` 13 项通过。
 - `test/eval-hard.test.mjs` 8 项通过（固定负例 6 条 0 误触发），`test/evolution-read.test.mjs` 全部通过。
 - 包体：`client.js` raw 193941 B（比基线收紧 7 B）、gzip -9 48849 B / 距 40 KiB 目标 7889 B。新增的中文标签压不进 gzip，基线显式上调 367 B 并写清原因，差额记为待还的债；同时把 7 处省略号样式收成一份共享常量。
+
+## 读不到东西就一种说法（`client.js`）
+
+- 记忆、自进化、记住我三处占位各自拼一遍「加载中／失败原因／重试」，同一个状态在不同地方说成两句话，读失败时还留着空列表。收成一个 `loadingCopy`，三处共用：读取中只说读取中，读完没成功一定给原因，并一定给「重试」。
+- `load()` 成功判据从「HTTP 过了且 `body.ok` 真」改成 `succeeded(result)`：2xx 但 `ok:false` 以前被当成成功，界面停在空白列表上；现在按失败显示原因和重试。
+- 待裁决逐条处理只发这一行自己的 `scopeKey`：合并视图里选中的是「所有项目」，以前会把它当目标范围发给服务端，被 400／409 挡回来。
+- 面板里 9 处竖排字段、7 处横排一行的样式字面量收成 `COL4` / `ROW8` 两份常量。
+- 包体：`client.js` raw 193851 B、gzip -9 49180 B，距 40 KiB 目标 8220 B。原始体积比上一版小 90 B，但重复串被压缩器白吃的那部分没了、加上新的占位文案，gzip 升 331 B，基线显式上调并写清原因，差额继续记为待还的债。
+- 回归：`test/client.test.mjs` 24 项通过（含 `loadingCopy` 三种状态与失败透传）；全量 35 个测试文件 exit 0；`ui-copy-lint` 新增 0 error、`zh-lint` 0 error、`style-lint` 0 error。

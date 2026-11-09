@@ -25,6 +25,9 @@ window.__ModuleLoader__.load({
     const EMPTY = [];
     const ROW = { display: 'flex', alignItems: 'center', gap: '6px', padding: '1px 0', fontSize: '12px', lineHeight: '1.6', opacity: 0.7 };
     const DOT = { flex: '0 0 auto', opacity: 0.8 };
+    /** 面板最常见的两种排布，收掉重复字面量。 */
+    const COL4 = { display: 'flex', flexDirection: 'column', gap: '4px' };
+    const ROW8 = { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 };
     const ELLIPSIS = { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
     const KEEP_STYLE = { flex: '0 0 auto', border: '1px solid currentColor', background: 'transparent', color: 'inherit', borderRadius: '999px', padding: '0 8px', fontSize: '12px', lineHeight: '18px' };
     const KEEP_ON = { ...KEEP_STYLE, opacity: 0.9, cursor: 'pointer' };
@@ -90,6 +93,12 @@ window.__ModuleLoader__.load({
       if (result && result.body && result.body.code === 'gone') return '这条已经不在了，列表已刷新';
       return failure(result, '待裁决没处理成');
     };
+
+    /** 读不到东西时统一说法：读取中、原因、重试；三处共用。 */
+    const loadingCopy = (loading, note, fallback) => ({
+      text: loading ? '读取中…' : (note || fallback),
+      retry: loading !== true,
+    });
 
     /** 已落定、带元数据的调用块；旧行只读。 */
     const metaOf = (block) => {
@@ -576,7 +585,7 @@ window.__ModuleLoader__.load({
             href, target: '_blank', rel: 'noreferrer', style: linkStyle,
           }, text));
         }))));
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+      return h('div', { style: COL4 },
         excerpt ? h('div', { style: BODY }, h('span', { style: { opacity: 0.65 } }, '来源'), ' ', excerpt) : null,
         links(refs, '消息'),
         links(evidence, '依据'),
@@ -2039,7 +2048,7 @@ window.__ModuleLoader__.load({
       const editor = editing
         ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px', paddingTop: '2px' } },
           h(Field, { label: '标题', value: title, onChange: setTitle }),
-          h('label', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+          h('label', { style: COL4 },
             h('span', { style: PANEL_LABEL }, '经验'),
             h('textarea', {
               value: body, onChange: (event) => setBody(event.target.value), 'aria-label': '经验',
@@ -2058,7 +2067,7 @@ window.__ModuleLoader__.load({
         : null;
 
       const evidencePane = open === 'evidence'
-        ? h('div', { style: { ...PANEL_MUTED, display: 'flex', flexDirection: 'column', gap: '4px', paddingTop: '2px' } },
+        ? h('div', { style: { ...PANEL_MUTED, ...COL4, paddingTop: '2px' } },
           evidence.length === 0 && samples.length === 0
             ? '暂无学习依据'
             : [
@@ -2083,7 +2092,7 @@ window.__ModuleLoader__.load({
             ].filter(Boolean))
         : null;
       const historyPane = open === 'history'
-        ? h('div', { style: { ...PANEL_MUTED, display: 'flex', flexDirection: 'column', gap: '4px', paddingTop: '2px' } },
+        ? h('div', { style: { ...PANEL_MUTED, ...COL4, paddingTop: '2px' } },
           history.length === 0
             ? '暂无变化记录'
             : history.map((row, index) => h('div', { key: `h${index}`, style: { display: 'flex', gap: '8px' } },
@@ -2092,7 +2101,7 @@ window.__ModuleLoader__.load({
         : null;
 
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
-        h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+        h('div', { style: COL4 },
           h('div', { style: PANEL_LABEL }, '当前经验'),
           h('div', { style: { fontSize: '13px', lineHeight: '1.45', fontWeight: 600, wordBreak: 'break-word' } }, rule.title),
           h('div', { style: { fontSize: '12px', lineHeight: '1.65', whiteSpace: 'pre-wrap', wordBreak: 'break-word', opacity: 0.88 } }, rule.body || '没有正文'),
@@ -2101,7 +2110,7 @@ window.__ModuleLoader__.load({
           h('div', { style: PANEL_LABEL }, '适用范围'),
           h('div', { style: { fontSize: '12px', lineHeight: '1.55', wordBreak: 'break-word' } }, scopeLineOf(rule)),
         ),
-        h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+        h('div', { style: COL4 },
           h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
             h('span', { style: PANEL_LABEL }, '当前状态'),
             h(StagePill, { state: stageOf(rule) }),
@@ -2409,8 +2418,8 @@ window.__ModuleLoader__.load({
         : null;
       const statusText = panel
         ? (formed.length > 0 ? `已记住 ${formed.length} 条` : (enabled ? '还没有形成的偏好' : '已关闭'))
-        : (busy ? '读取中' : '');
-      const header = h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
+        : (busy ? '读取中…' : '');
+      const header = h('div', { style: ROW8 },
         h('button', {
           type: 'button', 'aria-expanded': open, 'aria-label': open ? '收起记住我' : '展开记住我',
           onClick: () => { setOpen(!open); setConfirmClear(false); },
@@ -2419,6 +2428,7 @@ window.__ModuleLoader__.load({
         h(RefChevron, { open }),
         h('span', { style: { flex: '0 0 auto', fontSize: '12px', fontWeight: 600 } }, '记住我'),
         h('span', { style: ELLIPSIS }, statusText)));
+      const personaCopy = loadingCopy(busy, failed ? note : '', '读不到记住我');
       const body = panel
         ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '7px', minWidth: 0 } },
           h('div', {
@@ -2435,9 +2445,9 @@ window.__ModuleLoader__.load({
           lastText ? h('div', { key: 'last', style: PANEL_MUTED }, lastText) : null),
           note ? h('div', { style: { ...PANEL_MUTED, wordBreak: 'break-word' } }, note) : null,
           clearLine)
-        : h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
-          h('span', { style: { ...PANEL_MUTED, minWidth: 0 } }, busy ? '读取中' : '读不到记住我'),
-          busy ? null : h(Action, { onClick: () => { setFailed(false); send({ op: 'status' }); } }, '重试'));
+        : h('div', { style: ROW8 },
+          h('span', { style: { ...PANEL_MUTED, minWidth: 0 } }, personaCopy.text),
+          personaCopy.retry ? h(Action, { onClick: () => { setFailed(false); send({ op: 'status' }); } }, '重试') : null);
       return h('section', {
         'aria-label': '记住我',
         style: {
@@ -2545,7 +2555,8 @@ window.__ModuleLoader__.load({
         return post('/lite-memory/overview', { sessionId, scopeKey }).then((result) => {
           if (!alive.current || generation.current !== request) return;
           setLoading(false);
-          if (result.ok && result.body && result.body.ok) {
+          /** 2xx 也可能 ok:false，按失败显示并给重试。 */
+          if (succeeded(result)) {
             const next = result.body;
             const nextKey = next.selected && next.selected.key ? next.selected.key : '';
             if (scopeRef.current !== nextKey) {
@@ -2575,7 +2586,9 @@ window.__ModuleLoader__.load({
         if (!row || busy) return;
         setBusy(true);
         setNote('');
-        const payload = { sessionId, scopeKey: row && row.scopeKey ? row.scopeKey : selectedKey, conflictId: row.id, op };
+        /** 合并视图里「所有项目」不是目标范围。 */
+        const rowScope = row && row.scopeKey ? row.scopeKey : (selectedKey === 'all' ? '' : selectedKey);
+        const payload = { sessionId, scopeKey: rowScope, conflictId: row.id, op };
         /** 丢掉不需要版本，老队列里的行也没有版本，硬塞 null 会被服务端当非法值。 */
         if (Number.isInteger(row.revision)) payload.expectedRevision = row.revision;
         post('/lite-memory/conflict', payload).then((result) => {
@@ -3021,7 +3034,7 @@ window.__ModuleLoader__.load({
       const switchItem = (label, hint, on, disabled, onClick) => h('div', {
         style: { display: 'flex', flexDirection: 'column', gap: '1px', minWidth: 0, opacity: disabled && !on ? 0.55 : 1 },
       },
-      h('span', { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
+      h('span', { style: ROW8 },
         h('span', { style: { fontSize: '12px', lineHeight: '20px', fontWeight: 600, whiteSpace: 'nowrap' } }, label),
         h(Toggle, { ariaLabel: label, on, busy: busy || disabled, onClick: disabled ? undefined : onClick }),
       ),
@@ -3029,19 +3042,19 @@ window.__ModuleLoader__.load({
       const evolutionOn = Boolean(memoryOn && evolution && evolution.enabled === true);
       const recallLine = recallLineOf(current && current.recall);
       const settingsTab = h('div', { role: 'tabpanel', 'aria-label': '设置', style: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: '14px', overflowY: 'auto' } },
-        h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+        h('div', { style: COL4 },
           h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: '20px', flexWrap: 'wrap' } },
             globalView ? h('div', { style: { ...PANEL_MUTED, lineHeight: '20px' } }, '全局记忆只读，可移回项目') : modeSwitches(),
             switchItem('自进化', evolutionOn ? '实验功能，会增加 token 消耗' : '从反馈里整理经验', evolutionOn, busy || !evolution || !canToggle || !memoryOn, toggleEvolution), // ui-copy-ignore 用户指定文案
             switchItem('记住我', personaOn === true ? '用户级，关掉后不再了解你' : '用户级，默认关闭', personaOn === true, busy || !canToggle, togglePersona))),
-        h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+        h('div', { style: COL4 },
           h('span', { style: { fontSize: '12px', fontWeight: 600 } }, '显示'),
           displayToggle('启用图谱', 'graph'),
           displayToggle('启用记忆宫殿', 'palace'),
           explainToggle()),
         !globalView && tune
-          ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
-            h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
+          ? h('div', { style: COL4 },
+            h('div', { style: ROW8 },
               h('span', { style: { fontSize: '12px', fontWeight: 600 } }, '排序调参'),
               h('span', { style: { ...ELLIPSIS, flex: 1 } },
                 tune.replayCases > 0
@@ -3106,7 +3119,7 @@ window.__ModuleLoader__.load({
       const memoryEditor = editingMemory && detailRecord
         ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } },
           h(Field, { label: '标题', value: editTitle, onChange: setEditTitle }),
-          h('label', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+          h('label', { style: COL4 },
             h('span', { style: PANEL_LABEL }, '经验'),
             h('textarea', {
               value: editBody, onChange: (event) => setEditBody(event.target.value), 'aria-label': '经验',
@@ -3201,7 +3214,7 @@ window.__ModuleLoader__.load({
       const conflictBar = queued.length === 0 ? null : h('div', {
         style: { display: 'flex', flexDirection: 'column', gap: '3px', padding: '7px 9px 8px', borderBottom: '1px solid var(--dsw-alias-border-l1)', flex: '0 0 auto' },
       },
-      h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
+      h('div', { style: ROW8 },
         h('span', { style: { ...PANEL_MUTED, lineHeight: '18px', flex: 1, minWidth: 0 } }, `${queued.length} 条保存还没定${memoryOn ? '' : ' · 只读'}`),
         queued.length > 2 ? h(Action, { disabled: busy, onClick: () => setConflictAll((value) => !value) }, conflictAll ? '收起' : `查看全部 ${queued.length} 条`) : null,
       ),
@@ -3213,7 +3226,7 @@ window.__ModuleLoader__.load({
           key: row.id || row.title,
           style: { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 },
         },
-        h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
+        h('div', { style: ROW8 },
           h('button', {
             type: 'button',
             'aria-expanded': open,
@@ -3350,10 +3363,11 @@ window.__ModuleLoader__.load({
         }));
 
       const evolutionReady = selectedKey === currentKey;
+      const evolutionCopy = loadingCopy(!evolutionReady && loading, note, '读不到自进化状态');
       const evolutionFailed = !evolutionReady || failed
         ? h('div', { style: { ...PANEL_CARD, padding: '9px 11px', display: 'flex', alignItems: 'center', gap: '8px', flex: '0 0 auto' } },
-          h('span', { style: { ...PANEL_MUTED, minWidth: 0 } }, !evolutionReady && loading ? '读取中…' : (note || '读不到自进化状态')),
-          !evolutionReady && loading ? null : h(Action, { onClick: () => load(currentKey) }, '重试'),
+          h('span', { style: { ...PANEL_MUTED, minWidth: 0 } }, evolutionCopy.text),
+          evolutionCopy.retry ? h(Action, { onClick: () => load(currentKey) }, '重试') : null,
         )
         : null;
       const evolutionDetailPane = selectedRuleRow
@@ -3444,12 +3458,12 @@ window.__ModuleLoader__.load({
 
       if (!sessionId) return null;
       if (!data) {
+        const emptyCopy = loadingCopy(loading, failed ? note : '', '读不到记忆');
         return shell([
           header,
           h('div', { style: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '10px', color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' } },
-            h('span', null, loading ? '读取中…' : '读不到记忆'),
-            loading || !note ? null : h(Action, { onClick: () => load() }, '重试'),
-            note ? h('span', null, note) : null,
+            h('span', null, emptyCopy.text),
+            emptyCopy.retry ? h(Action, { onClick: () => load() }, '重试') : null,
           ),
         ]);
       }
@@ -3557,7 +3571,7 @@ window.__ModuleLoader__.load({
 
     // 测试缝：Node 里验引用投影，浏览器里没有任何副作用。
     if (typeof globalThis.__LITE_MEMORY_TEST__ === 'function') {
-      globalThis.__LITE_MEMORY_TEST__({ panelUi, updatePanel, usePanelUi, ProjectEvolution, MemoryOverlay, PANEL_BACKDROP, PANEL_DIALOG, metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, PanelBoundary, PersonaSection, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceHashOf, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, recallTextOf, recallPlanTextOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row, conflictVisibleRows, rowEditable, conflictFactsOf, conflictNote });
+      globalThis.__LITE_MEMORY_TEST__({ panelUi, updatePanel, usePanelUi, ProjectEvolution, MemoryOverlay, PANEL_BACKDROP, PANEL_DIALOG, metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, PanelBoundary, PersonaSection, MemoryGraph, MemoryPalace, TurnMemory, RefSection, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceHashOf, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, recallTextOf, recallPlanTextOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, Row, conflictVisibleRows, rowEditable, conflictFactsOf, conflictNote, loadingCopy });
     }
 
     return {

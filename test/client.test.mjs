@@ -29,7 +29,7 @@ assert.equal(panel.name, 'shell.overlay');
 assert.equal(panel.order, 30);
 
 const EMPTY_CHILDREN = [];
-const { panelUi, updatePanel, ProjectEvolution, MemoryOverlay, PANEL_BACKDROP, PANEL_DIALOG, metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, PanelBoundary, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, recallTextOf, recallPlanTextOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, conflictVisibleRows, rowEditable, conflictFactsOf, conflictNote } = seen;
+const { panelUi, updatePanel, ProjectEvolution, MemoryOverlay, PANEL_BACKDROP, PANEL_DIALOG, metaOf, citationOf, citationsOfMeta, citationsOfTurn, dedupe, undoRefOf, graphOf, ruleGraphOf, processingStatusOf, currentBodyOf, historyDiffsOf, MemoryPanel, MemoryGraph, PanelBoundary, displayKeyOf, readDisplaySettings, writeDisplaySettings, graphViewOf, viewModeOf, viewPaneOf, filterRecords, projectionOf, failureStateOf, evidenceTextOf, evidenceMetaOf, MemoryPalace, palaceRoomsOf, palaceRoomPageOf, palaceSlotCountOf, palacePageWindow, palaceToggleOf, palaceMotionOf, palaceRoomIdOf, PALACE_DOOR_LANES, palaceDoorSlotOf, palaceCorridorOf, palacePageAtOf, palacePageWithOf, PalaceNiche, TurnMemory, refMetaOf, explainKeyOf, explainModeOf, setExplainMode, recallLineOf, recallTextOf, recallPlanTextOf, modeSwitchesOf, agoLabel, checkupOf, refSectionRowsOf, refDetailTitleOf, versionLine, titleCountsOf, rowKeyOf, rowKeepFlags, conflictVisibleRows, rowEditable, conflictFactsOf, conflictNote, loadingCopy } = seen;
 
 // 点会话头那颗图标必须真把浮层打开，浮层里必须是面板本体。
 updatePanel({ open: false, sessionId: '' });
@@ -572,3 +572,9 @@ assert.equal(rowEditable(false, false, { scopeKey: 'project' }, 'project'), fals
 assert.equal(conflictNote('drop', { ok: false, status: 409, body: { ok: false, code: 'gone' } }), '这条已经不在了，列表已刷新');
 assert.equal(conflictNote('drop', { ok: false, status: 409, body: { ok: false, reason: '队列里没有这一条' } }), '队列里没有这一条');
 assert.equal(conflictNote('drop', { ok: false, status: 0, body: null }), '待裁决没处理成');
+
+// 三处读不到东西共用一套说法：读取中、失败原因、重试；读完了就一定给重试。
+assert.deepEqual(loadingCopy(true, '', '读不到记忆'), { text: '读取中…', retry: false });
+assert.deepEqual(loadingCopy(false, '服务端说要先确认项目根', '读不到记忆'), { text: '服务端说要先确认项目根', retry: true });
+assert.deepEqual(loadingCopy(false, '', '读不到自进化状态'), { text: '读不到自进化状态', retry: true });
+assert.deepEqual(loadingCopy(false, '', '读不到记住我'), { text: '读不到记住我', retry: true });
