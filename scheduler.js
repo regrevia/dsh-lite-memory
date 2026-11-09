@@ -24,10 +24,10 @@ const TYPE_TIER = {
 
 /** 有先后顺序：越具体、越影响下一步的意图排越前，宽泛的词不能盖住明确的任务。 */
 const TASK_RULES = [
-  ['troubleshooting', /报错|错误|失败|崩了|崩溃|闪退|卡死|白屏|超时|不生效|没反应|怎么回事|排查|定位|\b(error|failed|failure|crash|exception|timeout|broken|bug)\b/i],
+  ['troubleshooting', /报错|错误|失败|崩了|崩溃|闪退|卡死|白屏|超时|不生效|没反应|怎么回事|排查|定位|\b(error|errors|failed|failure|crash(?:es|ed|ing)?|exception|timeout|broken|bug|bugs)\b/i],
   ['exact_lookup', /是哪个|哪个文件|哪一条|在哪里|在哪|路径|版本号|叫什么|多少|上次|之前说|还记得|查一下|\b(where|which|what version|path|previous|last time)\b/i],
-  ['planning', /方案|规划|计划|设计|重构|架构|下一阶段|路线|取舍|怎么选|评估|\b(plan|design|architecture|refactor|roadmap|trade-?off)\b/i],
-  ['generation', /写一段|写个|生成|起草|文案|总结|翻译|改写|润色|\b(write|draft|generat|summar|translat|rewrit|copy)/i],
+  ['planning', /方案|规划|计划|设计|重构|架构|下一阶段|路线|取舍|怎么选|评估|\b(plans?|planning|design(?:s|ed|ing)?|architectures?|refactor(?:s|ed|ing)?|roadmaps?|trade-?offs?)\b/i],
+  ['generation', /写一段|写个|生成|起草|文案|总结|翻译|改写|润色|\b(copy|draft(?:s|ed|ing)?|writ(?:e|es|ten|ing)|generat(?:e|es|ed|ing|ion)|summar(?:y|ies|ize|izes|ized|izing|ise|ises|ised|ising)|translat(?:e|es|ed|ing|ion)|rewrit(?:e|es|ten|ing))\b/i],
   ['procedure', /发布|发版|上线|部署|安装|升级|迁移|打包|提交|回滚|配置|接入|接入流程|步骤|\b(release|publish|deploy|install|migrat|rollback|setup|config)/i],
 ];
 

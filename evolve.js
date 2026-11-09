@@ -11,6 +11,7 @@
 import { createHash } from 'node:crypto';
 
 import { CARD, recallCards, recallRank } from './view.js';
+import { retrievalPlanOf } from './scheduler.js';
 
 export const EVOLVE_VERSION = 1;
 
@@ -117,8 +118,12 @@ export function runCase(item, params) {
   const candidateIds = top.map((row) => String(row.record.id));
   const expectIds = (Array.isArray(item && item.expectIds) ? item.expectIds : []).map(String);
   const forbidIds = (Array.isArray(item && item.forbidIds) ? item.forbidIds : []).map(String);
-  /** 卡片字节也走生产那套「按最终渲染行计费」，不再拿内存对象估个近似值。 */
-  const cards = recallCards(top, { max: CARD.max, bytes: CARD.bytes });
+  /** 装箱与生产同源：先按这一轮的话定档，卡片数/字节都收在档位额度内；上限仍是投递端硬顶。 */
+  const plan = retrievalPlanOf(String(item && item.query ? item.query : ''));
+  const cards = recallCards(top, {
+    max: Math.min(CARD.max, plan.cards),
+    bytes: Math.min(CARD.bytes, plan.bytes),
+  });
   const delivered = new Set(cards.cards.map((card) => String(card.id)));
   const deliveredIds = candidateIds.filter((id) => delivered.has(id));
   const budgetDropped = candidateIds.filter((id) => !delivered.has(id));

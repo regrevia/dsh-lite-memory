@@ -40,3 +40,61 @@ test('卡片上限由投递端封住：低档也不会超过调用方给的上�
   assert.equal(plan.cards, 2);
   assert.equal(scheduler.planSummaryOf(plan), 'troubleshooting · high · 候选 12 · 卡片 2');
 });
+
+test('50 条分类回归：词形、否定与新任务边界都钉住', () => {
+  const cases = [
+  ['这个崩溃怎么排查', 'troubleshooting'],
+  ['报错日志怎么看', 'troubleshooting'],
+  ['npm install 报错 EACCES 怎么办', 'troubleshooting'],
+  ['页面白屏了怎么回事', 'troubleshooting'],
+  ['接口超时不生效', 'troubleshooting'],
+  ['test failed 怎么定位', 'troubleshooting'],
+  ['exception thrown on boot', 'troubleshooting'],
+  ['app crashes on start', 'troubleshooting'],
+  ['build broken after upgrade', 'troubleshooting'],
+  ['上次那个端口是哪个', 'exact_lookup'],
+  ['配置文件在哪', 'exact_lookup'],
+  ['版本号是多少', 'exact_lookup'],
+  ['还记得我说的路径吗', 'exact_lookup'],
+  ['where is the config', 'exact_lookup'],
+  ['which file has the token', 'exact_lookup'],
+  ['what version shipped', 'exact_lookup'],
+  ['下一版重构方案怎么取舍', 'planning'],
+  ['规划一下下一阶段路线', 'planning'],
+  ['架构设计如何评估', 'planning'],
+  ['planning next release', 'planning'],
+  ['refactoring the scheduler', 'planning'],
+  ['trade-off 怎么选', 'planning'],
+  ['写一段发版说明', 'generation'],
+  ['生成一份总结', 'generation'],
+  ['翻译这段', 'generation'],
+  ['起草文案', 'generation'],
+  ['summarize this', 'generation'],
+  ['write a draft', 'generation'],
+  ['draft the release note', 'generation'],
+  ['改写这段文案', 'generation'],
+  ['继续', 'continuation'],
+  ['接着做', 'continuation'],
+  ['然后呢', 'continuation'],
+  ['继续做刚才那一步', 'continuation'],
+  ['', 'general'],
+  ['今天几点开会', 'general'],
+  ['copyright 声明怎么写', 'general'],
+  ['随便聊聊', 'general'],
+  ['天气怎么样', 'general'],
+  ['帮我发版', 'procedure'],
+  ['部署到测试环境', 'procedure'],
+  ['安装依赖', 'procedure'],
+  ['回滚到上一个版本', 'procedure'],
+  ['接入流程是什么', 'procedure'],
+  ['deploy to staging', 'procedure'],
+  ['这个 bug 什么时候修', 'troubleshooting'],
+  ['端口是哪个', 'exact_lookup'],
+  ['怎么选型', 'planning'],
+  ['回滚', 'procedure'],
+  ['写个说明', 'generation'],
+  ];
+  for (const [query, want] of cases) {
+    assert.equal(scheduler.queryTypeOf(query), want, `分类不符：${JSON.stringify(query)}`);
+  }
+});
