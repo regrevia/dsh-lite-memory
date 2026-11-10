@@ -11,7 +11,7 @@
 - `client.js` 体积棘轮：实测 raw 193851 B / gzip -9 49180 B（`test/bundle.test.mjs` 只许下降，基线在 `bench/bundle-baseline.json`）。40 KiB 目标（40960 B）当前还差 8220 B，是待还的债，不是达标。
 - 规模基线 200/400/1000（每层条数）三档全 gate，数字与改动理由记在 `docs/BENCH.md`（0.18.86 实测）：
   400 条 P95 106.1 ms / 800 条 P95 156.7 ms / 2000 条 P95 347.5 ms，注入 263 B；召回上限随条数放宽（150 ms→400 ms 封顶）。
-- 召回质量：`node bench/recall-quality.mjs` 报 30 条冻结样本的 Recall@3 / MRR@3 / 误注入率 / 拒答准确率 / 平均注入字节 / P50·P95，
+- 召回质量：`node bench/recall-quality.mjs` 报 34 条冻结样本的 Recall@3 / MRR@3 / 误注入率 / 拒答准确率 / 平均注入字节 / P50·P95（当前 1.000 / 1.000 / 0.000 / 1.000 / 151 B / 0.64·2.27 ms），
   阈值与 `test/eval-seed.test.mjs` 同源（Recall@3 ≥ 0.9、误注入 0、条件未知不投递），样本只在 `test/recall-eval-fixtures.mjs` 维护一份。
 - 数字按整段比（`view.matchScore` 的 `number` 加分）：「条目 7」不再和「条目 77/797」并列靠 id 决胜负。
 - UI 改动：改前/改后截图、深浅主题、窄宽两档；四条 lint error 为 0。

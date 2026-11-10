@@ -508,7 +508,18 @@ export function matchScore(record, query, corpus = null, params = {}) {
     .map((text) => plain(text, 400).toLowerCase()).filter(Boolean).join('\n');
   const matchedContent = distinctContent.filter((word) => wholeText.includes(word)).length;
   const enoughContent = distinctContent.length < 2 || matchedContent >= 2;
-  if (!enoughContent) {
+  /** 标题里三字以上连着出现，比「两个实词各沾一个」更像在说同一件事。 */
+  const strongRun = longestRun(record.title, raw) >= 3;
+  /** 只落在少数记忆里的实词（「推送」），命中标题就是强证据，不必再凑第二个实词。 */
+  const rareIn = (text) => {
+    if (!text || !corpus || !corpus.total) return false;
+    const pool = plain(text, 400).toLowerCase();
+    return distinctContent.some((word) => pool.includes(word)
+      && (corpus.df.get(word) || 0) === 1);
+  };
+  const rareTitleHit = rareIn(record.title) || (record.aliases || []).some((name) => rareIn(name))
+    || (record.tags || []).some((tag) => rareIn(tag)) || (record.triggers || []).some((trigger) => rareIn(trigger));
+  if (!enoughContent && !strongRun && !rareTitleHit) {
     keywordWords.clear();
     titleWords.clear();
   }

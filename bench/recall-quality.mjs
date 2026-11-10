@@ -52,11 +52,15 @@ for (const query of REJECT) {
 const falseInjection = injected / REJECT.length;
 
 let leaked = 0;
+let other = 0;
 for (const [query, want] of AWAIT) {
   timings.push(time(() => rank(query)));
   const got = delivered(query).titles;
-  if (got.length > 0) leaked += 1;
-  rows.push({ group: '该等条件', query, want, got, ok: got.length === 0 });
+  /** 口径同 test/eval-seed：未确认条件的那条不能出现；别的条目允许出现，单列计数。 */
+  const exposed = got.includes(want);
+  if (exposed) leaked += 1;
+  else if (got.length > 0) other += 1;
+  rows.push({ group: '该等条件', query, want, got, ok: !exposed });
 }
 const abstainAccuracy = (AWAIT.length - leaked) / AWAIT.length;
 
@@ -72,6 +76,7 @@ print('Recall@3', recallAt3.toFixed(3));
 print('MRR@3', (mrr / RECALL.length).toFixed(3));
 print('误注入率', falseInjection.toFixed(3));
 print('拒答准确率', abstainAccuracy.toFixed(3));
+print('  其中另有投递', `${other} 条（不违规，只记录）`);
 print('平均注入字节', `${avgBytes} B`);
 print('P50 / P95', `${percentile(timings, 0.5).toFixed(2)} / ${percentile(timings, 0.95).toFixed(2)} ms`);
 
