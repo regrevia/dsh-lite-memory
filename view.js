@@ -616,7 +616,7 @@ export function rank(records, query, options = {}) {
     for (const word of seen) corpus.df.set(word, (corpus.df.get(word) || 0) + 1);
   }
   for (const record of records || []) {
-    if (!record || record.status === 'archived') continue;
+    if (!record || lifecycleStatusOf(record, options.now || Date.now())) continue;
     if (options.requireApplicable && record.reviewState === 'legacy_unreviewed') continue;
     let status;
     if (options.runtime) {

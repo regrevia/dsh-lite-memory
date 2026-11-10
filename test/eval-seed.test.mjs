@@ -22,18 +22,18 @@ const test = (name, fn) => {
   console.log(`eval: ${name}`);
 };
 
-test('该召回的 10 条都进前三', () => {
+test(`该召回的 ${RECALL.length} 条都进前三`, () => {
   const missed = RECALL.filter(([query, want]) => !rank(query).slice(0, 3).some((row) => titleOf(row) === want));
   const recallAt3 = (RECALL.length - missed.length) / RECALL.length;
   assert.ok(recallAt3 >= 0.9, `Recall@3 ${recallAt3}；漏了：${missed.map((row) => row[0]).join('、')}`);
 });
 
-test('该拒绝的 10 条一条都不出现', () => {
+test(`该拒绝的 ${REJECT.length} 条一条都不出现`, () => {
   const leaked = REJECT.filter((query) => rank(query).length > 0);
   assert.equal(leaked.length, 0, `误触发：${leaked.join('、')}`);
 });
 
-test('条件未确认的 10 条不会当作已适用出现', () => {
+test(`条件未确认的 ${AWAIT.length} 条不会当作已适用出现`, () => {
   const exposed = AWAIT.filter(([query, want]) => rank(query).some((row) => titleOf(row) === want));
   assert.equal(exposed.length, 0, `条件未知却进了上下文：${exposed.map((row) => row[0]).join('、')}`);
 });
