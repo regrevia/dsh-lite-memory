@@ -9,6 +9,7 @@ import path from 'node:path';
 
 process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'lite-memory-rq-'));
 const view = await import('../view.js');
+const evolve = await import('../evolve.js');
 const { MEM, RECALL, REJECT, AWAIT } = await import('../test/recall-eval-fixtures.mjs');
 
 const titleOf = (row) => row.record.title;
@@ -71,6 +72,30 @@ for (const [query] of RECALL) {
 const avgBytes = bytesList.length ? Math.round(bytesList.reduce((a, b) => a + b, 0) / bytesList.length) : 0;
 
 const print = (label, value) => console.log(`${label.padEnd(18, ' ')} ${value}`);
+/**
+ * 阈值档位对照：只量不采纳。自进化只能在白名单档位里走一格，
+ * 这里把整张档位表放到同一批冻结样本上跑一遍，看「调阈值到底有没有用」。
+ */
+const grid = [];
+for (const floor of evolve.PARAM_SPACE.floor) {
+  for (const summaryWeight of evolve.PARAM_SPACE.summaryWeight) {
+    const params = { floor, summaryWeight };
+    let gHit = 0;
+    let gMrr = 0;
+    for (const [query, want] of RECALL) {
+      const found = view.rank(MEM, query, { limit: 3, requireApplicable: true, context: {}, params }).map(titleOf);
+      const at = found.indexOf(want);
+      if (at >= 0) { gHit += 1; gMrr += 1 / (at + 1); }
+    }
+    let gLeak = 0;
+    for (const query of AWAIT) {
+      const got = view.selectCards(view.rank(MEM, query, { limit: 12, requireApplicable: true, context: {}, params }).map((row) => row.record), {}).cards;
+      if (got.length > 0) gLeak += 1;
+    }
+    grid.push({ floor, summaryWeight, recallAt3: +(gHit / RECALL.length).toFixed(3), mrr: +(gMrr / RECALL.length).toFixed(3), awaitLeak: gLeak });
+  }
+}
+
 console.log(`样本 ${MEM.length} 条记忆，${RECALL.length + REJECT.length + AWAIT.length} 条查询（该召回 ${RECALL.length} / 该拒绝 ${REJECT.length} / 该等条件 ${AWAIT.length}）`);
 print('Recall@3', recallAt3.toFixed(3));
 print('MRR@3', (mrr / RECALL.length).toFixed(3));
@@ -78,6 +103,11 @@ print('误注入率', falseInjection.toFixed(3));
 print('拒答准确率', abstainAccuracy.toFixed(3));
 print('  其中另有投递', `${other} 条（不违规，只记录）`);
 print('平均注入字节', `${avgBytes} B`);
+print('--- 阈值档位对照（只量不采纳）---');
+for (const row of grid) {
+  const mark = row.floor === evolve.DEFAULT_PARAMS.floor && row.summaryWeight === evolve.DEFAULT_PARAMS.summaryWeight ? ' ← 现行' : '';
+  print(`${row.floor}/${row.summaryWeight}`, `Recall@3 ${row.recallAt3.toFixed(3)} · MRR@3 ${row.mrr.toFixed(3)} · 未知条件自动投递 ${row.awaitLeak}${mark}`);
+}
 print('P50 / P95', `${percentile(timings, 0.5).toFixed(2)} / ${percentile(timings, 0.95).toFixed(2)} ms`);
 
 const wrong = rows.filter((row) => !row.ok);
