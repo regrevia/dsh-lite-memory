@@ -31,7 +31,7 @@
 
 ## 验证
 
-- `lifeguard_check /Users/apple/Desktop/DSH/dsh-lite-memory` → 预检通过，0 条；
+- `lifeguard_check .` → 预检通过，0 条；
 - `npm test` 全绿（含 `bench/bundle.test.mjs`、`client.test.mjs` 24 项、`eval-hard` 8 项）；
 - `node --check client.js` 通过。
 
