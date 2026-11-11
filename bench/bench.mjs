@@ -58,6 +58,7 @@ async function main() {
   };
   const rss = () => Math.round(process.memoryUsage().rss / (1024 * 1024) * 10) / 10;
 
+  const view = await import('../view.js');
   const report = { node: process.version, platform: `${process.platform}/${process.arch}`, limits: store.LIMITS };
   const started = Date.now();
 
@@ -97,6 +98,40 @@ async function main() {
     global: store.loadIndex(store.globalScope()).entries.length,
   };
   report.rssAfterSeedMB = rss();
+
+  /**
+   * 端到端 prepare 的构成：同一份种子数据上分段量，回答「347 ms 花在哪」。
+   * 只读或记账写盘，不改判定；数字和 docs/BENCH.md 的规模表是同一口径。
+   */
+  const phase = (fn, runs = 20) => {
+    fn();
+    const out = [];
+    for (let i = 0; i < runs; i += 1) {
+      const t = process.hrtime.bigint();
+      fn();
+      out.push(Number(process.hrtime.bigint() - t) / 1e6);
+    }
+    out.sort((a, b) => a - b);
+    return {
+      p50: Math.round(out[Math.floor(out.length / 2)] * 10) / 10,
+      p95: Math.round(out[Math.ceil(out.length * 0.95) - 1] * 10) / 10,
+    };
+  };
+  const liveOf = (source) => store.loadIndex(source).entries
+    .filter((item) => item && item.title && item.status !== 'archived' && !view.lifecycleStatusOf(item));
+  const someId = (liveOf(store.scopeOf(cwd))[0] || {}).id;
+  report.phases = {
+    loadIndexBothLayers: phase(() => { store.loadIndex(store.scopeOf(cwd)); store.loadIndex(store.globalScope()); }),
+    resolveTopics: phase(() => view.resolveTopics(liveOf(store.scopeOf(cwd)), liveOf(store.globalScope()), {})),
+    recallRank: phase(() => {
+      const project = liveOf(store.scopeOf(cwd));
+      const global = liveOf(store.globalScope());
+      const records = [...view.resolveTopics(project, global, {}).values()]
+        .filter((group) => group.status === 'ok' && group.record).map((group) => group.record);
+      return view.recallRank(records, `项目条目 ${N >> 1} 的发布顺序是什么`, { limit: 8, requireApplicable: true, context: {} });
+    }, 10),
+    markUsed: someId ? phase(() => { try { store.markUsed(store.scopeOf(cwd), [someId]); } catch { /* usage 是尽力而为 */ } }, 5) : null,
+  };
 
   // Hot retrieval path: pre-step prepare + prompt context read, 120 runs.
   const preStep = subscriptions.get('agent/pre-step');
