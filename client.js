@@ -3172,10 +3172,10 @@ window.__ModuleLoader__.load({
                       setEditingMemory(true);
                     },
                   }, '修改'),
+                  memoryOn && (globalView || canManage)
+                    ? h(Action, { disabled: busy, onClick: () => moveMemory(detailRecord) }, selectedKey === 'global' ? '移回项目' : '移到全局')
+                    : null,
                 )
-                : null,
-              !editingMemory && detailRecord && memoryOn && (globalView || canManage)
-                ? h(Action, { disabled: busy, onClick: () => moveMemory(detailRecord) }, selectedKey === 'global' ? '移回项目' : '移到全局')
                 : null,
             )
             : h('div', { style: PANEL_MUTED }, detailNote || '读取中…'),
@@ -3256,7 +3256,7 @@ window.__ModuleLoader__.load({
       }));
       const memoryListPane = h('div', {
         style: {
-          ...PANEL_CARD, padding: '2px 4px', minHeight: 0, overflowY: 'auto',
+          ...PANEL_CARD, padding: '2px 4px', minHeight: 0, overflowY: 'auto', flex: 1,
           display: 'flex', flexDirection: 'column', gap: 0,
         },
       }, conflictBar, memoryList);
@@ -3285,6 +3285,7 @@ window.__ModuleLoader__.load({
           style: {
             flex: 1, minHeight: 0, display: 'grid', gap: '10px',
             gridTemplateColumns: selectedMemory ? 'minmax(0, 1fr) minmax(280px, 340px)' : 'minmax(0, 1fr)',
+            gridTemplateRows: 'minmax(0, 1fr)',
           },
         },
         h('div', { style: { position: 'relative', minWidth: 0, minHeight: 0, display: 'flex' } },
@@ -3309,8 +3310,8 @@ window.__ModuleLoader__.load({
               })),
             list: () => h('div', { style: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, width: '100%' } }, memoryListPane),
           })),
-        h(PersonaSection, { key: 'persona', sessionId, personaOn }),
         memoryDetail),
+        h(PersonaSection, { key: 'persona', sessionId, personaOn }),
       );
 
       const stageFilters = [
@@ -3416,6 +3417,7 @@ window.__ModuleLoader__.load({
           style: {
             flex: 1, minHeight: 0, display: 'grid', gap: '10px',
             gridTemplateColumns: !checkup && selectedRuleRow ? 'minmax(0, 1fr) minmax(280px, 340px)' : 'minmax(0, 1fr)',
+            gridTemplateRows: 'minmax(0, 1fr)',
           },
         },
         checkup ? evolutionCheckupPane : viewPaneOf(evolutionViewActive, {
