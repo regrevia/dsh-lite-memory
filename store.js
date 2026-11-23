@@ -1958,60 +1958,6 @@ export function undoChange(scope, id, options = {}) {
   });
 }
 
-/**
- * 按 id 在所有已知层里找：界面上的引用是历史事实，当前正文可能已经不在原来那层了。
- * 只读，不做任何写回；找不到就返回 null，调用方据此显示「已失效」。
- */
-export function findAnywhere(id) {
-  if (!/^mem_[a-z0-9]{6,}$/.test(String(id || ''))) return null;
-  let names;
-  try {
-    names = fs.readdirSync(memoryRoot(), { withFileTypes: true });
-  } catch {
-    return null;
-  }
-  for (const dirent of names) {
-    if (!dirent.isDirectory()) continue;
-    const scope = {
-      key: dirent.name,
-      dir: path.join(memoryRoot(), dirent.name),
-      cwd: '',
-      requestedCwd: '',
-      rootSource: 'scan',
-      confirmed: true,
-    };
-    if (!fs.existsSync(path.join(scope.dir, 'state.json'))) continue;
-    let index;
-    try {
-      index = loadIndex(scope);
-    } catch {
-      continue;
-    }
-    const record = index.entries.find((item) => item.id === id);
-    const archived = record ? null : index.archived.find((item) => item.id === id);
-    if (!record && !archived) continue;
-    let body = '';
-    try {
-      body = readBody(scope, id) || '';
-    } catch {
-      body = '';
-    }
-    const current = record || archived;
-    return {
-      id,
-      title: current.title || '',
-      when: current.when || '',
-      scope: scope.key === 'global' ? 'global' : 'project',
-      scopeKey: scope.key,
-      scopeLabel: scope.key === 'global' ? '全局' : path.basename(index.cwd || '') || scope.key,
-      revision: current.revision || 1,
-      status: archived ? 'archived' : 'ok',
-      body,
-    };
-  }
-  return null;
-}
-
 /** 运行时只允许当前项目和全局层：别的项目仅供人类管理面只读枚举。 */
 export function runtimeLayers(scope) {
   const out = [];
