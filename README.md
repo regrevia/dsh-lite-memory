@@ -128,7 +128,18 @@ Off by default, per project only. When enabled it distills a few project rules f
 
 Plugin Manager 里搜 `dsh-lite-memory` 直接装；或 `npm pack` 后用 Plugin Manager 安装生成的 `.tgz`。
 
-开发中要装本机改动，用本地路径依赖而不是改 `node_modules`：profile 的 `package.json` 里写 `"dsh-lite-memory": "file:/绝对路径/dsh-lite-memory"`，经 Plugin Manager 重新安装后 `node_modules/dsh-lite-memory` 会指向该目录。
+开发中要装本机改动，用本地路径依赖而不是改 `node_modules`：profile 的 `package.json` 里写 `"dsh-lite-memory": "file:/绝对路径/dsh-lite-memory"`，再经 Plugin Manager 重新安装。
+
+装完确认跑的是哪一份，别信目录名——`profiles/<名字>/plugins/<包名>` 是旧布局的残留，profile 的 `cordis.yml` 已经不引用它，里面可能停在几个月前的版本。以 `node_modules/<包名>` 为准，逐个文件比 md5：
+
+```bash
+R=/Users/apple/DSH-repo/dsh-lite-memory
+cd ~/.dsh/profiles/desktop/node_modules/dsh-lite-memory
+for f in $(ls *.js 2>/dev/null); do
+  [ "$(md5 -q "$f")" = "$(GIT_CONFIG_COUNT=0 git -C "$R" cat-file -p "HEAD:$f" | md5 -q)" ] || echo "DIFF $f"
+done
+# 装好的包只发顶层 *.js，test/ 和 bench/ 不随包走，缺这些目录属正常
+```
 
 Install from the DSH Plugin Manager (search `dsh-lite-memory`), or `npm pack` and install the resulting `.tgz` through it.
 
