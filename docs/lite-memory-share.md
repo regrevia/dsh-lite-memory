@@ -100,7 +100,7 @@ scope → 状态（active / 未过期 / 未换代）→ 权限 → 条件（硬�
 | 单写者锁（`wx` + owner token，只有持有者能释放） | `state.js:442` / `:500` / `:517` | 两进程同时写，后写的覆盖前写的，无报错 |
 | 校验和 | `checksumOf:555`、门禁 `:698` | 手改后 `checksum` 不匹配，下次读直接硬失败「校验和不一致」 |
 | 原子发布（先写 `state.prev.json`，再替换） | `publish:786` / `:790` | 半写状态被读到，条目丢失 |
-| 容量闸（2 MiB、每层 1000 条 active） | `budget_exhausted:803`、`enforceBudget:856` | 越过闸门，写入静默失败或撑爆 |
+| 容量闸（2 MiB、每层 1000 条 active） | `budget_exhausted:804`、`enforceBudget:848` | 越过闸门，写入静默失败或撑爆 |
 
 `generation` / `epoch` 也在同一份状态里，直改不会有正确的递增。
 
