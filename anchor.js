@@ -392,11 +392,6 @@ function normalizeTasksShallow(raw) {
   return base;
 }
 
-export function focusOf(tasks, sessionId) {
-  const normalized = normalizeTasks(tasks);
-  return normalized.sessions[String(sessionId || '')] || null;
-}
-
 function episodeOf(tasks, episodeId) {
   return episodeId ? tasks.episodes[episodeId] || null : null;
 }
@@ -785,14 +780,4 @@ export function setDefault(tasksInput, input = {}) {
   };
   tasks.revision += 1;
   return tasks;
-}
-
-export function closeSession(tasksInput, sessionId) {
-  const tasks = normalizeTasks(tasksInput);
-  const anchor = tasks.sessions[String(sessionId || '')];
-  if (!anchor) return { tasks, changed: false };
-  anchor.status = 'closed';
-  anchor.updatedAt = new Date().toISOString();
-  tasks.revision += 1;
-  return { tasks, changed: true };
 }

@@ -807,10 +807,6 @@ function publish(scope, next, hadCurrent) {
   return { durability };
 }
 
-function countActive(state) {
-  return state.entries.filter((entry) => entry.status === 'active').length;
-}
-
 /**
  * 一条占多少字节：正文 + 标题/摘要/标签（和展示与检索用到的字段一致）。
  * 预算按这个算，capacityOf 报出来的数字才对得上。
@@ -836,10 +832,6 @@ export function fieldsBytesOf(current) {
     selection: current.selection || null,
     links: Array.isArray(current.links) ? current.links : [],
   });
-}
-
-function activeBytesOf(state) {
-  return state.entries.reduce((sum, entry) => (entry.status === 'active' ? sum + entryBytesOf(entry) : sum), 0);
 }
 
 function entryLastTouch(entry) {
@@ -1401,10 +1393,6 @@ export function sealPrev(scope) {
   const current = stateFile(scope);
   if (!fs.existsSync(current)) throw new StateError('unavailable', '状态还没发布，不能封存 prev');
   writeDurable(prevFile(scope), fs.readFileSync(current, 'utf8'));
-}
-
-export function removePrev(scope) {
-  fs.rmSync(prevFile(scope), { force: true });
 }
 
 /** 屏障只在 intent 存在期间生效：它不含标题与正文，只记身份与两个固定 epoch。 */

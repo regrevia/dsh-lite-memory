@@ -919,16 +919,6 @@ export function toModelView(record, purpose, extra = {}) {
   return null;
 }
 
-/** 错误出口也只带状态与一句原因：不泄露路径、维护字段或正文。 */
-export function errorView(code, message) {
-  return {
-    error: {
-      code: plain(code, 40) || 'failed',
-      message: plain(message, 120) || '操作没有完成',
-    },
-  };
-}
-
 /** 宿主合成的「用户消息」不是用户说的话：提示查询只认 source.kind === 'user'。 */
 const SYNTHETIC_PREFIXES = [
   'Current runtime context',

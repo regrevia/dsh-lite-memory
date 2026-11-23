@@ -17,7 +17,6 @@ export const PREFERENCE_DIMENSIONS = {
 };
 
 export const DIMENSION_NAMES = Object.keys(PREFERENCE_DIMENSIONS);
-export const MAX_DIMENSIONS = 12;
 export const NEUTRAL_VALUES = ['unknown', 'insufficient', 'contextual'];
 export const BASIS_VALUES = ['explicit_feedback', 'repeat_choice', 'manual_edit'];
 

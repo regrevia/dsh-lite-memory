@@ -13,8 +13,6 @@ import { createHash } from 'node:crypto';
 import { CARD, recallCards, recallRank } from './view.js';
 import { retrievalPlanOf } from './scheduler.js';
 
-export const EVOLVE_VERSION = 1;
-
 /** 白名单参数与离散档位：每档之间一次只走一格。 */
 export const PARAM_SPACE = {
   floor: [2.0, 2.2, 2.4, 2.6],

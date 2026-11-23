@@ -26,10 +26,6 @@ const SECRET_PATTERNS = [
   /[A-Za-z0-9+/]{60,}={0,2}/,
 ];
 
-/** A summary is a noun phrase. An imperative turns a note into an instruction. */
-
-const SUGGESTION_ID = /^sug_[a-z0-9]{6,}$/;
-
 /**
  * 旧版把超长摘要的原文托管在正文末尾，用这个标记分隔。
  * 现在只拿它做保守识别：旧正文可以标记待整理，但绝不改写；新写入也不再产生尾巴。
@@ -919,11 +915,6 @@ export function similarTarget(entries, draft) {
     return true;
   });
   return compatible[0] || null;
-}
-
-/** 没有合并时，把最接近的那条报出来：看得到，才有可能纠正。 */
-export function nearestEntry(entries, title, summary) {
-  return similarEntries(entries, title, summary, 1)[0] || null;
 }
 
 /** 旧版本整段保留，字段齐全，恢复时可以连标题与条件一起还原。
@@ -2613,7 +2604,6 @@ function readCitationRow(sessionId, row) {
  * ------------------------------------------------------------------ */
 
 export const MEMORY_CLASSES = ['personal_preference', 'project_fact', 'environment_fact', 'portable_procedure'];
-export const DURABILITIES = ['durable', 'task'];
 
 const ENVIRONMENT_KEYS = ['machine', 'targetOs', 'runtime', 'shell'];
 /** 一台机器/一次运行才算收住本机痕迹；只写操作系统名（targetOs）换台机器照样不成立。 */
