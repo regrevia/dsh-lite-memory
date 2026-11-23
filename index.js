@@ -1931,7 +1931,7 @@ export function apply(ctx, config) {
 
   const EXPERIMENT_INDEX_HEADER = '项目里这些记忆范围可能适用当前任务（未绑定）；需要细节再用 memory_search 带上 contextId：';
   const EXPERIMENT_RULES_HEADER = '项目实验规则（只在当前任务条件匹配时适用；细节用 memory_read 取正文，别凭标题猜）：';
-  const EXPERIMENT_BYTES = 1200;
+  const EXPERIMENT_BYTES = view.CARD.bytes;
   const EXPERIMENT_SHORT_CHARS = 240;
 
   /** 登记过的栏目只能来自项目里已有的条件、默认值和实验条目，不从自由措辞里新造。 */
