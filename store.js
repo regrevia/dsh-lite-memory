@@ -1972,7 +1972,6 @@ export function runtimeLayers(scope) {
   return out;
 }
 
-/** 按 id 在项目层与全局层里找位置，不靠文案猜作用域；管理动作也要看得见已归档的条目。 */
 /**
  * 标题是唯一对外的句柄：当前项目找不到，就去全局和别的项目层找。
  * 只用于读路径（读正文、查关联、解析标题）；写入仍然只动自己那层。
@@ -1998,6 +1997,7 @@ export function locate(scope, id, options = {}) {
    * 默认只看当前层和全局：面板/HTTP 用 id 探正文时跨层就是越权。
    * 工具侧按标题读，明确传 crossLayer 才跨层（标题是用户给的句柄）；
    * 显式指定某一层时只给那一层，绝不拿项目层去命中全局条目。
+   * 按 id 找位置、不靠文案猜作用域；管理动作也要看得见已归档的那条。
    */
   const sources = Array.isArray(options.layers) && options.layers.length
     ? options.layers
