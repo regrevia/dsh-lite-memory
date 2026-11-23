@@ -845,10 +845,8 @@ const IDLE_MS = 7 * 24 * 60 * 60 * 1000;
  * 到硬上限不拒绝新记忆：把同层最久没被读/更新的一条标成归档（正文保留），
  * 返回动了哪些，让工具结果里说清楚。真腾不出位置才报 budget_exhausted。
  */
-export function enforceBudget(state, scope) {
-  if (scope && scope.key === 'global') {
-    // 全局层与项目层共用同一套条数与字节预算，只是各自独立计算。
-  }
+export function enforceBudget(state) {
+  // 全局层与项目层共用同一套条数与字节预算，只是各自独立计算，这里不分层处理。
   const evicted = [];
   const now = Date.now();
   for (;;) {
@@ -1291,7 +1289,7 @@ export function transact(scope, options, work) {
     if (!outcome.changed) {
       return { changed: false, state: loaded.state, result: outcome.result, archived: [] };
     }
-    const evicted = enforceBudget(draft, scope);
+    const evicted = enforceBudget(draft);
     if (nextEpoch) draft.epoch = nextEpoch;
     draft.generation = loaded.state.generation + 1;
     draft.updatedAt = new Date().toISOString();
