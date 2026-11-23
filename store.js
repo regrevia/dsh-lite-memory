@@ -719,10 +719,6 @@ function recordSize(record) {
   return Buffer.byteLength(JSON.stringify({ ...record, versions: [] }));
 }
 
-function activeBytes(index, skipId) {
-  return index.entries.reduce((sum, item) => (item.id === skipId ? sum : sum + (item.bytes || 0)), 0);
-}
-
 /** 归档不是删除：条目标成 archived，正文与旧版本原样留在状态里，检索与提示不再返回。 */
 function archiveEntry(scope, index, entry) {
   const body = readBody(scope, entry.id);
