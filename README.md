@@ -130,6 +130,22 @@ Plugin Manager 里搜 `dsh-lite-memory` 直接装；或 `npm pack` 后用 Plugin
 
 Install from the DSH Plugin Manager (search `dsh-lite-memory`), or `npm pack` and install the resulting `.tgz` through it.
 
+## 本地开发 / Local development
+
+**不要在外置卷或网络盘上开发、测试、跑 git。** 实测后果：同一份 pack 在 U 盘上连读三次得到三个不同哈希，`git fsck` 报 `pack checksum mismatch` / `index CRC mismatch`，`git reset --hard` 之后工作树文件被改成别的字节——退出码绿着，代码已经不对了。
+
+开发副本放内部磁盘；装进 profile 用 Plugin Manager（`file:` 依赖），别手改 `node_modules`。判断一份副本还能不能用，看三件事，不看 `git status`：
+
+```bash
+git fsck --full                      # 必须全程无输出
+git status --porcelain               # 必须为空
+for f in $(git ls-files); do a=$(md5 -q "$f"); b=$(git cat-file -p "HEAD:$f" | md5 -q); [ "$a" = "$b" ] || echo "DIFF $f"; done
+```
+
+外置卷上 `git fsck` 的输出只能当参考：它会间歇性报错、下一次又干净。
+
+**Never develop, test, or run git on a removable or network volume.** Measured: one pack read three times gave three different hashes, `git fsck` reported checksum and CRC mismatches, and `git reset --hard` left worktree files with different bytes while the exit code stayed green. Keep the working clone on the internal disk, install through the Plugin Manager, and verify with `git fsck --full` plus the per-file md5 sweep above.
+
 ## 工具 / Tools
 
 `memory_save` · `memory_suggest` · `memory_search` · `memory_read` · `memory_forget`
