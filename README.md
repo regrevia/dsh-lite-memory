@@ -128,6 +128,8 @@ Off by default, per project only. When enabled it distills a few project rules f
 
 Plugin Manager 里搜 `dsh-lite-memory` 直接装；或 `npm pack` 后用 Plugin Manager 安装生成的 `.tgz`。
 
+开发中要装本机改动，用本地路径依赖而不是改 `node_modules`：profile 的 `package.json` 里写 `"dsh-lite-memory": "file:/绝对路径/dsh-lite-memory"`，经 Plugin Manager 重新安装后 `node_modules/dsh-lite-memory` 会指向该目录。
+
 Install from the DSH Plugin Manager (search `dsh-lite-memory`), or `npm pack` and install the resulting `.tgz` through it.
 
 ## 本地开发 / Local development
@@ -148,7 +150,7 @@ for f in $(git ls-files); do a=$(md5 -q "$f"); b=$(git cat-file -p "HEAD:$f" | m
 
 ## 工具 / Tools
 
-`memory_save` · `memory_suggest` · `memory_search` · `memory_read` · `memory_forget`
+`memory_save` · `memory_suggest` · `memory_search` · `memory_read` · `memory_forget` · `memory_persona` · `memory_tune`
 
 完整触发规则见 [TRIGGERS.md](TRIGGERS.md)，内部判定契约（准入顺序、状态码、写入/更新/失败语义）见 [docs/CONVENTIONS.md](docs/CONVENTIONS.md)；性能与 UI 门禁的实测数字见 [docs/BENCH.md](docs/BENCH.md)。 / Full trigger rules: [TRIGGERS.md](TRIGGERS.md); internal decision contract: [docs/CONVENTIONS.md](docs/CONVENTIONS.md); measured performance and UI-gate evidence: [docs/BENCH.md](docs/BENCH.md).
 
