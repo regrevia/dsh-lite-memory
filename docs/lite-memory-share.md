@@ -40,6 +40,10 @@
 注意：14 ms / 3 ms 是「单查询、50/53 条 active、拍平后纯内存打分」的口径，
 不是 `bench/scale.mjs` 的档位数字，两者不要混着引用。
 
+2026-11-24 复测（同一台机器，同一条查询，冷启动含读盘与 `JSON.parse`）：
+`global` 51 条 active 26.19 ms，`Desktop-DSH-8963bce6` 53 条 active 5.55 ms。
+`global` 那次是进程内第一次读，把 Node 的磁盘缓存也算进去了；量产口径看第二次的数。
+
 ## 三、名称与分层（建议，未落地）
 
 现有插件 `dsh-lite-memory` 不改名、数据不迁移、配置不动。新的公共命名只用在分层上：
@@ -49,10 +53,29 @@
 | `lite-memory-core` | `state.js` / `store.js` / `view.js` + root 解析、scope 判定、条件匹配、排序、版本/锁/校验和/归档 |
 | `lite-memory`（命令） | 本机 CLI，读写都走 core，不直接碰 JSON |
 | `lite-memory-mcp` | 对外的 MCP 服务：`memory_context` / `memory_search` / `memory_read` |
-| `dsh-lite-memory` | DSH 适配层，内部调 core，保持现有 8 个工具签名不变 |
+| `dsh-lite-memory` | DSH 适配层，内部调 core，保持现有 7 个工具签名不变 |
 
-今天是 `index.js` 单文件入口 + 8 个工具（`memory_save` / `suggest` / `search` / `read` / `forget` / `persona` / `tune` + 2 个 slot），
-`package.json` 没有 `bin`，也没有任何 HTTP / stdio / MCP 出口。所以「别的 agent 拿不到」不是权限问题，是没有出口。
+今天是 `index.js` 单文件入口 + 7 个工具（`memory_save` / `suggest` / `search` / `read` / `forget` / `persona` / `tune`，
+见 `index.js:121` 的 `MEMORY_TOOLS`），`package.json` 没有 `bin`，也没有 stdio / MCP 出口。
+
+有一条 HTTP 路，但它不是给外部的出口：`index.js:123` 的 `/lite-memory` 前缀路由（`index.js:3437` 注册）
+由 `keepHandler` 接，先过 `sameSurface(origin, webServer.getOrigin())`，服务的是面板自己那 14 个动作
+（`keep` / `undo` / `overview` / `body` / `persona` / `tune` …）。
+
+2026-11-24 实测，对着 `http://127.0.0.1:58556/lite-memory/overview` 发 POST：
+
+| 请求 | 响应 |
+| --- | --- |
+| 不带 `Origin` | `401 unauthorized` |
+| `Origin: http://evil.example` | `403 forbidden` |
+
+两个响应体都是宿主自己的单词，不是插件那套 `{ok,reason}` JSON ⇒ 拦在宿主层，插件的手都没伸到。
+所以「别的 agent 拿不到」不是权限问题，是没有出口；`sameSurface` 对空 `Origin` 返回 `true`
+这一条只对宿主已经放行的调用方成立，别拿它当绕过路径。
+
+工具也不是装了插件就人人有：`desktop` 之外的 profile（`web` / `headless` / `bench`）里没有这个包，
+同一个宿主里则按项目开关逐个放行——`index.js:1561 memoryOnForAgent` 判断，关掉的项目走
+`syncMemoryTools` 的 `restrict({ deny: MEMORY_TOOLS })` 把这 7 个工具从该 agent 的工具面里摘掉。
 
 ## 四、身份：三类 id，不要合成一个
 
