@@ -1,4 +1,4 @@
-# dsh-lite-memory
+# lite-memory
 
 **全库不常驻：没有命中的轮次不追加记忆内容，命中时最多三条卡片，正文按需读。**
 **Nothing resident: a turn that misses adds no memory text; a hit adds at most three cards, bodies read on demand.**
@@ -128,12 +128,12 @@ Off by default, per project only. When enabled it distills a few project rules f
 
 Plugin Manager 里搜 `dsh-lite-memory` 直接装；或 `npm pack` 后用 Plugin Manager 安装生成的 `.tgz`。
 
-开发中要装本机改动，用本地路径依赖而不是改 `node_modules`：profile 的 `package.json` 里写 `"dsh-lite-memory": "file:/绝对路径/dsh-lite-memory"`，再经 Plugin Manager 重新安装。
+开发中要装本机改动，用本地路径依赖而不是改 `node_modules`：profile 的 `package.json` 里写 `"dsh-lite-memory": "file:/绝对路径/lite-memory"`，再经 Plugin Manager 重新安装。
 
 装完确认跑的是哪一份，别信目录名——`profiles/<名字>/plugins/<包名>` 是旧布局的残留，profile 的 `cordis.yml` 已经不引用它，里面可能停在几个月前的版本。以 `node_modules/<包名>` 为准，逐个文件比 md5：
 
 ```bash
-R=/Users/apple/DSH-repo/dsh-lite-memory
+R=/Users/apple/DSH-repo/lite-memory
 cd ~/.dsh/profiles/desktop/node_modules/dsh-lite-memory
 for f in $(ls *.js 2>/dev/null); do
   [ "$(md5 -q "$f")" = "$(GIT_CONFIG_COUNT=0 git -C "$R" cat-file -p "HEAD:$f" | md5 -q)" ] || echo "DIFF $f"
