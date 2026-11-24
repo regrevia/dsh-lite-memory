@@ -840,10 +840,6 @@ const selectionKeyOf = (selection) => {
 
 const triggerKeyOf = (row) => JSON.stringify([...(row.triggers || [])].map(String).sort());
 
-const linkKeyOf = (row) => JSON.stringify([...(row.links || [])]
-  .map((link) => [String(link.type || 'related'), String(link.id)])
-  .sort((a, b) => a[1].localeCompare(b[1])));
-
 /** 适用范围仍是推断出来的值也算数：显式写 conditional 与靠条件推出来的是同一档。 */
 function applicabilityOf(row) {
   return view.validateApplicability(row.applicability, row.conditions || [], row.selection || null, row.when || '');
