@@ -46,6 +46,11 @@
 
 ## 三、名称与分层（建议，未落地）
 
+GitHub 仓库 2026-11-24 已改名为 `regrevia/lite-memory`（旧 URL 301，`raw.githubusercontent.com`
+上的旧地址实测仍回 200，第三方索引不用改也不会断）。npm 包名仍是 `dsh-lite-memory`，
+`package.json` 的 `name` 不动：已发布的包名一改就是新包，别人的依赖、profile 里的
+`file:`/`link:` 条目、`cordis.patch.yml` 全要跟着动。
+
 现有插件 `dsh-lite-memory` 不改名、数据不迁移、配置不动。新的公共命名只用在分层上：
 
 | 名字 | 角色 |

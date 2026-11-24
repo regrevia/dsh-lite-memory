@@ -67,11 +67,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/regrevia/dsh-lite-memory.git"
+    "url": "git+https://github.com/regrevia/lite-memory.git"
   },
-  "homepage": "https://github.com/regrevia/dsh-lite-memory#readme",
+  "homepage": "https://github.com/regrevia/lite-memory#readme",
   "bugs": {
-    "url": "https://github.com/regrevia/dsh-lite-memory/issues"
+    "url": "https://github.com/regrevia/lite-memory/issues"
   },
   "author": {
     "name": "regrevia",
