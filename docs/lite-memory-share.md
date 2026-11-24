@@ -51,6 +51,11 @@ GitHub 仓库 2026-11-24 已改名为 `regrevia/lite-memory`（旧 URL 301，`ra
 `package.json` 的 `name` 不动：已发布的包名一改就是新包，别人的依赖、profile 里的
 `file:`/`link:` 条目、`cordis.patch.yml` 全要跟着动。
 
+本机开发目录同步从 `DSH-repo/dsh-lite-memory` 改成 `DSH-repo/lite-memory`，profile 的 `file:`
+依赖和 lockfile 已跟着改。插件身份一个没动：包名、`client.js` 的 factory `id`、`cordis.patch.yml`
+的 `name`、磁盘格式串（`dsh-lite-memory/state@4`、`/move@1`）保持原样——格式串是已有记忆文件的
+落盘身份，改了等于把用户数据判成 `invalid`，要认回来就得再加一条 legacy 分支。
+
 现有插件 `dsh-lite-memory` 不改名、数据不迁移、配置不动。新的公共命名只用在分层上：
 
 | 名字 | 角色 |
