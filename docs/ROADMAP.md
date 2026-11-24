@@ -62,6 +62,23 @@
 - P2 明确拒答（abstain）：区分「不适用 / 已失效 / 与当前规则冲突 / 曾被否定 / 证据不足」，证据不足时宁可沉默。
 - 暂不做：完整向量库、完整图谱引擎、每轮自动反思、无上限自动记忆、自主改检索算法、复杂遗忘评分。
 
+## 分支收敛（2026-11-24 结论）
+
+两条长期停在远端的分支都已被 `main` 完全包含，合并会倒退，只做记录后关闭。
+
+- `origin/win/windows-compat` @ `856b4ea`：3 个独有提交（`3fe130f` 注入 Windows 真会抛的失败、
+  `9f34993` CI 加 `windows-latest` + `layer-read.test.mjs` 的 BOM、`856b4ea` 仓库根按解析结果比较）。
+  三条的内容 `main` 上都已经有：`git diff main origin/win/windows-compat -- .github/workflows/ci.yml test/ha.test.mjs`
+  为空，`test/layer-read.test.mjs` 只剩 `main` 故意去掉的 BOM，`test/state.test.mjs` 在分支上还是旧的
+  `pathId` + CRLF 归一化版本，`main` 用的是 `realpathSync` 那版。
+- `backup-main-before-rebase` @ `a1c5c2a`：`git cherry main backup-main-before-rebase` 35 行全是 `-`，
+  即 35 个「不在 main 历史上」的提交全部与 `main` 上的提交补丁等价。它是 rebase 前的安全副本，
+  保留价值只在这段历史本身，内容没有独占的。
+
+恢复（任一条真要捡回来，把 sha 推回去即可）：
+`git push origin 856b4eae57b2262b31f56f1ef0fe990a22487f25:refs/heads/win/windows-compat`、
+`git push origin a1c5c2a6cf959ef25900b47612720eb1f4861a8d:refs/heads/backup-main-before-rebase`。
+
 ## 已知未做（有判断，没动手）
 
 - 价值裁决的半衰期加权：结论上应该按「这条帮到过」的时间衰减排序，只在同分时用它裁决。但现在能观测的只有 `hits`（被投递）和 `used`（被读过），两者都不等于有用，也没有「帮到了」的反馈通道；硬做就是把「被读」当「有用」，长文档会越排越前。等出现可归因信号（例如模型在回答里标明用了哪条）再补，不拿 `lastUsed` 顶替。
